@@ -1,0 +1,22 @@
+services:
+  mongo:
+    image: mongo:7
+    container_name: camping-mongo
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:-camping}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:-camping-local-only}
+      MONGO_INITDB_DATABASE: camping
+    ports:
+      # 27019 on the host to avoid clashing with other local Mongo containers
+      - "${MONGO_PORT:-27019}:27017"
+    volumes:
+      - camping-mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  camping-mongo-data:
