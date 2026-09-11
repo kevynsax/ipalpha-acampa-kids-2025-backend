@@ -4,6 +4,7 @@ import { findCamperById } from "../models/campers";
 import { insertOccurrence, listOccurrences } from "../models/occurrences";
 import { findStaffById } from "../models/staff";
 import { cleanHtml } from "../services/html";
+import { notifyOccurrence } from "../services/notify";
 import { publish } from "../services/realtime";
 import { resolveScope } from "../services/scope";
 import type { Occurrence, OccurrencePerson, Role, SessionUser } from "../types";
@@ -106,6 +107,7 @@ occurrences.post("/", async (c) => {
     createdByRole: c.get("activeRole"),
   });
   publish("occurrences");
+  void notifyOccurrence(created);
   return c.json({ occurrence: serializeOccurrence(created) }, 201);
 });
 

@@ -27,6 +27,13 @@ export async function findById(id: string): Promise<User | null> {
   return toUser(await db.collection("users").findOne({ _id: new ObjectId(id) }));
 }
 
+/** Every account holding the admin role (name + phone). */
+export async function listAdmins(): Promise<User[]> {
+  const db = await getDb();
+  const docs = await db.collection("users").find({ roles: "admin" }).sort({ name: 1 }).toArray();
+  return docs.map((d) => toUser(d as Record<string, unknown>)!);
+}
+
 export async function updateUser(id: string, patch: Record<string, unknown>): Promise<void> {
   const db = await getDb();
   await db

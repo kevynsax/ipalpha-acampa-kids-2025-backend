@@ -12,6 +12,7 @@ import {
 } from "../models/instructions";
 import { cleanHtml } from "../services/html";
 import { publish } from "../services/realtime";
+import { notifyInstructionChange } from "../services/notify";
 import { isEmojiLike } from "../utils";
 import type { InstructionDoc, Role, SessionUser } from "../types";
 
@@ -93,6 +94,7 @@ instructions.post("/", requireAdmin, async (c) => {
   if (!("patch" in result)) return fail(c, result.code, result.message);
   const created = await insertInstruction({ ...(result.patch as InstructionData), order: await nextInstructionOrder() });
   publish("instructions");
+  void notifyInstructionChange(null, created);
   return c.json({ instruction: serializeInstruction(created) }, 201);
 });
 
@@ -119,6 +121,7 @@ instructions.put("/:id", requireAdmin, async (c) => {
   if (!("patch" in result)) return fail(c, result.code, result.message);
   const updated = await updateInstruction(existing._id, result.patch);
   publish("instructions");
+  void notifyInstructionChange(existing, updated!);
   return c.json({ instruction: serializeInstruction(updated!) });
 });
 

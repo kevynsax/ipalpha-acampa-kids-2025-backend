@@ -26,8 +26,10 @@ import preparationRoutes from "./routes/preparation";
 import instructionRoutes from "./routes/instructions";
 import occurrenceRoutes from "./routes/occurrences";
 import fileRoutes from "./routes/files";
+import aiRoutes from "./routes/ai";
 import { comteleEnabled } from "./services/comtele";
 import { scheduleCheckinWindow } from "./services/realtime";
+import { syncWelcomes } from "./services/notify";
 import { getSettings } from "./models/settings";
 
 const app = new Hono();
@@ -57,6 +59,8 @@ app.route("/api/instructions", instructionRoutes);
 app.route("/api/occurrences", occurrenceRoutes);
 // images for the WYSIWYG editor (upload: admin / organizer / medical; read: public, unguessable ids)
 app.route("/api/files", fileRoutes);
+// AI helper for the WYSIWYG editor (proxies the OpenAI-compatible gateway; AI_API_KEY)
+app.route("/api/ai", aiRoutes);
 // WebSocket: full snapshot on connect + live updates after every write (see services/realtime.ts)
 app.route("/api/realtime", realtimeRoutes);
 
@@ -76,7 +80,11 @@ await ensureOccurrenceIndexes();
 await ensureFileIndexes();
 console.log(`MongoDB connected → ${config.dbName}`);
 // re-arm the check-in window timers (they live in memory)
-scheduleCheckinWindow((await getSettings()).checkinWindow);
+{
+  const s = await getSettings();
+  scheduleCheckinWindow(s.checkinWindow, s.staffAccessWindow);
+  void syncWelcomes(); // the team window may have opened while the server was down
+}
 
 console.log(
   comteleEnabled()
@@ -88,6 +96,8 @@ export default {
   port,
   fetch: app.fetch,
   websocket,
+  // Bun drops idle connections after 10s by default; reasoning models (AI helper) can stay silent longer
+  idleTimeout: 255,
 };
 
 console.log(`🏕️  Camping backend listening on http://localhost:${port}`);

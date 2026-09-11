@@ -12,13 +12,16 @@ export const DEFAULT_SETTINGS: Settings = {
     lng: -46.83077891444747,
     radiusM: 300,
   },
-  notifications: { bedroomChanges: true, roleChanges: true, checkinConfirmation: true },
+  notifications: { bedroomChanges: true, roleChanges: true, checkinConfirmation: true, contentChanges: true, staffChanges: true, enrolments: true, occurrences: true },
   checkinWindow: { from: null, until: null },
   checkinHelpers: { staffIds: [] },
   busHelpers: { helpers: [] },
   organizers: { staffIds: [] },
   medicalStaff: { staffIds: [] },
   parentContacts: [],
+  staffAccessWindow: { from: null, until: null },
+  checkinTestMode: false,
+  kidsRoomsDraft: false,
   updatedAt: null,
 };
 
@@ -34,6 +37,14 @@ function asDate(v: unknown): Date | null {
 /** Is the check-in window open at `now`? (needs both ends) */
 export function checkinWindowOpen(w: CheckinWindow, now = new Date()): boolean {
   return !!w.from && !!w.until && w.from <= now && now < w.until;
+}
+
+/** Is the ordinary team's access window open? Unlike the check-in window, an UNSET window means "always". */
+export function staffAccessOpen(w: CheckinWindow, now = new Date()): boolean {
+  if (!w.from && !w.until) return true;
+  if (w.from && now < w.from) return false;
+  if (w.until && now >= w.until) return false;
+  return true;
 }
 
 function toStaffList(raw: unknown): StaffList {
@@ -79,10 +90,17 @@ function toSettings(doc: Record<string, unknown> | null): Settings {
     organizers: toStaffList(doc.organizers),
     medicalStaff: toStaffList(doc.medicalStaff),
     parentContacts: toParentContacts(doc.parentContacts),
+    staffAccessWindow: toWindow(doc.staffAccessWindow),
+    checkinTestMode: doc.checkinTestMode === true,
+    kidsRoomsDraft: doc.kidsRoomsDraft === true,
     notifications: {
       bedroomChanges: typeof n.bedroomChanges === "boolean" ? n.bedroomChanges : DEFAULT_SETTINGS.notifications.bedroomChanges,
       roleChanges: typeof n.roleChanges === "boolean" ? n.roleChanges : DEFAULT_SETTINGS.notifications.roleChanges,
       checkinConfirmation: typeof n.checkinConfirmation === "boolean" ? n.checkinConfirmation : DEFAULT_SETTINGS.notifications.checkinConfirmation,
+      contentChanges: typeof n.contentChanges === "boolean" ? n.contentChanges : DEFAULT_SETTINGS.notifications.contentChanges,
+      staffChanges: typeof n.staffChanges === "boolean" ? n.staffChanges : DEFAULT_SETTINGS.notifications.staffChanges,
+      enrolments: typeof n.enrolments === "boolean" ? n.enrolments : DEFAULT_SETTINGS.notifications.enrolments,
+      occurrences: typeof n.occurrences === "boolean" ? n.occurrences : DEFAULT_SETTINGS.notifications.occurrences,
     },
     checkinLocation: {
       lat: typeof loc.lat === "number" ? loc.lat : DEFAULT_SETTINGS.checkinLocation.lat,

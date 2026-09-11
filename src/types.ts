@@ -146,6 +146,8 @@ export interface Staff {
    * only they (and the admin) see it.
    */
   prepDone: string[];
+  /** when the welcome SMS (app link) went out — null until then; it is sent ONCE, ever (see services/notify.ts syncWelcomes) */
+  welcomeSentAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -375,6 +377,14 @@ export interface NotificationSettings {
   roleChanges: boolean;
   /** the person's church check-in was recorded (by themselves or by the admin roll call) */
   checkinConfirmation: boolean;
+  /** an Instruções document / Preparação section was created or edited, or the instructions / preparation text of one of the person's roles changed */
+  contentChanges: boolean;
+  /** the person's OWN allocation changed: bedroom, team or vehicle (bus) */
+  staffChanges: boolean;
+  /** the person was added to the team, or to an admin list (organizer, check-in / bus helper, medical, parent contact) — always carries the app link */
+  enrolments: boolean;
+  /** an occurrence was registered (by the admin or the medical team) — every admin is texted */
+  occurrences: boolean;
 }
 
 /** The time window in which the check-in helpers (church AND bus) may act. Both ends must be set for it to ever open. */
@@ -446,6 +456,20 @@ export interface Settings {
   medicalStaff: StaffList;
   /** ordered contacts that will be shared with parents */
   parentContacts: ParentContact[];
+  /**
+   * When ORDINARY team members (not organizers, check-in helpers, medical
+   * team or parent contacts) may use the app. Both ends null = always. Outside
+   * it the server sends them nothing (see services/scope.ts).
+   */
+  staffAccessWindow: CheckinWindow;
+  /** test mode: church + bus check-in behave as if the window were open (the team's own self check-in is NOT affected) */
+  checkinTestMode: boolean;
+  /**
+   * The kids' room allocation is still a DRAFT: while true, ordinary room
+   * caretakers do not receive the kids of their room (admin, medical team and
+   * check-in helpers are unaffected) and no "kid moved room" SMS goes out.
+   */
+  kidsRoomsDraft: boolean;
   updatedAt: Date | null;
 }
 

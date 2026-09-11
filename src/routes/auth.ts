@@ -1,6 +1,9 @@
 import { Hono } from "hono";
 import { config } from "../config";
 import { findByPhone, toPublicUser, updateUser } from "../models/users";
+import { findStaffByPhone } from "../models/staff";
+import { getSettings } from "../models/settings";
+import { staffHasAccess } from "../services/scope";
 import { comteleEnabled, comteleSendSms } from "../services/comtele";
 import { generateLocalCode, hashCode, verifyLocalCode } from "../services/otp";
 import { createSession, revokeSession, verifySessionToken } from "../services/session";
@@ -18,6 +21,34 @@ interface AuthEnv {
 }
 
 const auth = new Hono<AuthEnv>();
+
+/**
+ * Ordinary team members may only log in inside `settings.staffAccessWindow`.
+ * Returns the error payload to send (403) when the window is closed, or null.
+ */
+async function staffWindowError(phone: string, role: Role) {
+  if (role !== "staff" && role !== "health_staff") return null;
+  const me = await findStaffByPhone(phone);
+  if (!me) return null;
+  const settings = await getSettings();
+  const now = new Date();
+  if (staffHasAccess(me._id, settings, now)) return null;
+  const { from, until } = settings.staffAccessWindow;
+  if (until && now >= until) {
+    return {
+      code: "STAFF_ACCESS_ENDED",
+      message: "O acampamento já terminou. Esperamos você no ano que vem!",
+      opensAt: from?.toISOString() ?? null,
+      closesAt: until.toISOString(),
+    };
+  }
+  return {
+    code: "STAFF_ACCESS_NOT_YET",
+    message: "O app ainda não está liberado para a equipe.",
+    opensAt: from?.toISOString() ?? null,
+    closesAt: until?.toISOString() ?? null,
+  };
+}
 
 /**
  * The same person can hold multiple roles (parent + staff + admin).
@@ -65,10 +96,29 @@ auth.post("/otp/request", async (c) => {
     );
   }
 
+  // ordinary team members: only inside the staff access window
+  const windowErr = await staffWindowError(phone, role);
+  if (windowErr) return c.json({ error: windowErr }, 403);
+
   // resend cooldown
   if (user.otp) {
     const secondsSince = (Date.now() - user.otp.requestedAt.getTime()) / 1000;
     if (secondsSince < config.otp.resendCooldownSeconds) {
+      // a code was sent moments ago and is still valid (e.g. user went back
+      // and re-entered the phone): don't block — reuse the last code sent
+      if (user.otp.expiresAt > new Date() && user.otp.attempts < config.otp.maxAttempts) {
+        return c.json({
+          success: true,
+          phone,
+          role,
+          roles: user.roles,
+          expiresAt: user.otp.expiresAt.toISOString(),
+          expireMinutes: config.otp.expireMinutes,
+          delivery: user.otp.provider === "comtele" ? "sms" : "mock",
+          reused: true,
+        });
+      }
+
       const secondsLeft = Math.ceil(config.otp.resendCooldownSeconds - secondsSince);
       return c.json(
         {
@@ -95,7 +145,7 @@ auth.post("/otp/request", async (c) => {
   if (viaSms) {
     const result = await comteleSendSms(
       phone,
-      `${config.comtele.prefix}: seu código de acesso é ${code}. Vale por ${config.otp.expireMinutes} minutos.`,
+      `${config.comtele.prefix}: ${code} é seu código de acesso. Vale por ${config.otp.expireMinutes} min. Se não foi você, ignore.`,
     );
     if (!result.ok) {
       console.error("[comtele] send failed:", result.message);
@@ -186,6 +236,10 @@ auth.post("/otp/verify", async (c) => {
       400,
     );
   }
+
+  // window may have closed between request and verify
+  const windowErr = await staffWindowError(phone, role);
+  if (windowErr) return c.json({ error: windowErr }, 403);
 
   // expired?
   if (user.otp.expiresAt <= new Date()) {

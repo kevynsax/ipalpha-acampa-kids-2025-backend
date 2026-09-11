@@ -94,6 +94,21 @@ export async function setCamperCheckin(id: string, kind: CheckinKind, checkin: C
   return toCamper(res as Record<string, unknown> | null);
 }
 
+/** Clears church + bus check-ins of every kid (rehearsal reset). Returns how many had one. */
+export async function resetCamperCheckins(): Promise<number> {
+  const db = await getDb();
+  const res = await db
+    .collection(COLLECTION)
+    .updateMany({ $or: [{ checkin: { $ne: null } }, { busCheckin: { $ne: null } }] }, { $set: { checkin: null, busCheckin: null, updatedAt: new Date() } });
+  return res.modifiedCount;
+}
+
+/** Wipes the audit trail (rehearsal reset). */
+export async function clearCheckinLog(): Promise<void> {
+  const db = await getDb();
+  await db.collection(LOG_COLLECTION).deleteMany({});
+}
+
 /** Append-only audit line: who did (or undid) a check-in and when. */
 export async function logCheckin(entry: Omit<CheckinLog, "_id">): Promise<void> {
   const db = await getDb();

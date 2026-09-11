@@ -1,7 +1,23 @@
 import { createMiddleware } from "hono/factory";
 import { findById, toPublicUser } from "../models/users";
-import { verifySessionToken } from "../services/session";
-import type { SessionUser } from "../types";
+import { revokeUserSessions, verifySessionToken } from "../services/session";
+import { getSettings } from "../models/settings";
+import { findStaffByPhone } from "../models/staff";
+import { staffHasAccess } from "../services/scope";
+import type { Role, SessionUser } from "../types";
+
+/**
+ * Ordinary team members lose their session the moment `staffAccessWindow`
+ * closes. Returns true when the session must be dropped (and drops it).
+ */
+export async function staffSessionExpired(role: Role, phone: string, userId: string): Promise<boolean> {
+  if (role !== "staff" && role !== "health_staff") return false;
+  const me = await findStaffByPhone(phone);
+  if (!me) return false;
+  if (staffHasAccess(me._id, await getSettings())) return false;
+  await revokeUserSessions(userId);
+  return true;
+}
 
 export const requireAuth = createMiddleware<{
   Variables: {
@@ -33,6 +49,13 @@ export const requireAuth = createMiddleware<{
   if (!user) {
     return c.json(
       { error: { code: "UNAUTHORIZED", message: "Usuário não encontrado." } },
+      401,
+    );
+  }
+
+  if (await staffSessionExpired(payload.role, user.phone, user._id)) {
+    return c.json(
+      { error: { code: "UNAUTHORIZED", message: "O período de acesso da equipe terminou." } },
       401,
     );
   }

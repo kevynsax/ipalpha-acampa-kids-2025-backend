@@ -1,6 +1,6 @@
-import { checkinWindowOpen, getSettings } from "../models/settings";
+import { checkinWindowOpen, getSettings, staffAccessOpen } from "../models/settings";
 import { findStaffByPhone } from "../models/staff";
-import type { CampEvent, Camper, Role, ScheduleRole, Staff } from "../types";
+import type { CampEvent, Camper, Role, ScheduleRole, Settings, Staff } from "../types";
 
 /**
  * Data scope of a session — the ONE place that decides what a non-admin may
@@ -38,6 +38,11 @@ import type { CampEvent, Camper, Role, ScheduleRole, Staff } from "../types";
  *                  never writes campers, rooms or check-ins. Staff / programme:
  *                  as any team member.
  *   parent       → nothing from these collections (categories only)
+ *
+ * ORDINARY team members (on none of the lists above, nor a parent contact)
+ * are further gated by `settings.staffAccessWindow`: outside it they get
+ * NO_ACCESS. `settings.checkinTestMode` makes the check-in window count as
+ * open for the church / bus helpers (testing before the real day).
  */
 export interface Viewer {
   activeRole: Role;
@@ -61,22 +66,46 @@ export type Scope =
       organizer: boolean;
       /** true when this person is on the MEDICAL team (no window): every camper + bedroom in full, read-only */
       medical: boolean;
+      /** true while the kids' room allocation is still a draft (Settings → Geral): the viewer's OWN room shows no kids */
+      kidsRoomsDraft: boolean;
     };
 
-export const NO_ACCESS: Scope = { all: false, staffId: null, bedroom: null, checkinHelper: false, busHelperVehicle: null, organizer: false, medical: false };
+export const NO_ACCESS: Scope = { all: false, staffId: null, bedroom: null, checkinHelper: false, busHelperVehicle: null, organizer: false, medical: false, kidsRoomsDraft: false };
+
+/** On some admin list (organizer, church / bus helper, medical, parent contact)? These people are never gated by the staff access window. */
+export function isPrivilegedStaff(staffId: string, s: Settings): boolean {
+  return (
+    s.organizers.staffIds.includes(staffId) ||
+    s.medicalStaff.staffIds.includes(staffId) ||
+    s.checkinHelpers.staffIds.includes(staffId) ||
+    s.busHelpers.helpers.some((h) => h.staffId === staffId) ||
+    s.parentContacts.some((p) => p.staffId === staffId)
+  );
+}
+
+/** May this team member use the app (and be notified) right now? Ordinary members only inside `staffAccessWindow`. */
+export function staffHasAccess(staffId: string, s: Settings, now = new Date()): boolean {
+  return isPrivilegedStaff(staffId, s) || staffAccessOpen(s.staffAccessWindow, now);
+}
 
 export async function resolveScope(viewer: Viewer): Promise<Scope> {
   if (viewer.activeRole === "admin") return { all: true };
   if (viewer.activeRole !== "staff" && viewer.activeRole !== "health_staff") return NO_ACCESS;
   const me = await findStaffByPhone(viewer.phone);
   if (!me || !me.active) return NO_ACCESS;
-  const { checkinWindow, checkinHelpers, busHelpers, organizers, medicalStaff } = await getSettings();
-  const windowOpen = checkinWindowOpen(checkinWindow);
-  const checkinHelper = windowOpen && checkinHelpers.staffIds.includes(me._id);
-  const busHelperVehicle = windowOpen ? (busHelpers.helpers.find((h) => h.staffId === me._id)?.vehicleId ?? null) : null;
+  const settings = await getSettings();
+  // ORDINARY team members (on no list at all) only get in during the staff access window
+  if (!staffHasAccess(me._id, settings)) return NO_ACCESS;
+  const { checkinWindow, checkinTestMode, checkinHelpers, busHelpers, organizers, medicalStaff, kidsRoomsDraft } = settings;
   const organizer = organizers.staffIds.includes(me._id);
   const medical = medicalStaff.staffIds.includes(me._id);
-  return { all: false, staffId: me._id, bedroom: me.bedroom, checkinHelper, busHelperVehicle, organizer, medical };
+  const listedChurch = checkinHelpers.staffIds.includes(me._id);
+  const linkedVehicle = busHelpers.helpers.find((h) => h.staffId === me._id)?.vehicleId ?? null;
+  // test mode opens the kids' roll calls for the helpers regardless of the window
+  const windowOpen = checkinTestMode || checkinWindowOpen(checkinWindow);
+  const checkinHelper = windowOpen && listedChurch;
+  const busHelperVehicle = windowOpen ? linkedVehicle : null;
+  return { all: false, staffId: me._id, bedroom: me.bedroom, checkinHelper, busHelperVehicle, organizer, medical, kidsRoomsDraft };
 }
 
 /** May this session write the programme (events, roles, assignments)? (admin or organizer) */
@@ -95,7 +124,7 @@ export function canRunBusCheckin(scope: Scope, k: Pick<Camper, "transportation">
 }
 
 export function canSeeBedroom(scope: Scope, bedroomId: string): boolean {
-  return scope.all || scope.medical || scope.checkinHelper || scope.busHelperVehicle !== null || (scope.bedroom !== null && scope.bedroom === bedroomId);
+  return scope.all || scope.medical || scope.checkinHelper || scope.busHelperVehicle !== null || (!scope.kidsRoomsDraft && scope.bedroom !== null && scope.bedroom === bedroomId);
 }
 
 /** "full" = whole record, "name" = roll-call view (no health / contacts / notes), "none" = invisible. */
@@ -103,7 +132,8 @@ export type CamperVisibility = "full" | "name" | "none";
 
 export function camperVisibility(scope: Scope, k: Pick<Camper, "bedroom" | "transportation">): CamperVisibility {
   if (scope.all || scope.medical || scope.checkinHelper) return "full";
-  if (k.bedroom !== null && k.bedroom === scope.bedroom) return "full";
+  // own room: hidden while the kids' allocation is still a draft
+  if (!scope.kidsRoomsDraft && k.bedroom !== null && k.bedroom === scope.bedroom) return "full";
   // a bus helper works the door of ONE vehicle: its kids, names only
   return scope.busHelperVehicle !== null && k.transportation === scope.busHelperVehicle ? "name" : "none";
 }
@@ -118,8 +148,14 @@ export type StaffVisibility = "full" | "name" | "none";
 export function staffVisibility(scope: Scope, s: Pick<Staff, "_id" | "bedroom">): StaffVisibility {
   if (scope.all || scope.organizer) return "full";
   if (scope.staffId === s._id) return "full";
-  if (scope.bedroom !== null && s.bedroom === scope.bedroom) return "name";
+  // roommates are unknown while the rooms are still a draft
+  if (!scope.kidsRoomsDraft && scope.bedroom !== null && s.bedroom === scope.bedroom) return "name";
   return "none";
+}
+
+/** While the rooms are a draft the viewer must not learn their OWN room either (admins / organizers excepted). */
+export function hideOwnBedroom(scope: Scope): boolean {
+  return !scope.all && !scope.organizer && scope.kidsRoomsDraft;
 }
 
 /**

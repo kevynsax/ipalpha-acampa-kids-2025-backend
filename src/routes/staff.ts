@@ -19,11 +19,11 @@ import {
 } from "../models/staff";
 import { logCheckin } from "../models/campers";
 import { STAFF_CATEGORY_KEYS, type Role, type SessionUser, type Staff } from "../types";
-import { resolveScope, staffVisibility, type Scope } from "../services/scope";
+import { hideOwnBedroom, resolveScope, staffVisibility, type Scope } from "../services/scope";
 import { bedroomFullMessage, isInvalid, parseBedroom, parseMulti, parseSingle, parseText } from "./_validate";
 import { distanceMeters, normalizeBrazilPhone, nowInSaoPauloWallClock, saoPauloWallClock, saoPauloWallClockToIso, todayInSaoPaulo } from "../utils";
 import { getSettings } from "../models/settings";
-import { notifyCheckin } from "../services/notify";
+import { notifyCheckin, notifyStaffChange, syncWelcomes } from "../services/notify";
 
 interface Env {
   Variables: {
@@ -58,7 +58,8 @@ export function serializeStaffFor(s: Staff, scope: Scope) {
   const vis = staffVisibility(scope, s);
   if (vis === "none") return null;
   const full = serialize(s);
-  if (vis === "full") return full;
+  // draft rooms: the person's own record travels without the bedroom
+  if (vis === "full") return hideOwnBedroom(scope) ? { ...full, bedroom: null } : full;
   return {
     ...full,
     redacted: true,
@@ -209,12 +210,14 @@ staff.get("/:id/detail", requireRole("admin", "staff", "health_staff"), async (c
   const scope = await resolveScope(c.get("user"));
   // the full detail (schedule, kids) is only for the admin or the person themself
   if (!s || staffVisibility(scope, s) !== "full") return fail(c, "STAFF_NOT_FOUND", "Membro da equipe não encontrado.", 404);
+  // draft rooms: no bedroom, kids or roommates for the person themself
+  const roomId = hideOwnBedroom(scope) ? null : s.bedroom;
 
   const [events, roles, bedroom, allStaff] = await Promise.all([
     listEvents(),
     listRoles(),
-    s.bedroom ? findBedroomById(s.bedroom) : null,
-    s.bedroom ? listStaff() : [],
+    roomId ? findBedroomById(roomId) : null,
+    roomId ? listStaff() : [],
   ]);
   const roleById = new Map(roles.map((r) => [r._id, r]));
 
@@ -243,11 +246,11 @@ staff.get("/:id/detail", requireRole("admin", "staff", "health_staff"), async (c
     })
     .filter((x): x is NonNullable<typeof x> => !!x);
 
-  const campers = s.bedroom ? await listCampers({ bedroom: s.bedroom }) : [];
-  const roommates = allStaff.filter((x) => x.bedroom === s.bedroom && x._id !== s._id);
+  const campers = roomId ? await listCampers({ bedroom: roomId }) : [];
+  const roommates = roomId ? allStaff.filter((x) => x.bedroom === roomId && x._id !== s._id) : [];
 
   return c.json({
-    staff: serialize(s),
+    staff: roomId === s.bedroom ? serialize(s) : { ...serialize(s), bedroom: null },
     bedroom: bedroom ? { id: bedroom._id, name: bedroom.name, group: bedroom.group } : null,
     schedule,
     campers: serializeCamperList(campers, scope),
@@ -411,6 +414,7 @@ staff.post("/", async (c) => {
 
   const created = await insertStaff(data);
   publish("staff", "bedrooms");
+  void syncWelcomes(); // welcome SMS with the app link — only if the team window is already open, never twice
   return c.json({ staff: serialize(created) }, 201);
 });
 
@@ -439,6 +443,9 @@ staff.put("/:id", async (c) => {
 
   const updated = await updateStaff(existing._id, result.patch);
   publish("staff", "bedrooms");
+  // fire-and-forget: the SMS never delays the write (deactivation is silent)
+  if (!existing.active && updated!.active) void syncWelcomes();
+  else if (updated!.active) void notifyStaffChange(existing, updated!);
   return c.json({ staff: serialize(updated!) });
 });
 

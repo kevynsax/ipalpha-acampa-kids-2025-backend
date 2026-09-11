@@ -12,6 +12,7 @@ import {
 } from "../models/preparation";
 import { cleanHtml } from "../services/html";
 import { publish } from "../services/realtime";
+import { notifyPreparationChange } from "../services/notify";
 import { isEmojiLike } from "../utils";
 import type { PrepSection, Role, SessionUser } from "../types";
 
@@ -91,6 +92,7 @@ preparation.post("/", requireAdmin, async (c) => {
   if (!("patch" in result)) return fail(c, result.code, result.message);
   const created = await insertPrepSection({ ...(result.patch as PrepSectionData), order: await nextPrepOrder() });
   publish("preparation");
+  void notifyPreparationChange(null, created);
   return c.json({ section: serializePrepSection(created) }, 201);
 });
 
@@ -117,6 +119,7 @@ preparation.put("/:id", requireAdmin, async (c) => {
   if (!("patch" in result)) return fail(c, result.code, result.message);
   const updated = await updatePrepSection(existing._id, result.patch);
   publish("preparation");
+  void notifyPreparationChange(existing, updated!);
   return c.json({ section: serializePrepSection(updated!) });
 });
 

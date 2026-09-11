@@ -9,9 +9,9 @@ import type { CheckinWindow, Role } from "../types";
  * ~40 rooms, ~50 events), which keeps the client logic a simple "replace".
  */
 
-export const COLLECTIONS = ["campers", "staff", "bedrooms", "categories", "roles", "events", "preparation", "instructions", "occurrences"] as const;
+export const COLLECTIONS = ["campers", "staff", "bedrooms", "categories", "roles", "events", "preparation", "instructions", "occurrences", "settings"] as const;
 export type Collection = (typeof COLLECTIONS)[number];
-export type Snapshot = Partial<Record<Collection, unknown[]>>;
+export type Snapshot = Partial<Record<Collection, unknown>>;
 
 export interface RealtimeClient {
   ws: WSContext;
@@ -86,6 +86,39 @@ async function flush(): Promise<void> {
   }
 }
 
+// ── staff access window: evict the ordinary team when it closes ─────────────
+
+/**
+ * Ordinary team members (see scope.staffHasAccess) may only use the app inside
+ * `settings.staffAccessWindow`. When it closes — the timer fires or the admin
+ * edits the window — their sessions are revoked and their sockets closed with
+ * 4401, so the phone logs out and wipes its local copy at once.
+ */
+export async function evictStaffOutsideWindow(): Promise<void> {
+  const [{ getSettings }, { findStaffByPhone }, { staffHasAccess }, { revokeUserSessions }] = await Promise.all([
+    import("../models/settings"),
+    import("../models/staff"),
+    import("./scope"),
+    import("./session"),
+  ]);
+  const settings = await getSettings();
+  const now = new Date();
+  for (const client of [...clients]) {
+    if (client.role !== "staff" && client.role !== "health_staff") continue;
+    const me = await findStaffByPhone(client.phone);
+    if (!me || staffHasAccess(me._id, settings, now)) continue;
+    await revokeUserSessions(client.userId);
+    try {
+      client.ws.send(JSON.stringify({ type: "error", code: "UNAUTHORIZED", message: "O período de acesso da equipe terminou." }));
+      client.ws.close(4401, "access window closed");
+    } catch {
+      /* already gone */
+    }
+    clients.delete(client);
+    console.log(`🚪 access window closed → logged out ${me.name}`);
+  }
+}
+
 // ── check-in window: re-push at both edges ──────────────────────────────────
 
 /**
@@ -97,22 +130,27 @@ async function flush(): Promise<void> {
 let edgeTimers: ReturnType<typeof setTimeout>[] = [];
 const MAX_TIMEOUT = 2 ** 31 - 1;
 
-export function scheduleCheckinWindow(w: CheckinWindow): void {
+export function scheduleCheckinWindow(w: CheckinWindow, staffAccess?: CheckinWindow): void {
   for (const t of edgeTimers) clearTimeout(t);
   edgeTimers = [];
   const now = Date.now();
-  for (const edge of [w.from, w.until]) {
+  for (const edge of [w.from, w.until, staffAccess?.from ?? null, staffAccess?.until ?? null]) {
     if (!edge) continue;
     const wait = edge.getTime() - now + 500; // a hair after, so the check sees the new state
     if (wait <= 0 || wait > MAX_TIMEOUT) continue;
     edgeTimers.push(
       setTimeout(() => {
         console.log("⏰ check-in window edge reached → re-publishing scoped collections");
-        publish("campers", "bedrooms");
+        publish("campers", "staff", "bedrooms", "roles", "events", "settings");
+        void evictStaffOutsideWindow().catch((err) => console.error("realtime: evict failed", err));
+        void import("./notify").then((m) => m.syncWelcomes()); // the team window may have just opened → welcome SMS
       }, wait),
     );
   }
 }
+
+// ── welcome safety net: a window start further than setTimeout's limit (~24 days) can't be armed, so re-check hourly
+setInterval(() => void import("./notify").then((m) => m.syncWelcomes()), 60 * 60_000);
 
 // ── heartbeat (lets phones notice a dead connection and reconnect) ─────────
 

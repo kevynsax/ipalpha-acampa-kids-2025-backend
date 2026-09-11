@@ -4,6 +4,7 @@ import { findById } from "../models/users";
 import { verifySessionToken } from "../services/session";
 import { addClient, clientCount, removeClient, type RealtimeClient } from "../services/realtime";
 import { loadCollections } from "../services/snapshot";
+import { staffSessionExpired } from "../middleware/auth";
 
 /**
  * GET /api/realtime?token=<jwt>  →  WebSocket
@@ -21,8 +22,9 @@ realtime.get(
     const token = c.req.query("token") ?? "";
     const payload = token ? await verifySessionToken(token) : null;
     const user = payload ? await findById(payload.userId) : null;
+    const evicted = payload && user ? await staffSessionExpired(payload.role, user.phone, user._id) : false;
 
-    if (!payload || !user) {
+    if (!payload || !user || evicted) {
       return {
         onOpen(_evt, ws) {
           ws.send(JSON.stringify({ type: "error", code: "UNAUTHORIZED", message: "Sessão inválida ou expirada." }));

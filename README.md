@@ -434,6 +434,7 @@ carries details — the app is the source of truth:
 | `bedroomChanges` | a camper is created in, deleted from, or moved between bedrooms (`POST/PUT/DELETE /api/campers`) | active staff assigned to the room the kid left and/or entered |
 | `roleChanges` | a person is assigned / reassigned (role or detail) / removed in an event, the event's date or time changes, the event is deleted, or a role's name / instructions / "for everyone" flag changes | each person whose duty in that event changed (explicit assignment or "for everyone" default) |
 | `checkinConfirmation` | a team member's church check-in is recorded (`POST /api/staff/me/checkin` or the admin roll call `POST /api/staff/:id/checkin`) | that person — *"seu check-in foi feito com sucesso. Lembre-se de conferir as crianças do seu quarto no app."* Sent at once (not coalesced); undoing a check-in sends nothing |
+| `occurrences` | an occurrence is registered (`POST /api/occurrences`, by an admin or the medical team) | every admin account with a phone, except the one who registered it — names who registered and who is involved (never the description). Sent at once; admins are not gated by the team access window |
 
 Rules: only staff with a phone are texted; the notifier diffs BEFORE/AFTER
 records so no-op edits (e.g. renaming a kid) send nothing; every change for the

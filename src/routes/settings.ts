@@ -2,10 +2,12 @@ import { Hono, type Context } from "hono";
 import { requireAuth } from "../middleware/auth";
 import { requireAdmin } from "../middleware/roles";
 import { findCategoryByKey } from "../models/categories";
-import { checkinWindowOpen, getSettings, updateSettings } from "../models/settings";
-import { listStaff } from "../models/staff";
+import { checkinWindowOpen, getSettings, staffAccessOpen, updateSettings } from "../models/settings";
+import { listStaff, resetStaffCheckins } from "../models/staff";
+import { clearCheckinLog, resetCamperCheckins } from "../models/campers";
 import { comteleEnabled } from "../services/comtele";
-import { publish, scheduleCheckinWindow } from "../services/realtime";
+import { notifyAccessListChange, syncWelcomes } from "../services/notify";
+import { evictStaffOutsideWindow, publish, scheduleCheckinWindow } from "../services/realtime";
 import { CAMPER_CATEGORY_KEYS, type BusHelperList, type CheckinLocation, type CheckinWindow, type NotificationSettings, type ParentContact, type Role, type SessionUser, type Settings, type StaffList } from "../types";
 
 interface Env {
@@ -26,12 +28,12 @@ function fail(c: Context, code: string, message: string, status: 400 | 404 | 409
   return c.json({ error: { code, message } }, status);
 }
 
-function serializeWindow(w: CheckinWindow) {
+function serializeWindow(w: CheckinWindow, open: boolean) {
   return {
     from: w.from?.toISOString() ?? null,
     until: w.until?.toISOString() ?? null,
     /** read-only: is the window open right now (server clock)? */
-    open: checkinWindowOpen(w),
+    open,
   };
 }
 
@@ -39,7 +41,10 @@ export function serializeSettings(s: Settings) {
   return {
     checkinLocation: s.checkinLocation,
     notifications: s.notifications,
-    checkinWindow: serializeWindow(s.checkinWindow),
+    checkinWindow: serializeWindow(s.checkinWindow, s.checkinTestMode || checkinWindowOpen(s.checkinWindow)),
+    checkinTestMode: s.checkinTestMode,
+    kidsRoomsDraft: s.kidsRoomsDraft,
+    staffAccessWindow: serializeWindow(s.staffAccessWindow, staffAccessOpen(s.staffAccessWindow)),
     checkinHelpers: { staffIds: s.checkinHelpers.staffIds },
     busHelpers: { helpers: s.busHelpers.helpers.map((h) => ({ staffId: h.staffId, vehicleId: h.vehicleId })) },
     organizers: { staffIds: s.organizers.staffIds },
@@ -55,7 +60,7 @@ function parseNotifications(value: unknown, current: NotificationSettings): Noti
   if (!value || typeof value !== "object") return { error: "Informe as notificações." };
   const o = value as Record<string, unknown>;
   const out = { ...current };
-  for (const k of ["bedroomChanges", "roleChanges", "checkinConfirmation"] as const) {
+  for (const k of ["bedroomChanges", "roleChanges", "checkinConfirmation", "contentChanges", "staffChanges", "enrolments", "occurrences"] as const) {
     if (o[k] === undefined) continue;
     if (typeof o[k] !== "boolean") return { error: "Cada notificação deve ser ligada ou desligada." };
     out[k] = o[k] as boolean;
@@ -199,20 +204,55 @@ settings.put("/", requireAdmin, async (c) => {
     patch.checkinWindow = w;
     windowChanged = true;
   }
+  if (body.staffAccessWindow !== undefined) {
+    const w = parseWindow(body.staffAccessWindow);
+    if ("error" in w) return fail(c, "WINDOW_INVALID", w.error);
+    patch.staffAccessWindow = w;
+    windowChanged = true;
+  }
+  if (body.checkinTestMode !== undefined) {
+    if (typeof body.checkinTestMode !== "boolean") return fail(c, "TEST_MODE_INVALID", "O modo de teste deve ser ligado ou desligado.");
+    patch.checkinTestMode = body.checkinTestMode;
+    windowChanged = true;
+  }
+  let draftChanged = false;
+  if (body.kidsRoomsDraft !== undefined) {
+    if (typeof body.kidsRoomsDraft !== "boolean") return fail(c, "DRAFT_INVALID", "O rascunho dos quartos deve ser ligado ou desligado.");
+    patch.kidsRoomsDraft = body.kidsRoomsDraft;
+    draftChanged = true;
+  }
   if (Object.keys(patch).length === 0) return fail(c, "NOTHING_TO_UPDATE", "Nada para atualizar.");
 
+  const previous = await getSettings();
   const updated = await updateSettings(patch);
-  if (patch.organizers) {
-    // organizers' scope changed right now: they gain / lose the full team + programme on their phones
-    publish("staff", "roles", "events");
+  void notifyAccessListChange(previous, updated); // fire-and-forget: the SMS never delays the write
+  const scopeChanged = patch.organizers || patch.checkinHelpers || patch.busHelpers || patch.medicalStaff || windowChanged || draftChanged;
+  if (scopeChanged) {
+    // Any access-list change may alter which records a phone is allowed to keep.
+    // Re-send every scoped collection so gains and revocations happen live.
+    publish("campers", "staff", "bedrooms", "roles", "events", "occurrences");
+    // someone may have just left every list while the team window is closed: log them out now
+    if (!windowChanged) void evictStaffOutsideWindow().catch((err) => console.error("realtime: evict failed", err));
   }
-  if (patch.checkinHelpers || patch.busHelpers || patch.medicalStaff || windowChanged) {
-    // helpers' scope may have changed right now (and will at the window edges):
-    // re-send the scoped collections so phones gain / lose the data without a reload
-    publish("campers", "bedrooms");
-    if (windowChanged) scheduleCheckinWindow(updated.checkinWindow);
+  // Settings are shared application data too: every connected admin/team
+  // client receives the canonical value through the WebSocket collection.
+  publish("settings");
+  if (windowChanged) {
+    scheduleCheckinWindow(updated.checkinWindow, updated.staffAccessWindow);
+    if (patch.staffAccessWindow) void syncWelcomes(); // the window may have just opened (start moved to the past)
+    // the admin may have closed the team's window right now: log those people out
+    void evictStaffOutsideWindow().catch((err) => console.error("realtime: evict failed", err));
   }
   return c.json({ settings: serializeSettings(updated) });
+});
+
+/** POST /api/settings/checkin/reset — admin only. Clears EVERY check-in (kids' church + bus, team) and the audit log, so the process can be rehearsed. */
+settings.post("/checkin/reset", requireAdmin, async (c) => {
+  const [campers, staff] = await Promise.all([resetCamperCheckins(), resetStaffCheckins()]);
+  await clearCheckinLog();
+  console.log(`🧹 check-ins reset by ${c.get("user").name}: ${campers} campers, ${staff} staff`);
+  publish("campers", "staff");
+  return c.json({ campers, staff });
 });
 
 export default settings;

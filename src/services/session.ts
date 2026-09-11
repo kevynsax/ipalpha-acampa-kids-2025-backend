@@ -67,6 +67,13 @@ export async function verifySessionToken(
   }
 }
 
+/** Logs a person out everywhere: every session of that user (any role) is dropped. */
+export async function revokeUserSessions(userId: string): Promise<number> {
+  const db = await getDb();
+  const res = await db.collection("sessions").deleteMany({ userId });
+  return res.deletedCount;
+}
+
 export async function revokeSession(sessionId: string): Promise<void> {
   const db = await getDb();
   await db.collection("sessions").deleteOne({ _id: new ObjectId(sessionId) });

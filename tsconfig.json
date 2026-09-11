@@ -9,5 +9,7 @@
     "noEmit": true,
     "verbatimModuleSyntax": true
   },
-  "include": ["src"]
+  "include": ["src"],
+  // one-off seed scripts depend on local, uncommitted files (data/, _healthNotes.ts)
+  "exclude": ["src/scripts"]
 }

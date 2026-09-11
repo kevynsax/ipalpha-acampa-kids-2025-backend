@@ -13,7 +13,9 @@ import { serializeInstruction } from "../routes/instructions";
 import { serializeOccurrence } from "../routes/occurrences";
 import { serializePrepSection } from "../routes/preparation";
 import { serializeEvent, serializeRole } from "../routes/schedule";
+import { serializeSettings } from "../routes/settings";
 import { serializeStaffList } from "../routes/staff";
+import { getSettings } from "../models/settings";
 import type { Role } from "../types";
 import { COLLECTIONS, type Collection, type Snapshot } from "./realtime";
 import { canSeeBedroom, resolveScope, scopeEvent, scopeRoles, type Viewer } from "./scope";
@@ -25,8 +27,8 @@ import { canSeeBedroom, resolveScope, scopeEvent, scopeRoles, type Viewer } from
  */
 const READABLE: Record<Role, readonly Collection[]> = {
   admin: COLLECTIONS,
-  staff: ["campers", "staff", "bedrooms", "categories", "roles", "events", "preparation", "instructions", "occurrences"],
-  health_staff: ["campers", "staff", "bedrooms", "categories", "roles", "events", "preparation", "instructions", "occurrences"],
+  staff: ["campers", "staff", "bedrooms", "categories", "roles", "events", "preparation", "instructions", "occurrences", "settings"],
+  health_staff: ["campers", "staff", "bedrooms", "categories", "roles", "events", "preparation", "instructions", "occurrences", "settings"],
   parent: ["categories"],
 };
 
@@ -100,6 +102,9 @@ export async function loadCollections(viewer: Viewer, names: readonly Collection
         case "occurrences":
           if (scope.all) out.occurrences = (await listOccurrences()).map(serializeOccurrence);
           else if (scope.medical) out.occurrences = (await listOccurrences()).filter((occurrence) => occurrence.campers.length > 0).map(serializeOccurrence);
+          break;
+        case "settings":
+          out.settings = serializeSettings(await getSettings());
           break;
       }
     }),

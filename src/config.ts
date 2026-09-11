@@ -24,4 +24,14 @@ export const config = {
     apiKey: process.env.COMTELE_API_KEY ?? "",
     prefix: process.env.COMTELE_PREFIX ?? "AcampaKids",
   },
+
+  /** OpenAI-compatible gateway for the editor's AI helper (empty key = feature hidden) */
+  ai: {
+    baseUrl: (process.env.AI_BASE_URL ?? "https://ai-models.kevyn.com.br/v1").replace(/\/$/, ""),
+    apiKey: process.env.AI_API_KEY ?? "",
+    /** OpenAI-compatible speech-to-text (whisper) for the editor's voice input; empty = mic hidden */
+    transcribeUrl: (process.env.AI_TRANSCRIBE_URL ?? "https://whisper.kevyn.com.br/v1").replace(/\/$/, ""),
+    transcribeModel: process.env.AI_TRANSCRIBE_MODEL ?? "whisper-large-v3-turbo",
+    transcribeKey: process.env.AI_TRANSCRIBE_KEY ?? "",
+  },
 };
