@@ -1,6 +1,6 @@
 import { ObjectId } from "mongodb";
 import { getDb } from "../db";
-import type { Camper, CamperCheckin, CheckinKind, CheckinLog } from "../types";
+import type { Camper, CamperCheckin, CamperSex, CheckinKind, CheckinLog } from "../types";
 
 const LOG_COLLECTION = "checkinLog";
 
@@ -13,6 +13,16 @@ function toCamper(doc: Record<string, unknown> | null): Camper | null {
     _id: (doc._id as ObjectId).toString(),
     name: doc.name as string,
     birthDate: (doc.birthDate as string) ?? null,
+    sex: doc.sex === "F" || doc.sex === "M" ? (doc.sex as CamperSex) : null,
+    cpf: s("cpf"),
+    rg: s("rg"),
+    school: s("school"),
+    schoolGrade: s("schoolGrade"),
+    church: s("church"),
+    invitedBy: s("invitedBy"),
+    caretaker: s("caretaker"),
+    qrToken: s("qrToken"),
+    externalId: s("externalId"),
     team: (doc.team as string) ?? null,
     transportation: (doc.transportation as string) ?? null,
     bed: (doc.bed as string) ?? null,
@@ -31,6 +41,8 @@ function toCamper(doc: Record<string, unknown> | null): Camper | null {
     emergencyContact: s("emergencyContact"),
     guardianName: s("guardianName"),
     guardianPhone: (doc.guardianPhone as string) ?? null,
+    guardianCpf: s("guardianCpf"),
+    guardianEmail: s("guardianEmail"),
     checkin: toCheckin(doc.checkin),
     busCheckin: toCheckin(doc.busCheckin),
     createdAt: doc.createdAt as Date,
@@ -62,6 +74,16 @@ export async function findCamperById(id: string): Promise<Camper | null> {
   if (!ObjectId.isValid(id)) return null;
   const db = await getDb();
   return toCamper(await db.collection(COLLECTION).findOne({ _id: new ObjectId(id) }));
+}
+
+export async function findCamperByExternalId(externalId: string): Promise<Camper | null> {
+  const db = await getDb();
+  return toCamper(await db.collection(COLLECTION).findOne({ externalId }));
+}
+
+export async function findCamperByQrToken(qrToken: string): Promise<Camper | null> {
+  const db = await getDb();
+  return toCamper(await db.collection(COLLECTION).findOne({ qrToken }));
 }
 
 export async function findCamperByName(name: string): Promise<Camper | null> {
@@ -147,6 +169,8 @@ export async function ensureCamperIndexes(): Promise<void> {
   await db.collection(COLLECTION).createIndex({ name: 1 }, { collation: { locale: "pt", strength: 1 } });
   await db.collection(COLLECTION).createIndex({ bedroom: 1 });
   await db.collection(COLLECTION).createIndex({ team: 1 });
+  await db.collection(COLLECTION).createIndex({ externalId: 1 }, { sparse: true });
+  await db.collection(COLLECTION).createIndex({ qrToken: 1 }, { sparse: true });
   await db.collection(LOG_COLLECTION).createIndex({ camperId: 1, at: -1 });
   await db.collection(LOG_COLLECTION).createIndex({ at: -1 });
 }

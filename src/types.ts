@@ -168,6 +168,22 @@ export interface Camper {
   name: string;
   /** "YYYY-MM-DD" or null */
   birthDate: string | null;
+  /** "F" | "M" | null */
+  sex: CamperSex | null;
+  cpf: string;
+  rg: string;
+  school: string;
+  schoolGrade: string;
+  /** which church the kid attends (free text) */
+  church: string;
+  /** who invited the kid (free text) */
+  invitedBy: string;
+  /** the "tio(a)" assigned to the kid (free text, from the registration system) */
+  caretaker: string;
+  /** token printed on the kid's QR badge (from the registration system) */
+  qrToken: string;
+  /** id of the kid in the registration system (Supabase) — for re-syncs */
+  externalId: string;
   /** category option ids */
   team: string | null;
   transportation: string | null;
@@ -192,6 +208,8 @@ export interface Camper {
   guardianName: string;
   /** E.164 or null */
   guardianPhone: string | null;
+  guardianCpf: string;
+  guardianEmail: string;
   /** set when the kid arrived at the church and the parent confirmed the registration data */
   checkin: CamperCheckin | null;
   /** set when the kid boarded the bus (the roll call done inside the vehicle) */
@@ -199,6 +217,8 @@ export interface Camper {
   createdAt: Date;
   updatedAt: Date;
 }
+
+export type CamperSex = "F" | "M";
 
 export interface CamperCheckin {
   at: Date;
@@ -385,6 +405,16 @@ export interface NotificationSettings {
   enrolments: boolean;
   /** an occurrence was registered (by the admin or the medical team) — every admin is texted */
   occurrences: boolean;
+  /** at `settings.checkinReminder.at` the WHOLE team is reminded to do their check-in (nothing goes out while the date is unset) */
+  checkinReminder: boolean;
+}
+
+/** One-shot reminder to the whole team to do their check-in. */
+export interface CheckinReminder {
+  /** when to text everyone; null = no reminder */
+  at: Date | null;
+  /** when it actually went out (sent ONCE per `at`; reset whenever `at` changes) */
+  sentAt: Date | null;
 }
 
 /** The time window in which the check-in helpers (church AND bus) may act. Both ends must be set for it to ever open. */
@@ -470,6 +500,8 @@ export interface Settings {
    * check-in helpers are unaffected) and no "kid moved room" SMS goes out.
    */
   kidsRoomsDraft: boolean;
+  /** the "do your check-in" SMS to the whole team, scheduled for one instant */
+  checkinReminder: CheckinReminder;
   updatedAt: Date | null;
 }
 

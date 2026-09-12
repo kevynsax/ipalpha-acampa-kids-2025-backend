@@ -1,6 +1,6 @@
 {
   "name": "camping-backend",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,8 +11,10 @@
     "seed:bedrooms": "bun run src/scripts/seedBedrooms.ts",
     "seed:schedule": "bun run src/scripts/seedSchedule.ts",
     "seed:staff": "bun run src/scripts/seedStaff.ts",
+    "seed:notifications": "bun run src/scripts/seedNotifications.ts",
+    "import:supabase": "bun run src/scripts/importSupabase.ts",
     "seed:campers": "bun run src/scripts/seedCampers.ts && bun run src/scripts/dedupEmergencyContacts.ts && bun run src/scripts/cleanHealthNotes.ts && bun run src/scripts/splitCamperNotes.ts && bun run src/scripts/migrateHealthOptions.ts && bun run src/scripts/dedupHealthNotes.ts",
-    "seed:all": "bun run seed && bun run seed:categories && bun run seed:bedrooms && bun run seed:schedule && bun run seed:staff && bun run seed:campers"
+    "seed:all": "bun run seed && bun run seed:categories && bun run seed:bedrooms && bun run seed:schedule && bun run seed:staff && bun run seed:campers && bun run seed:notifications"
   },
   "dependencies": {
     "hono": "^4.6.14",

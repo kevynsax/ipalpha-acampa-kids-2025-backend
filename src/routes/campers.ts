@@ -39,6 +39,16 @@ export function serializeCamper(k: Camper) {
     id: k._id,
     name: k.name,
     birthDate: k.birthDate,
+    sex: k.sex,
+    cpf: k.cpf,
+    rg: k.rg,
+    school: k.school,
+    schoolGrade: k.schoolGrade,
+    church: k.church,
+    invitedBy: k.invitedBy,
+    caretaker: k.caretaker,
+    qrToken: k.qrToken,
+    externalId: k.externalId,
     team: k.team,
     transportation: k.transportation,
     bed: k.bed,
@@ -57,6 +67,8 @@ export function serializeCamper(k: Camper) {
     emergencyContact: k.emergencyContact,
     guardianName: k.guardianName,
     guardianPhone: k.guardianPhone,
+    guardianCpf: k.guardianCpf,
+    guardianEmail: k.guardianEmail,
     checkin: k.checkin,
     busCheckin: k.busCheckin,
     createdAt: k.createdAt,
@@ -78,6 +90,15 @@ export function serializeCamperFor(k: Camper, scope: Scope) {
   return {
     ...full,
     redacted: true,
+    cpf: "",
+    rg: "",
+    school: "",
+    schoolGrade: "",
+    church: "",
+    invitedBy: "",
+    caretaker: "",
+    qrToken: "",
+    externalId: "",
     bed: null,
     weightKg: null,
     allergies: [],
@@ -93,6 +114,8 @@ export function serializeCamperFor(k: Camper, scope: Scope) {
     emergencyContact: "",
     guardianName: "",
     guardianPhone: "",
+    guardianCpf: "",
+    guardianEmail: "",
   };
 }
 
@@ -121,6 +144,13 @@ async function buildPatch(
     else if (typeof v !== "string" || !DATE_RE.test(v) || Number.isNaN(Date.parse(v))) {
       return { code: "BIRTH_DATE_INVALID", message: "Data de nascimento inválida." };
     } else patch.birthDate = v;
+  }
+
+  if (has("sex")) {
+    const v = body.sex;
+    if (v === undefined || v === null || v === "") patch.sex = null;
+    else if (v !== "F" && v !== "M") return { code: "SEX_INVALID", message: "Sexo inválido." };
+    else patch.sex = v;
   }
 
   const singles: ["team" | "transportation" | "bed", string][] = [
@@ -165,7 +195,7 @@ async function buildPatch(
     patch[field] = v;
   }
 
-  const shorts = ["insurance", "insuranceCard", "emergencyContact", "guardianName"] as const;
+  const shorts = ["insurance", "insuranceCard", "emergencyContact", "guardianName", "cpf", "rg", "school", "schoolGrade", "church", "invitedBy", "caretaker", "qrToken", "externalId", "guardianCpf", "guardianEmail"] as const;
   for (const field of shorts) {
     if (!has(field)) continue;
     const v = parseText(body[field], SHORT_MAX);

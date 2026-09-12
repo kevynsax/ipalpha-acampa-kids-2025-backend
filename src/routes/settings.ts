@@ -7,7 +7,7 @@ import { listStaff, resetStaffCheckins } from "../models/staff";
 import { clearCheckinLog, resetCamperCheckins } from "../models/campers";
 import { comteleEnabled } from "../services/comtele";
 import { notifyAccessListChange, syncWelcomes } from "../services/notify";
-import { evictStaffOutsideWindow, publish, scheduleCheckinWindow } from "../services/realtime";
+import { evictStaffOutsideWindow, publish, scheduleCheckinReminder, scheduleCheckinWindow } from "../services/realtime";
 import { CAMPER_CATEGORY_KEYS, type BusHelperList, type CheckinLocation, type CheckinWindow, type NotificationSettings, type ParentContact, type Role, type SessionUser, type Settings, type StaffList } from "../types";
 
 interface Env {
@@ -45,6 +45,7 @@ export function serializeSettings(s: Settings) {
     checkinTestMode: s.checkinTestMode,
     kidsRoomsDraft: s.kidsRoomsDraft,
     staffAccessWindow: serializeWindow(s.staffAccessWindow, staffAccessOpen(s.staffAccessWindow)),
+    checkinReminder: { at: s.checkinReminder.at?.toISOString() ?? null, sentAt: s.checkinReminder.sentAt?.toISOString() ?? null },
     checkinHelpers: { staffIds: s.checkinHelpers.staffIds },
     busHelpers: { helpers: s.busHelpers.helpers.map((h) => ({ staffId: h.staffId, vehicleId: h.vehicleId })) },
     organizers: { staffIds: s.organizers.staffIds },
@@ -60,7 +61,7 @@ function parseNotifications(value: unknown, current: NotificationSettings): Noti
   if (!value || typeof value !== "object") return { error: "Informe as notificações." };
   const o = value as Record<string, unknown>;
   const out = { ...current };
-  for (const k of ["bedroomChanges", "roleChanges", "checkinConfirmation", "contentChanges", "staffChanges", "enrolments", "occurrences"] as const) {
+  for (const k of ["bedroomChanges", "roleChanges", "checkinConfirmation", "contentChanges", "staffChanges", "enrolments", "occurrences", "checkinReminder"] as const) {
     if (o[k] === undefined) continue;
     if (typeof o[k] !== "boolean") return { error: "Cada notificação deve ser ligada ou desligada." };
     out[k] = o[k] as boolean;
@@ -107,6 +108,16 @@ function parseWindow(value: unknown): CheckinWindow | { error: string } {
   if (until && "error" in until) return until;
   if (from && until && from >= until) return { error: "O fim da janela precisa ser depois do início." };
   return { from, until };
+}
+
+/** { at: ISO | null } — the instant of the check-in reminder (null / "" = none) */
+function parseReminderAt(value: unknown): Date | null | { error: string } {
+  const o = value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+  const v = o ? o.at : value;
+  if (v === null || v === undefined || v === "") return null;
+  if (typeof v !== "string") return { error: "Data do lembrete inválida." };
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? { error: "Data do lembrete inválida." } : d;
 }
 
 /** { staffIds: string[] } */
@@ -164,7 +175,7 @@ settings.use("*", requireAuth);
 /** GET /api/settings — any logged-in role (the team needs the check-in spot to know how far they are). */
 settings.get("/", async (c) => c.json({ settings: serializeSettings(await getSettings()) }));
 
-/** PUT /api/settings — admin only. { checkinLocation?, notifications?, checkinWindow?: { from, until }, checkinHelpers?: { staffIds }, busHelpers?: { helpers: [{ staffId, vehicleId }] }, organizers?: { staffIds }, medicalStaff?: { staffIds }, parentContacts?: [{ id, title, staffId }] } */
+/** PUT /api/settings — admin only. { checkinLocation?, notifications?, checkinWindow?: { from, until }, checkinReminder?: { at }, checkinHelpers?: { staffIds }, busHelpers?: { helpers: [{ staffId, vehicleId }] }, organizers?: { staffIds }, medicalStaff?: { staffIds }, parentContacts?: [{ id, title, staffId }] } */
 settings.put("/", requireAdmin, async (c) => {
   const body = await c.req.json<Record<string, unknown>>().catch(() => null);
   if (!body) return fail(c, "BODY_INVALID", "Corpo da requisição inválido.");
@@ -215,6 +226,16 @@ settings.put("/", requireAdmin, async (c) => {
     patch.checkinTestMode = body.checkinTestMode;
     windowChanged = true;
   }
+  let reminderChanged = false;
+  if (body.checkinReminder !== undefined) {
+    const at = parseReminderAt(body.checkinReminder);
+    if (at && "error" in at) return fail(c, "REMINDER_INVALID", at.error);
+    const current = (await getSettings()).checkinReminder;
+    // same instant → keep the "already sent" mark; a new instant re-arms the reminder
+    const same = (at?.getTime() ?? null) === (current.at?.getTime() ?? null);
+    patch.checkinReminder = { at, sentAt: same ? current.sentAt : null };
+    reminderChanged = true;
+  }
   let draftChanged = false;
   if (body.kidsRoomsDraft !== undefined) {
     if (typeof body.kidsRoomsDraft !== "boolean") return fail(c, "DRAFT_INVALID", "O rascunho dos quartos deve ser ligado ou desligado.");
@@ -237,6 +258,8 @@ settings.put("/", requireAdmin, async (c) => {
   // Settings are shared application data too: every connected admin/team
   // client receives the canonical value through the WebSocket collection.
   publish("settings");
+  // the date or the toggle changed: re-arm (a pending past instant with the toggle now on fires at once)
+  if (reminderChanged || patch.notifications) scheduleCheckinReminder(updated.checkinReminder.at);
   if (windowChanged) {
     scheduleCheckinWindow(updated.checkinWindow, updated.staffAccessWindow);
     if (patch.staffAccessWindow) void syncWelcomes(); // the window may have just opened (start moved to the past)

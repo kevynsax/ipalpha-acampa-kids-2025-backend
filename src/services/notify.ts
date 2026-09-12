@@ -3,7 +3,7 @@ import { findBedroomById } from "../models/bedrooms";
 import { countCampersPerBedroom } from "../models/campers";
 import { findCategoryByKey } from "../models/categories";
 import { listRoles } from "../models/schedule";
-import { getSettings, staffAccessOpen } from "../models/settings";
+import { claimCheckinReminder, getSettings, staffAccessOpen } from "../models/settings";
 import { claimStaffWelcome, listStaff } from "../models/staff";
 import { listAdmins } from "../models/users";
 import { STAFF_CATEGORY_KEYS } from "../types";
@@ -25,6 +25,7 @@ import { staffHasAccess } from "./scope";
  *   - the person's own room / team / vehicle changed
  *   - the person's church check-in was recorded (confirmation, sent at once)
  *   - an occurrence was registered (every ADMIN, sent at once)
+ *   - the check-in reminder (WHOLE team, at the instant the admin picked)
  *
  * Each kind can be switched off by the admin (Settings → Notificações).
  * ORDINARY team members are only texted inside `settings.staffAccessWindow`
@@ -211,6 +212,38 @@ export async function notifyCheckin(staff: Staff): Promise<void> {
     await deliver(staff, composeCheckinSms(staff, { room, kids, bus }), "checkin");
   } catch (err) {
     console.error("notify: check-in confirmation failed", err);
+  }
+}
+
+// ── check-in reminder → whole team ───────────────────────────────────────────────────
+
+/** "João, chegou a hora do seu check-in! Faça em <app>" */
+export function composeCheckinReminderSms(staff: Staff): string {
+  return `${config.comtele.prefix}: ${first(staff.name)}, chegou a hora do seu check-in! Ao chegar na igreja, faça o check-in em ${appLink()}`;
+}
+
+/**
+ * Texts EVERY active team member with a phone reminding them to do their
+ * check-in. Runs at `settings.checkinReminder.at` (timer in services/realtime.ts,
+ * plus the hourly safety net and boot). Nothing goes out when:
+ *   - the `checkinReminder` toggle is off,
+ *   - no date is set, or the date is still in the future,
+ *   - it already went out for that date (claimed atomically — restarts and
+ *     double timers can't text twice; changing the date re-arms it).
+ * Not coalesced and not gated by the team access window: the reminder IS the
+ * call to show up.
+ */
+export async function sendCheckinReminder(): Promise<void> {
+  try {
+    const settings = await getSettings();
+    const { at, sentAt } = settings.checkinReminder;
+    if (!settings.notifications.checkinReminder || !at || sentAt || at.getTime() > Date.now()) return;
+    if (!(await claimCheckinReminder(at))) return;
+    const team = (await listStaff({ active: true })).filter((s) => s.phone && !s.checkin);
+    console.log(`📲 check-in reminder scheduled for ${at.toISOString()} → texting ${team.length} team members`);
+    for (const s of team) await deliver(s, composeCheckinReminderSms(s), "checkin-reminder");
+  } catch (err) {
+    console.error("notify: check-in reminder failed", err);
   }
 }
 

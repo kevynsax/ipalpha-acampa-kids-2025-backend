@@ -149,8 +149,25 @@ export function scheduleCheckinWindow(w: CheckinWindow, staffAccess?: CheckinWin
   }
 }
 
-// ── welcome safety net: a window start further than setTimeout's limit (~24 days) can't be armed, so re-check hourly
-setInterval(() => void import("./notify").then((m) => m.syncWelcomes()), 60 * 60_000);
+// ── check-in reminder: one timer for the instant the admin picked (re-armed on every settings write and at boot)
+let reminderTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Arms (or clears) the check-in reminder timer. `null` / a past instant / beyond setTimeout's limit → nothing armed (the hourly safety net and boot catch up). */
+export function scheduleCheckinReminder(at: Date | null): void {
+  if (reminderTimer) clearTimeout(reminderTimer);
+  reminderTimer = null;
+  if (!at) return;
+  const wait = at.getTime() - Date.now() + 500;
+  if (wait > MAX_TIMEOUT) return;
+  reminderTimer = setTimeout(() => {
+    reminderTimer = null;
+    console.log("⏰ check-in reminder instant reached");
+    void import("./notify").then((m) => m.sendCheckinReminder());
+  }, Math.max(0, wait));
+}
+
+// ── safety net: an instant further than setTimeout's limit (~24 days) can't be armed, so re-check hourly
+setInterval(() => void import("./notify").then((m) => Promise.all([m.syncWelcomes(), m.sendCheckinReminder()])), 60 * 60_000);
 
 // ── heartbeat (lets phones notice a dead connection and reconnect) ─────────
 

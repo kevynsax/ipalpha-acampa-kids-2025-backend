@@ -1,5 +1,5 @@
 import { getDb } from "../db";
-import type { BusHelperList, CheckinWindow, ParentContact, Settings, StaffList } from "../types";
+import type { BusHelperList, CheckinReminder, CheckinWindow, ParentContact, Settings, StaffList } from "../types";
 
 const COLLECTION = "settings";
 /** the settings live in ONE document (there is a single camp) */
@@ -12,7 +12,8 @@ export const DEFAULT_SETTINGS: Settings = {
     lng: -46.83077891444747,
     radiusM: 300,
   },
-  notifications: { bedroomChanges: true, roleChanges: true, checkinConfirmation: true, contentChanges: true, staffChanges: true, enrolments: true, occurrences: true },
+  // every kind starts OFF: the admin switches on what they want texted
+  notifications: { bedroomChanges: false, roleChanges: false, checkinConfirmation: false, contentChanges: false, staffChanges: false, enrolments: false, occurrences: false, checkinReminder: false },
   checkinWindow: { from: null, until: null },
   checkinHelpers: { staffIds: [] },
   busHelpers: { helpers: [] },
@@ -22,6 +23,7 @@ export const DEFAULT_SETTINGS: Settings = {
   staffAccessWindow: { from: null, until: null },
   checkinTestMode: false,
   kidsRoomsDraft: false,
+  checkinReminder: { at: null, sentAt: null },
   updatedAt: null,
 };
 
@@ -68,6 +70,11 @@ function toWindow(raw: unknown): CheckinWindow {
   return { from: asDate(w.from), until: asDate(w.until) };
 }
 
+function toReminder(raw: unknown): CheckinReminder {
+  const r = (raw as Partial<Record<keyof CheckinReminder, unknown>> | undefined) ?? {};
+  return { at: asDate(r.at), sentAt: asDate(r.sentAt) };
+}
+
 function toParentContacts(raw: unknown): ParentContact[] {
   if (!Array.isArray(raw)) return [];
   return raw
@@ -93,6 +100,7 @@ function toSettings(doc: Record<string, unknown> | null): Settings {
     staffAccessWindow: toWindow(doc.staffAccessWindow),
     checkinTestMode: doc.checkinTestMode === true,
     kidsRoomsDraft: doc.kidsRoomsDraft === true,
+    checkinReminder: toReminder(doc.checkinReminder),
     notifications: {
       bedroomChanges: typeof n.bedroomChanges === "boolean" ? n.bedroomChanges : DEFAULT_SETTINGS.notifications.bedroomChanges,
       roleChanges: typeof n.roleChanges === "boolean" ? n.roleChanges : DEFAULT_SETTINGS.notifications.roleChanges,
@@ -101,6 +109,7 @@ function toSettings(doc: Record<string, unknown> | null): Settings {
       staffChanges: typeof n.staffChanges === "boolean" ? n.staffChanges : DEFAULT_SETTINGS.notifications.staffChanges,
       enrolments: typeof n.enrolments === "boolean" ? n.enrolments : DEFAULT_SETTINGS.notifications.enrolments,
       occurrences: typeof n.occurrences === "boolean" ? n.occurrences : DEFAULT_SETTINGS.notifications.occurrences,
+      checkinReminder: typeof n.checkinReminder === "boolean" ? n.checkinReminder : DEFAULT_SETTINGS.notifications.checkinReminder,
     },
     checkinLocation: {
       lat: typeof loc.lat === "number" ? loc.lat : DEFAULT_SETTINGS.checkinLocation.lat,
@@ -123,4 +132,17 @@ export async function updateSettings(patch: Partial<Omit<Settings, "updatedAt">>
     .collection(COLLECTION)
     .findOneAndUpdate({ _id: DOC_ID as never }, { $set: { ...patch, updatedAt: new Date() } }, { upsert: true, returnDocument: "after" });
   return toSettings(res as Record<string, unknown> | null);
+}
+
+/**
+ * Marks the check-in reminder scheduled for `at` as sent — atomically, only
+ * if that exact instant is still scheduled and was NOT sent yet. Returns true
+ * when this call won (so the caller may text the team).
+ */
+export async function claimCheckinReminder(at: Date): Promise<boolean> {
+  const db = await getDb();
+  const res = await db
+    .collection(COLLECTION)
+    .updateOne({ _id: DOC_ID as never, "checkinReminder.at": at, "checkinReminder.sentAt": null }, { $set: { "checkinReminder.sentAt": new Date() } });
+  return res.modifiedCount === 1;
 }

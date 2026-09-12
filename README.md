@@ -225,8 +225,20 @@ decimal, 5–200) or null — `WEIGHT_INVALID` otherwise.
 
 ```bash
 bun run seed:campers   # 152 kids (+ dedup of emergency contacts and health notes)
+bun run seed:notifications  # resets settings.notifications: every SMS kind OFF, reminder date cleared
 bun run src/scripts/cleanHealthNotes.ts --dry   # preview the health-notes cleanup on existing rows
+bun run import:supabase [--dry]   # sync with the registration system (data/children.json, git-ignored)
 ```
+
+`import:supabase` reads the JSON answered by the registration system
+(Supabase `children` joined with `guardians`, `teams`, `rooms`, `buses` —
+save the REST response as `data/children.json`). It matches kids by
+`externalId` (Supabase id) then by name, inserts the missing ones, refreshes
+the identity fields (`sex`, `cpf`, `rg`, `school`, `schoolGrade`, `church`,
+`invitedBy`, `caretaker`, `qrToken`, `guardianCpf`, `guardianEmail`) and only
+FILLS empty local fields for everything else — local edits win. Room / team /
+bus links that differ are reported (`↔️`), never overwritten; kids that exist
+only locally are listed (`👻`).
 
 The form's "Observações médicas" column repeats weight, insurance, daily
 medication, chronic condition and general notes as `Key: value | …`. The seed
@@ -360,14 +372,16 @@ Until an admin saves it, the defaults apply.
 | Method | Path | Who | Body |
 |---|---|---|---|
 | GET | `/api/settings` | any logged-in role | — |
-| PUT | `/api/settings` | admin | `{ checkinLocation?: { lat, lng, radiusM }, notifications?: { bedroomChanges?, roleChanges?, checkinConfirmation? }, checkinWindow?: { from, until }, checkinHelpers?: { staffIds }, busHelpers?: { helpers: [{ staffId, vehicleId }] }, organizers?: { staffIds }, medicalStaff?: { staffIds }, parentContacts?: [{ id, title, staffId }] }` |
+| PUT | `/api/settings` | admin | `{ checkinLocation?: { lat, lng, radiusM }, notifications?: { bedroomChanges?, roleChanges?, checkinConfirmation?, …, checkinReminder? }, checkinWindow?: { from, until }, checkinReminder?: { at }, checkinHelpers?: { staffIds }, busHelpers?: { helpers: [{ staffId, vehicleId }] }, organizers?: { staffIds }, medicalStaff?: { staffIds }, parentContacts?: [{ id, title, staffId }] }` |
 
 `checkinLocation` defaults to Igreja Presbiteriana em Alphaville
 (`-23.48053637134259, -46.83077891444747`, radius 300 m). `radiusM` must be
-between 50 and 5000. `notifications` keys are booleans (all default `true`);
-the patch is partial. The response also carries `smsEnabled` (read-only:
+between 50 and 5000. `notifications` keys are booleans (all default **`false`**);
+the patch is partial. `checkinReminder.at` is the ISO instant at which the
+whole team is texted to do their check-in (`null` = no reminder); the response
+also carries the read-only `checkinReminder.sentAt`, reset whenever `at` changes. The response also carries `smsEnabled` (read-only:
 whether a Comtele key is configured). Errors: `LOCATION_INVALID`,
-`NOTIFICATIONS_INVALID`, `WINDOW_INVALID`, `HELPERS_INVALID`, `ORGANIZERS_INVALID`, `CONTACTS_INVALID`, `NOTHING_TO_UPDATE`.
+`NOTIFICATIONS_INVALID`, `WINDOW_INVALID`, `REMINDER_INVALID`, `HELPERS_INVALID`, `ORGANIZERS_INVALID`, `CONTACTS_INVALID`, `NOTHING_TO_UPDATE`.
 
 ### Contacts shared with parents 📞
 
@@ -435,6 +449,7 @@ carries details — the app is the source of truth:
 | `roleChanges` | a person is assigned / reassigned (role or detail) / removed in an event, the event's date or time changes, the event is deleted, or a role's name / instructions / "for everyone" flag changes | each person whose duty in that event changed (explicit assignment or "for everyone" default) |
 | `checkinConfirmation` | a team member's church check-in is recorded (`POST /api/staff/me/checkin` or the admin roll call `POST /api/staff/:id/checkin`) | that person — *"seu check-in foi feito com sucesso. Lembre-se de conferir as crianças do seu quarto no app."* Sent at once (not coalesced); undoing a check-in sends nothing |
 | `occurrences` | an occurrence is registered (`POST /api/occurrences`, by an admin or the medical team) | every admin account with a phone, except the one who registered it — names who registered and who is involved (never the description). Sent at once; admins are not gated by the team access window |
+| `checkinReminder` | the instant `settings.checkinReminder.at` is reached (timer re-armed on every settings write and at boot, hourly safety net) | every active team member with a phone who has no check-in yet — *"chegou a hora do seu check-in!"*. **Nothing goes out while the date is unset**; sent ONCE per date (atomic claim on `sentAt`), picking a new date re-arms it. Not gated by the team access window |
 
 Rules: only staff with a phone are texted; the notifier diffs BEFORE/AFTER
 records so no-op edits (e.g. renaming a kid) send nothing; every change for the
