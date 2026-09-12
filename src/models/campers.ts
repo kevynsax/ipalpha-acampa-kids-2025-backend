@@ -20,7 +20,7 @@ function toCamper(doc: Record<string, unknown> | null): Camper | null {
     schoolGrade: s("schoolGrade"),
     church: s("church"),
     invitedBy: s("invitedBy"),
-    caretaker: s("caretaker"),
+    caretakerId: (doc.caretakerId as string) ?? null,
     qrToken: s("qrToken"),
     externalId: s("externalId"),
     team: (doc.team as string) ?? null,
@@ -62,10 +62,11 @@ export type CamperData = Omit<Camper, "_id" | "createdAt" | "updatedAt" | "check
 /** which document field holds each kind of check-in */
 export const CHECKIN_FIELD: Record<CheckinKind, "checkin" | "busCheckin"> = { church: "checkin", bus: "busCheckin" };
 
-export async function listCampers(filter: { bedroom?: string } = {}): Promise<Camper[]> {
+export async function listCampers(filter: { bedroom?: string; caretakerId?: string } = {}): Promise<Camper[]> {
   const db = await getDb();
   const query: Record<string, unknown> = {};
   if (filter.bedroom) query.bedroom = filter.bedroom;
+  if (filter.caretakerId) query.caretakerId = filter.caretakerId;
   const docs = await db.collection(COLLECTION).find(query).collation({ locale: "pt", strength: 1 }).sort({ name: 1 }).toArray();
   return docs.map((d) => toCamper(d as Record<string, unknown>)!);
 }
@@ -104,6 +105,20 @@ export async function updateCamper(id: string, patch: Partial<CamperData>): Prom
     .collection(COLLECTION)
     .findOneAndUpdate({ _id: new ObjectId(id) }, { $set: { ...patch, updatedAt: new Date() } }, { returnDocument: "after" });
   return toCamper(res as Record<string, unknown> | null);
+}
+
+/** Every kid of caretaker `from` goes to caretaker `to` (null = orphans). Returns how many moved. */
+export async function reassignCampers(from: string, to: string | null, extra: Partial<CamperData> = {}): Promise<number> {
+  const db = await getDb();
+  const res = await db.collection(COLLECTION).updateMany({ caretakerId: from }, { $set: { ...extra, caretakerId: to, updatedAt: new Date() } });
+  return res.modifiedCount;
+}
+
+/** The given kids (by id) get caretaker `to` (null = orphans). */
+export async function setCaretakerOf(ids: string[], to: string | null): Promise<void> {
+  if (ids.length === 0) return;
+  const db = await getDb();
+  await db.collection(COLLECTION).updateMany({ _id: { $in: ids.map((id) => new ObjectId(id)) } }, { $set: { caretakerId: to, updatedAt: new Date() } });
 }
 
 /** Marks the kid as arrived (church) or boarded (bus); `null` undoes it. */
@@ -170,6 +185,7 @@ export async function ensureCamperIndexes(): Promise<void> {
   await db.collection(COLLECTION).createIndex({ bedroom: 1 });
   await db.collection(COLLECTION).createIndex({ team: 1 });
   await db.collection(COLLECTION).createIndex({ externalId: 1 }, { sparse: true });
+  await db.collection(COLLECTION).createIndex({ caretakerId: 1 });
   await db.collection(COLLECTION).createIndex({ qrToken: 1 }, { sparse: true });
   await db.collection(LOG_COLLECTION).createIndex({ camperId: 1, at: -1 });
   await db.collection(LOG_COLLECTION).createIndex({ at: -1 });

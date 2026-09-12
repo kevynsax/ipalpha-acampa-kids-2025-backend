@@ -3,8 +3,9 @@ import { createMiddleware } from "hono/factory";
 import { publish } from "../services/realtime";
 import { requireAuth } from "../middleware/auth";
 import { requireAdmin, requireRole } from "../middleware/roles";
-import { findBedroomById } from "../models/bedrooms";
-import { listCampers } from "../models/campers";
+import { countStaffPerBedroom, findBedroomById } from "../models/bedrooms";
+import { countCampersPerBedroom } from "../models/campers";
+import { listCampers, reassignCampers, setCaretakerOf } from "../models/campers";
 import { listEvents, listRoles, unassignStaffEverywhere } from "../models/schedule";
 import { serializeCamperList } from "./campers";
 import {
@@ -21,12 +22,13 @@ import {
   type StaffData,
 } from "../models/staff";
 import { logCheckin } from "../models/campers";
-import { STAFF_CATEGORY_KEYS, type Role, type SessionUser, type Staff } from "../types";
+import { bedroomCapacity, ROOM_ROLES, STAFF_CATEGORY_KEYS, type Role, type RoomRole, type SessionUser, type Staff } from "../types";
 import { canHandleVests, hideOwnBedroom, resolveScope, staffVisibility, type Scope } from "../services/scope";
-import { bedroomFullMessage, isInvalid, parseBedroom, parseMulti, parseSingle, parseText } from "./_validate";
+import { bedroomFullMessage, isInvalid, parseBedroom, parseMulti, parseSingle, parseTeam, parseText } from "./_validate";
+import { clearJokerEverywhere } from "../models/teams";
 import { distanceMeters, normalizeBrazilPhone, nowInSaoPauloWallClock, saoPauloWallClock, saoPauloWallClockToIso, todayInSaoPaulo } from "../utils";
 import { getSettings } from "../models/settings";
-import { notifyCheckin, notifyStaffChange, syncWelcomes } from "../services/notify";
+import { notifyCaretakerChange, notifyCheckin, notifyStaffChange, syncWelcomes } from "../services/notify";
 
 interface Env {
   Variables: {
@@ -65,12 +67,14 @@ export function serializeStaffFor(s: Staff, scope: Scope) {
   const full = serialize(s);
   // draft rooms: the person's own record travels without the bedroom
   if (vis === "full") return hideOwnBedroom(scope) ? { ...full, bedroom: null } : full;
+  // the room is only revealed for a roommate (the viewer already knows their own room)
+  const roommate = !scope.all && !scope.kidsRoomsDraft && scope.bedroom !== null && s.bedroom === scope.bedroom;
   return {
     ...full,
     redacted: true,
     phone: vis === "contact" ? s.phone : null,
     team: null,
-    bedroom: null,
+    bedroom: roommate ? s.bedroom : null,
     transportation: null,
     allergies: [],
     drugAllergies: [],
@@ -97,6 +101,7 @@ function serialize(s: Staff) {
     active: s.active,
     team: s.team,
     bedroom: s.bedroom,
+    roomRole: s.roomRole,
     transportation: s.transportation,
     allergies: s.allergies,
     drugAllergies: s.drugAllergies,
@@ -149,21 +154,28 @@ async function buildPatch(
     patch.active = active;
   }
 
-  const singles: ["team" | "transportation", string][] = [
-    ["team", "Time"],
-    ["transportation", "Transporte"],
-  ];
-  for (const [field, label] of singles) {
-    if (!has(field)) continue;
-    const v = await parseSingle(body[field], STAFF_CATEGORY_KEYS[field], label);
-    if (isInvalid(v)) return { code: `${field.toUpperCase()}_INVALID`, message: v.error };
-    patch[field] = v;
+  if (has("team")) {
+    const v = await parseTeam(body.team);
+    if (isInvalid(v)) return { code: "TEAM_INVALID", message: v.error };
+    patch.team = v;
+  }
+
+  if (has("transportation")) {
+    const v = await parseSingle(body.transportation, STAFF_CATEGORY_KEYS.transportation, "Transporte");
+    if (isInvalid(v)) return { code: "TRANSPORTATION_INVALID", message: v.error };
+    patch.transportation = v;
   }
 
   if (has("bedroom")) {
     const v = await parseBedroom(body.bedroom);
     if (isInvalid(v)) return { code: "BEDROOM_INVALID", message: v.error };
     patch.bedroom = v;
+  }
+
+  if (has("roomRole")) {
+    const v = body.roomRole === undefined ? "helper" : body.roomRole;
+    if (!ROOM_ROLES.includes(v as RoomRole)) return { code: "ROOM_ROLE_INVALID", message: "Função no quarto deve ser responsável ou auxiliar." };
+    patch.roomRole = v as RoomRole;
   }
 
   const multis: [("allergies" | "drugAllergies" | "healthIssues"), string][] = [
@@ -500,19 +512,98 @@ staff.put("/:id", async (c) => {
   }
 
   const updated = await updateStaff(existing._id, result.patch);
-  publish("staff", "bedrooms");
+  // left the room, or stopped being a caretaker there → their kids are orphans now
+  const lostKids = (updated!.bedroom !== existing.bedroom || updated!.roomRole !== "caretaker" || !updated!.active) && existing.roomRole === "caretaker";
+  const orphaned = lostKids ? await reassignCampers(existing._id, null) : 0;
+  publish("staff", "bedrooms", ...(orphaned ? ["campers" as const] : []));
   // fire-and-forget: the SMS never delays the write (deactivation is silent)
   if (!existing.active && updated!.active) void syncWelcomes();
   else if (updated!.active) void notifyStaffChange(existing, updated!);
   return c.json({ staff: serialize(updated!) });
 });
 
+/**
+ * POST /api/staff/:id/move  { bedroom, kids, [swapWith | assignTo] }
+ * Moves a CARETAKER to another room (`bedroom` null = no room), deciding
+ * what happens to the kids under their care:
+ *   kids: "orphan"  → the kids stay in the room without a caretaker
+ *   kids: "bring"   → the kids move along (same room, same caretaker)
+ *   kids: "assign"  → the kids stay and go to `assignTo` (a member of that
+ *                     room — a helper is promoted to caretaker)
+ *   kids: "swap"    → exchange rooms with `swapWith` (a caretaker of the
+ *                     target room): each one's kids go to the other
+ * Every branch keeps Camper.caretakerId pointing at a caretaker of the kid's
+ * own room. Bed positions are cleared when kids change room.
+ */
+staff.post("/:id/move", async (c) => {
+  const me = await findStaffById(c.req.param("id"));
+  if (!me) return fail(c, "STAFF_NOT_FOUND", "Membro da equipe não encontrado.", 404);
+  const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+  if (!body) return fail(c, "BODY_INVALID", "Corpo da requisição inválido.");
+  const target = await parseBedroom(body.bedroom);
+  if (isInvalid(target)) return fail(c, "BEDROOM_INVALID", target.error);
+  const kids = body.kids;
+  if (kids !== "orphan" && kids !== "bring" && kids !== "assign" && kids !== "swap") return fail(c, "KIDS_INVALID", "Diga o que fazer com as crianças.");
+  if (target === me.bedroom && kids !== "assign") return fail(c, "SAME_ROOM", "A pessoa já está neste quarto.");
+
+  const myKids = await listCampers({ caretakerId: me._id });
+  const other = typeof body.swapWith === "string" ? await findStaffById(body.swapWith) : typeof body.assignTo === "string" ? await findStaffById(body.assignTo) : null;
+  const touched = new Set<string>();
+
+  if (kids === "swap") {
+    if (!other || !other.active || !target || other.bedroom !== target) return fail(c, "SWAP_INVALID", "Escolha alguém que durma no quarto de destino para trocar.", 409);
+    const theirKids = await listCampers({ caretakerId: other._id });
+    // capacities are unaffected (one person out, one in) — only the kids swap hands
+    await updateStaff(me._id, { bedroom: target, roomRole: "caretaker" });
+    await updateStaff(other._id, { bedroom: me.bedroom, roomRole: me.roomRole === "caretaker" ? "caretaker" : other.roomRole });
+    // kids stay in their rooms and get the caretaker who arrived
+    await setCaretakerOf(myKids.map((k) => k._id), other._id);
+    await setCaretakerOf(theirKids.map((k) => k._id), me._id);
+    for (const k of [...myKids, ...theirKids]) touched.add(k._id);
+    void notifyCaretakerChange(myKids, me, other);
+    void notifyCaretakerChange(theirKids, other, me);
+  } else if (kids === "assign") {
+    if (!other || !other.active || other._id === me._id || other.bedroom !== me.bedroom) return fail(c, "ASSIGN_INVALID", "Escolha alguém do mesmo quarto para assumir as crianças.", 409);
+    if (target !== me.bedroom) {
+      const full = await bedroomFullMessage(target, me.bedroom);
+      if (full) return fail(c, "BEDROOM_FULL", full, 409);
+      await updateStaff(me._id, { bedroom: target });
+    }
+    if (other.roomRole !== "caretaker") await updateStaff(other._id, { roomRole: "caretaker" });
+    await reassignCampers(me._id, other._id);
+    for (const k of myKids) touched.add(k._id);
+    void notifyCaretakerChange(myKids, me, other);
+  } else if (kids === "bring") {
+    if (!target) return fail(c, "BEDROOM_INVALID", "Escolha o quarto de destino para levar as crianças.");
+    const room = await findBedroomById(target);
+    const [st, ca] = await Promise.all([countStaffPerBedroom(), countCampersPerBedroom()]);
+    const occupied = (st.get(target) ?? 0) + (ca.get(target) ?? 0);
+    if (room && occupied + 1 + myKids.length > bedroomCapacity(room)) return fail(c, "BEDROOM_FULL", `O quarto ${room.name} não tem lugar para você e ${myKids.length} crianças.`, 409);
+    await updateStaff(me._id, { bedroom: target, roomRole: "caretaker" });
+    await reassignCampers(me._id, me._id, { bedroom: target, bed: null });
+    for (const k of myKids) touched.add(k._id);
+  } else {
+    const full = await bedroomFullMessage(target, me.bedroom);
+    if (full) return fail(c, "BEDROOM_FULL", full, 409);
+    await updateStaff(me._id, { bedroom: target });
+    await reassignCampers(me._id, null);
+    for (const k of myKids) touched.add(k._id);
+    void notifyCaretakerChange(myKids, me, null);
+  }
+
+  const after = (await findStaffById(me._id))!;
+  publish("staff", "bedrooms", "campers");
+  void notifyStaffChange(me, after);
+  if (other) void findStaffById(other._id).then((o) => o && notifyStaffChange(other, o));
+  return c.json({ staff: serialize(after), movedKids: touched.size });
+});
+
 staff.delete("/:id", async (c) => {
   const id = c.req.param("id");
   const ok = await deleteStaff(id);
   if (!ok) return fail(c, "STAFF_NOT_FOUND", "Membro da equipe não encontrado.", 404);
-  await unassignStaffEverywhere(id);
-  publish("staff", "bedrooms", "events");
+  const [, , orphaned] = await Promise.all([unassignStaffEverywhere(id), clearJokerEverywhere(id), reassignCampers(id, null)]);
+  publish("staff", "bedrooms", "events", "teams", ...(orphaned ? ["campers" as const] : []));
   return c.json({ success: true });
 });
 

@@ -6,6 +6,10 @@ import { listOccurrences } from "../models/occurrences";
 import { listPrepSections } from "../models/preparation";
 import { listEvents, listRoles } from "../models/schedule";
 import { listStaff } from "../models/staff";
+import { listTeams } from "../models/teams";
+import { listScores } from "../models/scores";
+import { serializeTeam } from "../routes/teams";
+import { serializeScore } from "../routes/scores";
 import { occupancy, serializeBedroom } from "../routes/bedrooms";
 import { serializeCamperList } from "../routes/campers";
 import { serializeCategory } from "../routes/categories";
@@ -27,8 +31,8 @@ import { canSeeBedroom, resolveScope, scopeEvent, scopeRoles, type Viewer } from
  */
 const READABLE: Record<Role, readonly Collection[]> = {
   admin: COLLECTIONS,
-  staff: ["campers", "staff", "bedrooms", "categories", "roles", "events", "preparation", "instructions", "occurrences", "settings"],
-  health_staff: ["campers", "staff", "bedrooms", "categories", "roles", "events", "preparation", "instructions", "occurrences", "settings"],
+  staff: ["campers", "staff", "bedrooms", "categories", "teams", "scores", "roles", "events", "preparation", "instructions", "occurrences", "settings"],
+  health_staff: ["campers", "staff", "bedrooms", "categories", "teams", "scores", "roles", "events", "preparation", "instructions", "occurrences", "settings"],
   parent: ["categories"],
 };
 
@@ -87,6 +91,12 @@ export async function loadCollections(viewer: Viewer, names: readonly Collection
           });
           break;
         }
+        case "teams":
+          out.teams = (await listTeams()).map(serializeTeam);
+          break;
+        case "scores":
+          out.scores = (await listScores()).map(serializeScore);
+          break;
         case "roles":
           out.roles = (await schedule!).roles.map(serializeRole);
           break;

@@ -1,6 +1,7 @@
 import { checkinWindowOpen, getSettings, staffAccessOpen } from "../models/settings";
 import { findStaffByPhone } from "../models/staff";
 import type { CampEvent, Camper, Role, ScheduleRole, Settings, Staff } from "../types";
+import { campInProgress, campPeriod } from "./camp";
 
 /**
  * Data scope of a session — the ONE place that decides what a non-admin may
@@ -8,9 +9,15 @@ import type { CampEvent, Camper, Role, ScheduleRole, Settings, Staff } from "../
  * through here, so the frontend never receives what it must not show.
  *
  *   admin        → everything
- *   staff /      → only their own room: the kids sleeping there (full record,
- *   health_staff   health included — they look after them), their own staff
- *                  record, and the NAME of the colleagues in the same room.
+ *   staff /      → only their own room. A CARETAKER (staff.roomRole) gets the
+ *   health_staff   kids under THEIR care (Camper.caretakerId) any time, and the
+ *                  other kids of the room only WHILE THE CAMP IS HAPPENING
+ *                  (see services/camp.ts); a HELPER gets the room's kids only
+ *                  during the camp. Both as "care" records: health, notes and
+ *                  preferences included, but NO guardian / emergency contact
+ *                  data (that stays with the admin, the medical team and the
+ *                  check-in helpers). Plus their own staff record and the
+ *                  NAME + room role of the colleagues in the same room.
  *                  The programme: every event, but only the roles that apply
  *                  to THEM (see scopeEvent) — never who does what elsewhere.
  *   check-in     → a staff member the admin listed as a check-in helper, WHILE
@@ -32,6 +39,9 @@ import type { CampEvent, Camper, Role, ScheduleRole, Settings, Staff } from "../
  *                  the whole programme (every role, every assignment), and
  *                  may write the schedule. Campers / bedrooms: as any team
  *                  member. Never writes staff.
+ *   game         → a staff member the admin listed as a GAME organizer (no
+ *   organizer      window): everything an organizer may do, plus the
+ *                  scoreboard (Placar): give / take / zero points of any team.
  *   medical      → a staff member the admin listed as MEDICAL team (no time
  *                  window): every camper in FULL (health included), every
  *                  bedroom — hence every vehicle — the whole time. Read-only:
@@ -67,22 +77,27 @@ export type Scope =
       checkinHelper: boolean;
       /** the vehicle (transportation option id) the admin linked this person to as a BUS helper, while the window is open; null otherwise */
       busHelperVehicle: string | null;
-      /** true when this person is a listed programme ORGANIZER (no window) */
+      /** true when this person is a listed programme ORGANIZER (no window) — game organizers count too */
       organizer: boolean;
+      /** true when this person is a listed GAME organizer (no window): organizer + writes the scoreboard */
+      gameOrganizer: boolean;
       /** true when this person is on the MEDICAL team (no window): every camper + bedroom in full, read-only */
       medical: boolean;
       /** true when this person hands out / takes back the team VESTS (no window): every staff member as name + phone */
       vestHelper: boolean;
       /** true while the kids' room allocation is still a draft (Settings → Geral): the viewer's OWN room shows no kids */
       kidsRoomsDraft: boolean;
+      /** true while the camp is happening (first → last programme day): the whole room's kids become visible */
+      campActive: boolean;
     };
 
-export const NO_ACCESS: Scope = { all: false, staffId: null, bedroom: null, checkinHelper: false, busHelperVehicle: null, organizer: false, medical: false, vestHelper: false, kidsRoomsDraft: false };
+export const NO_ACCESS: Scope = { all: false, staffId: null, bedroom: null, checkinHelper: false, busHelperVehicle: null, organizer: false, gameOrganizer: false, medical: false, vestHelper: false, kidsRoomsDraft: false, campActive: false };
 
 /** On some admin list (organizer, church / bus helper, medical, vest helper, parent contact)? These people are never gated by the staff access window. */
 export function isPrivilegedStaff(staffId: string, s: Settings): boolean {
   return (
     s.organizers.staffIds.includes(staffId) ||
+    s.gameOrganizers.staffIds.includes(staffId) ||
     s.medicalStaff.staffIds.includes(staffId) ||
     s.vestHelpers.staffIds.includes(staffId) ||
     s.checkinHelpers.staffIds.includes(staffId) ||
@@ -104,8 +119,10 @@ export async function resolveScope(viewer: Viewer): Promise<Scope> {
   const settings = await getSettings();
   // ORDINARY team members (on no list at all) only get in during the staff access window
   if (!staffHasAccess(me._id, settings)) return NO_ACCESS;
-  const { checkinWindow, checkinTestMode, checkinHelpers, busHelpers, organizers, medicalStaff, vestHelpers, kidsRoomsDraft } = settings;
-  const organizer = organizers.staffIds.includes(me._id);
+  const { checkinWindow, checkinTestMode, checkinHelpers, busHelpers, organizers, gameOrganizers, medicalStaff, vestHelpers, kidsRoomsDraft } = settings;
+  const gameOrganizer = gameOrganizers.staffIds.includes(me._id);
+  // a game organizer IS an organizer (same rights) + the scoreboard
+  const organizer = gameOrganizer || organizers.staffIds.includes(me._id);
   const medical = medicalStaff.staffIds.includes(me._id);
   const vestHelper = vestHelpers.staffIds.includes(me._id);
   const listedChurch = checkinHelpers.staffIds.includes(me._id);
@@ -114,7 +131,13 @@ export async function resolveScope(viewer: Viewer): Promise<Scope> {
   const windowOpen = checkinTestMode || checkinWindowOpen(checkinWindow);
   const checkinHelper = windowOpen && listedChurch;
   const busHelperVehicle = windowOpen ? linkedVehicle : null;
-  return { all: false, staffId: me._id, bedroom: me.bedroom, checkinHelper, busHelperVehicle, organizer, medical, vestHelper, kidsRoomsDraft };
+  const campActive = campInProgress(await campPeriod());
+  return { all: false, staffId: me._id, bedroom: me.bedroom, checkinHelper, busHelperVehicle, organizer, gameOrganizer, medical, vestHelper, kidsRoomsDraft, campActive };
+}
+
+/** May this session write the scoreboard (give / take / zero points)? (admin or game organizer) */
+export function canKeepScore(scope: Scope): boolean {
+  return scope.all || scope.gameOrganizer;
 }
 
 /** May this session hand out / take back the team vests? (admin or vest helper) */
@@ -141,18 +164,26 @@ export function canSeeBedroom(scope: Scope, bedroomId: string): boolean {
   return scope.all || scope.medical || scope.checkinHelper || scope.busHelperVehicle !== null || (!scope.kidsRoomsDraft && scope.bedroom !== null && scope.bedroom === bedroomId);
 }
 
-/** "full" = whole record, "name" = roll-call view (no health / contacts / notes), "none" = invisible. */
-export type CamperVisibility = "full" | "name" | "none";
+/**
+ * "full" = whole record, "care" = what a room caretaker / helper needs (health,
+ * notes, preferences — no guardian / emergency / documents), "name" = roll-call
+ * view (no health / contacts / notes), "none" = invisible.
+ */
+export type CamperVisibility = "full" | "care" | "name" | "none";
 
-export function camperVisibility(scope: Scope, k: Pick<Camper, "bedroom" | "transportation">): CamperVisibility {
+export function camperVisibility(scope: Scope, k: Pick<Camper, "bedroom" | "transportation" | "caretakerId">): CamperVisibility {
   if (scope.all || scope.medical || scope.checkinHelper) return "full";
-  // own room: hidden while the kids' allocation is still a draft
-  if (!scope.kidsRoomsDraft && k.bedroom !== null && k.bedroom === scope.bedroom) return "full";
+  if (!scope.kidsRoomsDraft && scope.staffId !== null) {
+    // the kids under my care: any time
+    if (k.caretakerId === scope.staffId) return "care";
+    // the rest of my room: only while the camp is happening
+    if (scope.campActive && k.bedroom !== null && k.bedroom === scope.bedroom) return "care";
+  }
   // a bus helper works the door of ONE vehicle: its kids, names only
   return scope.busHelperVehicle !== null && k.transportation === scope.busHelperVehicle ? "name" : "none";
 }
 
-export function canSeeCamper(scope: Scope, k: Pick<Camper, "bedroom" | "transportation">): boolean {
+export function canSeeCamper(scope: Scope, k: Pick<Camper, "bedroom" | "transportation" | "caretakerId">): boolean {
   return camperVisibility(scope, k) !== "none";
 }
 

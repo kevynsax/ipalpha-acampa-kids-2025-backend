@@ -9,7 +9,7 @@
  *                                        The 2nd column ("PG") is the person's function in
  *                                        the pequeno grupo: Líder (gives the study) or Auxiliar.
  *
- * Requires: seed:categories, seed:bedrooms, seed:schedule (run before).
+ * Requires: seed:categories, seed:teams, seed:bedrooms, seed:schedule (run before).
  *
  * Re-runnable: people are matched by phone, falling back to name. Fields the
  * admin may have edited (name, active, observations) are only set on insert;
@@ -21,6 +21,7 @@ import * as XLSX from "xlsx";
 import { closeDb } from "../db";
 import { findBedroomByName, listBedrooms } from "../models/bedrooms";
 import { listCategories } from "../models/categories";
+import { listTeams } from "../models/teams";
 import { listEvents, listRoles, updateEvent } from "../models/schedule";
 import { ensureStaffIndexes, insertStaff, listStaff, updateStaff, type StaffData } from "../models/staff";
 import type { EventAssignment } from "../types";
@@ -239,13 +240,13 @@ async function main() {
     if (!o) throw new Error(`option not found: ${catKey} / ${label}`);
     return o.id;
   };
+  const teams = await listTeams();
   const teamId = (raw: string): string | null => {
     if (!raw) return null;
-    const cat = categories.find((c) => c.key === "equipe")!;
     const want = norm(raw).replace(/^time /, "").replace("galeleia", "galileia");
-    const o = cat.options.find((x) => norm(x.label).replace(/^time /, "") === want);
-    if (!o) console.warn(`  ⚠️  team not found: "${raw}"`);
-    return o?.id ?? null;
+    const t = teams.find((x) => norm(x.name).replace(/^time /, "") === want);
+    if (!t) console.warn(`  ⚠️  team not found: "${raw}"`);
+    return t?._id ?? null;
   };
   const transportId = (raw: string): string | null => {
     if (!raw) return null;
@@ -320,7 +321,7 @@ async function main() {
   const roleIdByName = new Map(roles.map((r) => [norm(r.name), r._id]));
   const forEveryone = new Set(roles.filter((r) => r.forEveryone).map((r) => r._id));
   const events = await listEvents();
-  const teamLabels = categories.find((c) => c.key === "equipe")!.options.map((o) => o.label);
+  const teamLabels = teams.map((t) => t.name);
 
   const resolveStaff = (pdfName: string): string | null => {
     const key = norm(pdfName);

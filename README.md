@@ -142,6 +142,7 @@ in the `bedrooms` collection (unique by `name`), grouped by wing
 (computed from staff assignments).
 
 ```bash
+bun run seed:teams      # 8 teams (times) with a colour each
 bun run seed:bedrooms   # 39 rooms; layouts inferred from the 2025 allocation (7 / 14 / 2 places)
 ```
 
@@ -223,6 +224,20 @@ transport, allergies and chronic conditions (category option ids); guardian /
 insurance / emergency contact kept as text. `weightKg` is a number (one
 decimal, 5–200) or null — `WEIGHT_INVALID` otherwise.
 
+**Caretaker (`caretakerId`)** — the staff member responsible for the kid: must
+sleep in the kid's room with `roomRole: "caretaker"` (409 `CARETAKER_INVALID`
+otherwise). A room change without `caretakerId` makes the kid an **orphan**
+(`caretakerId: null`) — orphans are listed first on the admin page. When a
+caretaker leaves the room / becomes a helper / is deleted, their kids become
+orphans.
+
+**What the team sees** (services/scope.ts): a caretaker gets the kids under
+their care any time; the other kids of their room — and every kid for a
+helper — only WHILE THE CAMP IS HAPPENING (first → last programme day, São
+Paulo). Those come as **care** records (`contactsHidden: true`): health,
+notes, preferences, room / team / bus — no guardian, emergency, insurance or
+document data. Admin, medical team and check-in helpers keep the full record.
+
 ```bash
 bun run seed:campers   # 152 kids (+ dedup of emergency contacts and health notes)
 bun run seed:notifications  # resets settings.notifications: every SMS kind OFF, reminder date cleared
@@ -277,14 +292,17 @@ keys: `team → equipe`, `transportation → transporte`, `allergies → alergia
 `healthIssues → condicao-cronica`. `bedroom` is a **Bedroom id** — assigning
 someone to a full room fails with 409 `BEDROOM_FULL`.
 `foodRestrictions` and `medicines` are free text (≤ 500 chars).
+`roomRole` is `"caretaker"` (responsável: looks after specific kids) or
+`"helper"` (auxiliar, the default).
 
 | Method | Path | Who | Body |
 |---|---|---|---|
 | GET | `/api/staff?active=true\|false` | admin, staff, health_staff | — |
 | GET | `/api/staff/:id` | admin, staff, health_staff | — |
 | POST | `/api/staff` | admin | `{ name, phone, active?, team?, bedroom?, transportation?, allergies?, foodRestrictions?, healthIssues?, medicines? }` |
-| PUT | `/api/staff/:id` | admin | partial (same fields) |
-| DELETE | `/api/staff/:id` | admin | — |
+| PUT | `/api/staff/:id` | admin | partial (same fields + `roomRole`) |
+| POST | `/api/staff/:id/move` | admin | `{ bedroom, kids: "orphan" \| "bring" \| "assign" \| "swap", assignTo?, swapWith? }` — moves a caretaker and decides what happens to their kids: stay orphans, come along (room + bed cleared), go to `assignTo` (same room; a helper is promoted) or swap with `swapWith` (target room: both people switch rooms, each takes the other's kids) |
+| DELETE | `/api/staff/:id` | admin | — (their kids become orphans) |
 | POST / DELETE | `/api/staff/:id/checkin` | admin | marks / unmarks the person as arrived (roll call) |
 | GET | `/api/staff/me/checkin` | staff, health_staff, admin | → `{ allowed, reason, date, opensAt, location, staff }` — can the caller check themselves in right now? |
 | POST | `/api/staff/me/checkin` | staff, health_staff, admin | `{ lat, lng, accuracyM? }` → `{ staff, distanceM }` |
@@ -372,7 +390,7 @@ Until an admin saves it, the defaults apply.
 | Method | Path | Who | Body |
 |---|---|---|---|
 | GET | `/api/settings` | any logged-in role | — |
-| PUT | `/api/settings` | admin | `{ checkinLocation?: { lat, lng, radiusM }, notifications?: { bedroomChanges?, roleChanges?, checkinConfirmation?, …, checkinReminder? }, checkinWindow?: { from, until }, checkinReminder?: { at }, checkinHelpers?: { staffIds }, busHelpers?: { helpers: [{ staffId, vehicleId }] }, organizers?: { staffIds }, medicalStaff?: { staffIds }, parentContacts?: [{ id, title, staffId }] }` |
+| PUT | `/api/settings` | admin | `{ checkinLocation?: { lat, lng, radiusM }, notifications?: { bedroomChanges?, roleChanges?, checkinConfirmation?, …, checkinReminder? }, checkinWindow?: { from, until }, checkinReminder?: { at }, checkinHelpers?: { staffIds }, busHelpers?: { helpers: [{ staffId, vehicleId }] }, organizers?: { staffIds }, gameOrganizers?: { staffIds }, medicalStaff?: { staffIds }, vestHelpers?: { staffIds }, parentContacts?: [{ id, title, staffId }] }` |
 
 `checkinLocation` defaults to Igreja Presbiteriana em Alphaville
 (`-23.48053637134259, -46.83077891444747`, radius 300 m). `radiusM` must be
@@ -435,6 +453,67 @@ check-ins (those keep their own rules). Staff and programme: as any team
 member. Saving the list publishes `campers`, `bedrooms`; the frontend's
 window-close purge skips medical members.
 
+### Game organizers (placar) 🏆
+
+`gameOrganizers: { staffIds: string[] }` — **no time window**. Everything an
+`organizer` may do (scope `organizer: true` is derived from either list) PLUS
+`gameOrganizer: true`: writing the scoreboard (`POST /api/scores`,
+`POST /api/scores/reset/:teamId`, `DELETE /api/scores/:id`). Joining the
+list sends the enrolment SMS.
+
+### Vest helpers (coletes) 🦺
+
+`vestHelpers: { staffIds: string[] }` — **no time window**. The people who
+hand out the team vests at the start of the camp and take them back at the
+end (the admin does not do it). A listed person's scope gets `vestHelper:
+true`: `staffVisibility` is `"contact"` for **every staff member** — the
+record travels `redacted` with only `name`, `phone` and `vest` (never health,
+room, team or check-in). They may call:
+
+| Method | Path | Who | Effect |
+|---|---|---|---|
+| POST / DELETE | `/api/staff/:id/vest/delivery` | admin, vest helper | stamps / clears `vest.delivered` |
+| POST / DELETE | `/api/staff/:id/vest/return` | admin, vest helper | stamps / clears `vest.returned` (needs a delivery) |
+
+`Staff.vest = { delivered: CamperCheckin | null, returned: CamperCheckin | null }`.
+Errors: `ALREADY_DELIVERED`, `NOT_DELIVERED`, `ALREADY_RETURNED`,
+`NOT_RETURNED` (409). `POST /api/settings/checkin/reset` clears the vests too.
+Joining the list sends the same enrolment SMS as the other lists
+(`notifications.enrolments`).
+
+## Teams (times) 🚩 and scoreboard (placar) 🏆
+
+Teams used to be the `equipe` category; they are now their own collection
+(`teams`: name, `color` #rrggbb, `jokerStaffId`, order). At boot
+`ensureTeamIndexes()` migrates the legacy category once: each option becomes
+a team with the **same id**, so `Staff.team` / `Camper.team` keep pointing at
+the right team, then the category is deleted. `bun run seed:teams` creates the
+2025 teams when missing.
+
+| Method | Path | Who | Body |
+|---|---|---|---|
+| GET | `/api/teams` | admin, staff, health_staff | — |
+| POST | `/api/teams` | admin | `{ name, color?, jokerStaffId? }` |
+| PUT | `/api/teams/reorder` | admin | `{ ids }` |
+| PUT | `/api/teams/:id` | admin | partial |
+| DELETE | `/api/teams/:id` | admin | — (unlinks kids / staff, drops the team's score lines) |
+
+The scoreboard is a **ledger** (`scores`): each line is `{ teamId, points,
+kind: add | remove | reset, note, by, createdAt }`; a team's score is the sum
+of its lines. Zeroing writes a `reset` line cancelling the current total, so
+the history survives.
+
+| Method | Path | Who | Body |
+|---|---|---|---|
+| GET | `/api/scores` | admin, staff, health_staff | — (newest first) |
+| POST | `/api/scores` | admin, game organizer | `{ teamId, points (≠ 0), note? }` |
+| POST | `/api/scores/reset/:teamId` | admin, game organizer | `{ note? }` |
+| DELETE | `/api/scores/:id` | admin, game organizer | — (undoes the line) |
+
+Errors: `TEAM_NOT_FOUND`, `NAME_DUPLICATE`, `COLOR_INVALID`, `JOKER_INVALID`,
+`POINTS_INVALID`, `ALREADY_ZERO`, `SCORE_NOT_FOUND`. Both collections travel
+in the realtime snapshot (`teams`, `scores`) to every team member.
+
 ## SMS notifications to the team 📲
 
 `services/notify.ts` texts the team members concerned by a change so they
@@ -445,7 +524,7 @@ carries details — the app is the source of truth:
 
 | Toggle (`settings.notifications`) | Fires when | Who gets it |
 |---|---|---|
-| `bedroomChanges` | a camper is created in, deleted from, or moved between bedrooms (`POST/PUT/DELETE /api/campers`) | active staff assigned to the room the kid left and/or entered |
+| `bedroomChanges` | a camper's `caretakerId` changes (`POST/PUT/DELETE /api/campers`, `POST /api/staff/:id/move`) | the caretaker who lost the kid and the one who received it — never helpers or the other caretakers of the room |
 | `roleChanges` | a person is assigned / reassigned (role or detail) / removed in an event, the event's date or time changes, the event is deleted, or a role's name / instructions / "for everyone" flag changes | each person whose duty in that event changed (explicit assignment or "for everyone" default) |
 | `checkinConfirmation` | a team member's church check-in is recorded (`POST /api/staff/me/checkin` or the admin roll call `POST /api/staff/:id/checkin`) | that person — *"seu check-in foi feito com sucesso. Lembre-se de conferir as crianças do seu quarto no app."* Sent at once (not coalesced); undoing a check-in sends nothing |
 | `occurrences` | an occurrence is registered (`POST /api/occurrences`, by an admin or the medical team) | every admin account with a phone, except the one who registered it — names who registered and who is involved (never the description). Sent at once; admins are not gated by the team access window |

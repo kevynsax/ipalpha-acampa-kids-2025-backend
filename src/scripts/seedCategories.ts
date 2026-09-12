@@ -3,10 +3,11 @@
  * camper and staff forms.
  *
  * Values come from the real 2025 spreadsheets:
- *   - acampakids_lista_geral_alfabetica.xlsx  (campers: Time, Cama, Transporte, Alergias, Condição crônica)
- *   - voluntarios-acampa-kids.xlsx            (staff:   Time, Transporte)
+ *   - acampakids_lista_geral_alfabetica.xlsx  (campers: Cama, Transporte, Alergias, Condição crônica)
+ *   - voluntarios-acampa-kids.xlsx            (staff:   Transporte)
  *
  * Bedrooms are NOT categories (they have bed layouts) — see seedBedrooms.ts.
+ * Teams are NOT categories either (name, colour, joker + scoreboard) — see seedTeams.ts.
  *
  * Re-runnable: default categories are UPSERTED (metadata + options refreshed,
  * existing option ids preserved when the label matches) and categories from
@@ -37,24 +38,7 @@ interface SeedCategory {
 }
 
 const defaults: SeedCategory[] = [
-  {
-    key: "equipe",
-    name: "Time",
-    emoji: "🚩",
-    description: "Time do acampamento",
-    appliesTo: ["camper", "staff"],
-    selection: "single",
-    options: [
-      "Time Belém",
-      "Time Calvário",
-      "Time Canaã",
-      "Time Éden",
-      "Time Galileia",
-      "Time Jericó",
-      "Time Jerusalém",
-      "Time Sinai",
-    ],
-  },
+  // the teams ("equipe") are NOT a category any more: see seedTeams.ts / models/teams.ts
   {
     key: "cama",
     name: "Cama",

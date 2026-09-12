@@ -2,6 +2,7 @@
 import { countStaffPerBedroom, findBedroomById } from "../models/bedrooms";
 import { countCampersPerBedroom } from "../models/campers";
 import { findCategoryByKey } from "../models/categories";
+import { findTeamById } from "../models/teams";
 import { bedroomCapacity } from "../types";
 
 export type Invalid = { error: string };
@@ -35,6 +36,14 @@ export function parseText(value: unknown, max = 500): string | Invalid {
   if (value === undefined || value === null) return "";
   if (typeof value !== "string") return { error: "Texto inválido." };
   return value.trim().slice(0, max);
+}
+
+/** Team id or null; { error } when the id is unknown. */
+export async function parseTeam(value: unknown): Promise<string | null | Invalid> {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string") return { error: "Time inválido." };
+  if (!(await findTeamById(value))) return { error: "Time não encontrado." };
+  return value;
 }
 
 /** Bedroom id or null; { error } when the id is unknown. */

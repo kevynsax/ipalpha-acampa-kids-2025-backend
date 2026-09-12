@@ -4,7 +4,8 @@ import { countCampersPerBedroom } from "../models/campers";
 import { findCategoryByKey } from "../models/categories";
 import { listRoles } from "../models/schedule";
 import { claimCheckinReminder, getSettings, staffAccessOpen } from "../models/settings";
-import { claimStaffWelcome, listStaff } from "../models/staff";
+import { claimStaffWelcome, findStaffById, listStaff } from "../models/staff";
+import { findTeamById } from "../models/teams";
 import { listAdmins } from "../models/users";
 import { STAFF_CATEGORY_KEYS } from "../types";
 import type { CampEvent, Camper, InstructionDoc, Occurrence, PrepSection, ScheduleRole, Settings, Staff } from "../types";
@@ -17,7 +18,8 @@ import { staffHasAccess } from "./scope";
  * WHAT changed in one short line each, so most of the time the person does
  * not even need to open the app:
  *
- *   - a kid moved into / out of someone's bedroom (created / deleted there)
+ *   - a kid was put under / taken from someone's care (caretakers only —
+ *     helpers are never texted about kids)
  *   - someone's role in an event changed (assigned, reassigned, removed,
  *     the event moved or was deleted)
  *   - a general Instruções / Preparação document changed, or the
@@ -285,38 +287,59 @@ export async function notifyOccurrence(o: Occurrence): Promise<void> {
   }
 }
 
-// ── bedroom changes ─────────────────────────────────────────────────────────
+// ── caretaker changes ─────────────────────────────────────────────────────
+
+async function countKidsOf(caretakerId: string): Promise<number> {
+  const { listCampers } = await import("../models/campers");
+  return (await listCampers({ caretakerId })).length;
+}
 
 /**
  * Call after a camper write with the record BEFORE and AFTER (null on create /
- * delete). Only the `bedroom` field matters here: the caretakers of the room
- * the kid left and of the room the kid entered are texted, with the kid's
- * name and the room's new head count.
+ * delete). Only `caretakerId` matters: the caretaker who LOST the kid and the
+ * one who RECEIVED it are texted. Helpers and the other caretakers of the
+ * room are never texted — they see it in the app.
  */
 export async function notifyCamperChange(before: Camper | null, after: Camper | null): Promise<void> {
   try {
-    const from = before?.bedroom ?? null;
-    const to = after?.bedroom ?? null;
+    const from = before?.caretakerId ?? null;
+    const to = after?.caretakerId ?? null;
     if (from === to) return;
     const settings = await getSettings();
     if (!settings.notifications.bedroomChanges) return;
     if (settings.kidsRoomsDraft) return; // rooms still being drafted: caretakers can't see the kids anyway
 
-    const kid = first((after ?? before)!.name);
-    const [staff, counts, fromName, toName] = await Promise.all([listStaff({ active: true }), countCampersPerBedroom(), bedroomName(from), bedroomName(to)]);
-    const heads = (id: string) => `agora ${counts.get(id) ?? 0} crianças`;
-    for (const s of staff) {
-      if (!s.bedroom) continue;
-      if (s.bedroom === from) {
-        const where = toName ? `foi para o quarto ${toName}` : "saiu do seu quarto";
-        enqueue(s, "bedroom", `${kid} ${where} (${heads(from!)})`, settings);
-      } else if (s.bedroom === to) {
-        const where = fromName ? `veio do quarto ${fromName}` : "";
-        enqueue(s, "bedroom", `${kid} entrou no seu quarto${where ? `, ${where}` : ""} (${heads(to!)})`, settings);
-      }
+    const kid = (after ?? before)!;
+    const [lost, got] = await Promise.all([from ? findStaffById(from) : null, to ? findStaffById(to) : null]);
+    if (lost?.active) enqueue(lost, "bedroom", `${first(kid.name)} não está mais sob seus cuidados${got ? ` (agora com ${first(got.name)})` : ""}`, settings);
+    if (got?.active && after) {
+      const [room, n] = await Promise.all([bedroomName(after.bedroom), countKidsOf(got._id)]);
+      enqueue(got, "bedroom", `${first(after.name)}${room ? ` (quarto ${room})` : ""} passou a ser sua responsabilidade (agora ${n} criança${n === 1 ? "" : "s"} com você)`, settings);
     }
   } catch (err) {
     console.error("notify: camper change failed", err);
+  }
+}
+
+/**
+ * Several kids changed hands at once (a caretaker moved rooms — see
+ * POST /api/staff/:id/move). One line for the caretaker who lost them and one
+ * for the one who received them (`to` null = the kids became orphans).
+ */
+export async function notifyCaretakerChange(kids: Camper[], from: Staff, to: Staff | null): Promise<void> {
+  try {
+    if (kids.length === 0) return;
+    const settings = await getSettings();
+    if (!settings.notifications.bedroomChanges || settings.kidsRoomsDraft) return;
+    const names = peopleLabel(kids);
+    const n = kids.length;
+    if (from.active) enqueue(from, "bedroom", `${names} não ${n === 1 ? "está" : "estão"} mais sob seus cuidados${to ? ` (agora com ${first(to.name)})` : ""}`, settings);
+    if (to?.active) {
+      const room = await bedroomName(kids[0].bedroom);
+      enqueue(to, "bedroom", `${names} ${n === 1 ? "passou" : "passaram"} a ser sua responsabilidade${room ? ` (quarto ${room})` : ""}`, settings);
+    }
+  } catch (err) {
+    console.error("notify: caretaker change failed", err);
   }
 }
 
@@ -337,7 +360,7 @@ export async function notifyStaffChange(before: Staff, after: Staff): Promise<vo
       enqueue(after, "myRoom", room ? `seu quarto agora é o ${room}` : "você saiu do seu quarto", settings);
     }
     if (before.team !== after.team) {
-      const team = await optionLabel(STAFF_CATEGORY_KEYS.team, after.team);
+      const team = after.team ? (await findTeamById(after.team))?.name ?? null : null;
       enqueue(after, "myTeam", team ? `seu time agora é ${team}` : "você saiu do seu time", settings);
     }
     if (before.transportation !== after.transportation) {
@@ -522,6 +545,7 @@ export async function syncWelcomes(): Promise<void> {
 async function listRolesOf(id: string, s: Settings): Promise<string[]> {
   const out: string[] = [];
   if (s.organizers.staffIds.includes(id)) out.push("organizador da programação");
+  if (s.gameOrganizers.staffIds.includes(id)) out.push("organizador dos jogos (placar)");
   if (s.checkinHelpers.staffIds.includes(id)) out.push("ajudante do check-in");
   const bus = s.busHelpers.helpers.find((h) => h.staffId === id);
   if (bus) {
@@ -547,7 +571,7 @@ export async function notifyAccessListChange(before: Settings, after: Settings):
     if (!after.notifications.enrolments) return;
     const ids = new Set<string>();
     for (const s of [before, after]) {
-      for (const id of [...s.organizers.staffIds, ...s.checkinHelpers.staffIds, ...s.medicalStaff.staffIds, ...s.vestHelpers.staffIds]) ids.add(id);
+      for (const id of [...s.organizers.staffIds, ...s.gameOrganizers.staffIds, ...s.checkinHelpers.staffIds, ...s.medicalStaff.staffIds, ...s.vestHelpers.staffIds]) ids.add(id);
       for (const h of s.busHelpers.helpers) ids.add(h.staffId);
       for (const p of s.parentContacts) ids.add(p.staffId);
     }

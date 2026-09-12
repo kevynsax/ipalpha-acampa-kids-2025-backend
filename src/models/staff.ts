@@ -1,6 +1,7 @@
 import { ObjectId } from "mongodb";
 import { getDb } from "../db";
 import type { CamperCheckin, Staff, VestStatus } from "../types";
+import { ROOM_ROLES } from "../types";
 import { toCheckin } from "./campers";
 
 const COLLECTION = "staff";
@@ -14,6 +15,7 @@ function toStaff(doc: Record<string, unknown> | null): Staff | null {
     active: (doc.active as boolean) ?? true,
     team: (doc.team as string) ?? null,
     bedroom: (doc.bedroom as string) ?? null,
+    roomRole: ROOM_ROLES.includes(doc.roomRole as Staff["roomRole"]) ? (doc.roomRole as Staff["roomRole"]) : "helper",
     transportation: (doc.transportation as string) ?? null,
     allergies: (doc.allergies as string[]) ?? [],
     drugAllergies: (doc.drugAllergies as string[]) ?? [],

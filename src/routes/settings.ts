@@ -49,6 +49,7 @@ export function serializeSettings(s: Settings) {
     checkinHelpers: { staffIds: s.checkinHelpers.staffIds },
     busHelpers: { helpers: s.busHelpers.helpers.map((h) => ({ staffId: h.staffId, vehicleId: h.vehicleId })) },
     organizers: { staffIds: s.organizers.staffIds },
+    gameOrganizers: { staffIds: s.gameOrganizers.staffIds },
     medicalStaff: { staffIds: s.medicalStaff.staffIds },
     vestHelpers: { staffIds: s.vestHelpers.staffIds },
     parentContacts: s.parentContacts.map((contact) => ({ ...contact })),
@@ -176,7 +177,7 @@ settings.use("*", requireAuth);
 /** GET /api/settings — any logged-in role (the team needs the check-in spot to know how far they are). */
 settings.get("/", async (c) => c.json({ settings: serializeSettings(await getSettings()) }));
 
-/** PUT /api/settings — admin only. { checkinLocation?, notifications?, checkinWindow?: { from, until }, checkinReminder?: { at }, checkinHelpers?: { staffIds }, busHelpers?: { helpers: [{ staffId, vehicleId }] }, organizers?: { staffIds }, medicalStaff?: { staffIds }, vestHelpers?: { staffIds }, parentContacts?: [{ id, title, staffId }] } */
+/** PUT /api/settings — admin only. { checkinLocation?, notifications?, checkinWindow?: { from, until }, checkinReminder?: { at }, checkinHelpers?: { staffIds }, busHelpers?: { helpers: [{ staffId, vehicleId }] }, organizers?: { staffIds }, gameOrganizers?: { staffIds }, medicalStaff?: { staffIds }, vestHelpers?: { staffIds }, parentContacts?: [{ id, title, staffId }] } */
 settings.put("/", requireAdmin, async (c) => {
   const body = await c.req.json<Record<string, unknown>>().catch(() => null);
   if (!body) return fail(c, "BODY_INVALID", "Corpo da requisição inválido.");
@@ -193,8 +194,8 @@ settings.put("/", requireAdmin, async (c) => {
     patch.notifications = n;
   }
   let windowChanged = false;
-  const LIST_ERROR = { checkinHelpers: "HELPERS_INVALID", organizers: "ORGANIZERS_INVALID", medicalStaff: "MEDICAL_INVALID", vestHelpers: "VEST_HELPERS_INVALID" } as const;
-  for (const key of ["checkinHelpers", "organizers", "medicalStaff", "vestHelpers"] as const) {
+  const LIST_ERROR = { checkinHelpers: "HELPERS_INVALID", organizers: "ORGANIZERS_INVALID", gameOrganizers: "GAME_ORGANIZERS_INVALID", medicalStaff: "MEDICAL_INVALID", vestHelpers: "VEST_HELPERS_INVALID" } as const;
+  for (const key of ["checkinHelpers", "organizers", "gameOrganizers", "medicalStaff", "vestHelpers"] as const) {
     if (body[key] === undefined) continue;
     const l = await parseStaffList(body[key]);
     if ("error" in l) return fail(c, LIST_ERROR[key], l.error);
@@ -248,11 +249,11 @@ settings.put("/", requireAdmin, async (c) => {
   const previous = await getSettings();
   const updated = await updateSettings(patch);
   void notifyAccessListChange(previous, updated); // fire-and-forget: the SMS never delays the write
-  const scopeChanged = patch.organizers || patch.checkinHelpers || patch.busHelpers || patch.medicalStaff || patch.vestHelpers || windowChanged || draftChanged;
+  const scopeChanged = patch.organizers || patch.gameOrganizers || patch.checkinHelpers || patch.busHelpers || patch.medicalStaff || patch.vestHelpers || windowChanged || draftChanged;
   if (scopeChanged) {
     // Any access-list change may alter which records a phone is allowed to keep.
     // Re-send every scoped collection so gains and revocations happen live.
-    publish("campers", "staff", "bedrooms", "roles", "events", "occurrences");
+    publish("campers", "staff", "bedrooms", "roles", "events", "occurrences", "scores");
     // someone may have just left every list while the team window is closed: log them out now
     if (!windowChanged) void evictStaffOutsideWindow().catch((err) => console.error("realtime: evict failed", err));
   }

@@ -110,7 +110,6 @@ export function bedroomCapacity(b: Pick<Bedroom, "bunkBeds" | "singleBeds">): nu
  * The staff record stores the chosen OPTION ids; labels come from the category.
  */
 export const STAFF_CATEGORY_KEYS = {
-  team: "equipe",
   transportation: "transporte",
   allergies: "alergias",
   drugAllergies: "alergia-medicamentos",
@@ -124,11 +123,18 @@ export interface Staff {
   phone: string | null;
   /** inactive members are kept for history but hidden from the default lists */
   active: boolean;
-  /** single-choice category option ids */
+  /** id of a Team document (not a category) */
   team: string | null;
+  /** single-choice category option id */
   transportation: string | null;
   /** id of a Bedroom document (not a category) */
   bedroom: string | null;
+  /**
+   * What the person does in the room: a CARETAKER ("líder") is responsible
+   * for specific kids (Camper.caretakerId), a HELPER ("auxiliar") only helps
+   * out. Only caretakers receive kids and their SMS.
+   */
+  roomRole: RoomRole;
   /** "observações": multi-choice option ids + free text */
   allergies: string[];
   /** category option ids (alergia-medicamentos) */
@@ -154,10 +160,47 @@ export interface Staff {
   updatedAt: Date;
 }
 
+// ── Teams (times) + scoreboard (placar) ──
+
+/**
+ * A camp TEAM ("Time Belém"): kids and staff are split into teams that
+ * compete in the games. Managed by the admin (Settings → Times) — it used to
+ * be the `equipe` category; the ids of the old options were kept as team ids
+ * so `Staff.team` / `Camper.team` links survived (see models/teams.ts).
+ */
+export interface Team {
+  _id: string;
+  name: string;
+  /** CSS colour (#rrggbb) shown on the scoreboard and tags */
+  color: string;
+  /** the team's "coringa" — a staff member (id) or null */
+  jokerStaffId: string | null;
+  order: number;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/**
+ * One line of the scoreboard ledger: points given to (positive) or taken
+ * from (negative) a team, by whom and why. A team's score is the SUM of its
+ * lines; "zerar" writes a line that cancels the current total (`kind:
+ * "reset"`), so the history is never lost.
+ */
+export interface ScoreEntry {
+  _id: string;
+  teamId: string;
+  points: number;
+  kind: "add" | "remove" | "reset";
+  /** optional: why ("Gincana da piscina — 1º lugar") */
+  note: string;
+  byUserId: string;
+  byName: string;
+  createdAt: Date;
+}
+
 // ── Campers (acampantes / crianças) ───────────────────────────────────
 
 export const CAMPER_CATEGORY_KEYS = {
-  team: "equipe",
   transportation: "transporte",
   bed: "cama",
   allergies: "alergias",
@@ -180,14 +223,19 @@ export interface Camper {
   church: string;
   /** who invited the kid (free text) */
   invitedBy: string;
-  /** the "tio(a)" assigned to the kid (free text, from the registration system) */
-  caretaker: string;
+  /**
+   * The team member (staff id) who LOOKS AFTER this kid — always someone
+   * sleeping in the same room with `roomRole: "caretaker"`. Null = the kid
+   * has no caretaker yet ("órfão": listed first on the admin page).
+   */
+  caretakerId: string | null;
   /** token printed on the kid's QR badge (from the registration system) */
   qrToken: string;
   /** id of the kid in the registration system (Supabase) — for re-syncs */
   externalId: string;
-  /** category option ids */
+  /** id of a Team document (not a category) */
   team: string | null;
+  /** category option ids */
   transportation: string | null;
   bed: string | null;
   /** Bedroom id */
@@ -221,6 +269,9 @@ export interface Camper {
 }
 
 export type CamperSex = "F" | "M";
+
+export type RoomRole = "caretaker" | "helper";
+export const ROOM_ROLES: readonly RoomRole[] = ["caretaker", "helper"];
 
 /**
  * Check-out / check-in of the team vest (colete): `delivered` is stamped when
@@ -403,7 +454,7 @@ export interface CheckinLocation {
 
 /** Which changes are texted (SMS) to the team members concerned (see services/notify.ts). */
 export interface NotificationSettings {
-  /** a kid enters / leaves / is created in / removed from the person's bedroom */
+  /** a kid was put under (or taken from) the person's care — caretakers only (Camper.caretakerId changed) */
   bedroomChanges: boolean;
   /** the person is assigned, reassigned or removed from an event role, or that event moves / is deleted */
   roleChanges: boolean;
@@ -489,6 +540,11 @@ export interface Settings {
    * cannot add, edit or remove staff, nor download the list.
    */
   organizers: StaffList;
+  /**
+   * GAME organizers (no time window): everything an organizer may do PLUS
+   * the scoreboard (Placar): give / take points from any team, zero a team.
+   */
+  gameOrganizers: StaffList;
   /**
    * MEDICAL team (no time window): they see EVERY camper in full (health
    * included), every bedroom and every vehicle, the whole time — before,

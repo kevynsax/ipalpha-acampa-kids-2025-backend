@@ -5,10 +5,10 @@ import { requireAuth } from "../middleware/auth";
 import { requireAdmin, requireRole } from "../middleware/roles";
 import { findBedroomById } from "../models/bedrooms";
 import { CHECKIN_FIELD, deleteCamper, findCamperById, insertCamper, listCampers, listCheckinLog, logCheckin, setCamperCheckin, updateCamper, type CamperData } from "../models/campers";
-import { listStaff } from "../models/staff";
+import { findStaffById, listStaff } from "../models/staff";
 import { CAMPER_CATEGORY_KEYS, type Camper, type CheckinKind, type Role, type SessionUser } from "../types";
 import { normalizeBrazilPhone } from "../utils";
-import { bedroomFullMessage, isInvalid, parseBedroom, parseMulti, parseSingle, parseText } from "./_validate";
+import { bedroomFullMessage, isInvalid, parseBedroom, parseMulti, parseSingle, parseTeam, parseText } from "./_validate";
 import { serializeStaffList } from "./staff";
 import { camperVisibility, canRunBusCheckin, canRunCheckin, resolveScope, type Scope } from "../services/scope";
 
@@ -46,7 +46,7 @@ export function serializeCamper(k: Camper) {
     schoolGrade: k.schoolGrade,
     church: k.church,
     invitedBy: k.invitedBy,
-    caretaker: k.caretaker,
+    caretakerId: k.caretakerId,
     qrToken: k.qrToken,
     externalId: k.externalId,
     team: k.team,
@@ -76,29 +76,44 @@ export function serializeCamper(k: Camper) {
   };
 }
 
+/** the parts of the record only the admin / medical team / check-in helpers get: who to call, documents */
+const CONTACT_BLANK = {
+  cpf: "",
+  rg: "",
+  school: "",
+  schoolGrade: "",
+  church: "",
+  invitedBy: "",
+  qrToken: "",
+  externalId: "",
+  insurance: "",
+  insuranceCard: "",
+  emergencyContact: "",
+  guardianName: "",
+  guardianPhone: null,
+  guardianCpf: "",
+  guardianEmail: "",
+} as const;
+
 /**
  * Serializes `k` according to the viewer's scope, or `null` when invisible.
- * A bus helper gets the kids outside their room as NAME-ONLY records
- * (`redacted: true`): what the roll call needs — name, age, vehicle, room,
- * team and the check-in stamps — and nothing about health, contacts or notes.
+ * A room caretaker / helper gets a CARE record (`contactsHidden: true`):
+ * everything they need to look after the kid — health, notes, preferences —
+ * but no guardian / emergency / document data. A bus helper gets the kids
+ * outside their room as NAME-ONLY records (`redacted: true`): what the roll
+ * call needs — name, age, vehicle, room, team and the check-in stamps — and
+ * nothing about health, contacts or notes.
  */
 export function serializeCamperFor(k: Camper, scope: Scope) {
   const vis = camperVisibility(scope, k);
   if (vis === "none") return null;
   const full = serializeCamper(k);
   if (vis === "full") return full;
+  if (vis === "care") return { ...full, ...CONTACT_BLANK, contactsHidden: true };
   return {
     ...full,
+    ...CONTACT_BLANK,
     redacted: true,
-    cpf: "",
-    rg: "",
-    school: "",
-    schoolGrade: "",
-    church: "",
-    invitedBy: "",
-    caretaker: "",
-    qrToken: "",
-    externalId: "",
     bed: null,
     weightKg: null,
     allergies: [],
@@ -109,13 +124,6 @@ export function serializeCamperFor(k: Camper, scope: Scope) {
     healthNotes: "",
     generalNotes: "",
     bedroomPreference: "",
-    insurance: "",
-    insuranceCard: "",
-    emergencyContact: "",
-    guardianName: "",
-    guardianPhone: "",
-    guardianCpf: "",
-    guardianEmail: "",
   };
 }
 
@@ -153,8 +161,13 @@ async function buildPatch(
     else patch.sex = v;
   }
 
-  const singles: ["team" | "transportation" | "bed", string][] = [
-    ["team", "Time"],
+  if (has("team")) {
+    const v = await parseTeam(body.team);
+    if (isInvalid(v)) return { code: "TEAM_INVALID", message: v.error };
+    patch.team = v;
+  }
+
+  const singles: ["transportation" | "bed", string][] = [
     ["transportation", "Transporte"],
     ["bed", "Cama"],
   ];
@@ -195,7 +208,14 @@ async function buildPatch(
     patch[field] = v;
   }
 
-  const shorts = ["insurance", "insuranceCard", "emergencyContact", "guardianName", "cpf", "rg", "school", "schoolGrade", "church", "invitedBy", "caretaker", "qrToken", "externalId", "guardianCpf", "guardianEmail"] as const;
+  if (has("caretakerId")) {
+    const v = body.caretakerId;
+    if (v === undefined || v === null || v === "") patch.caretakerId = null;
+    else if (typeof v !== "string" || !(await findStaffById(v))) return { code: "CARETAKER_INVALID", message: "Responsável não encontrado." };
+    else patch.caretakerId = v;
+  }
+
+  const shorts = ["insurance", "insuranceCard", "emergencyContact", "guardianName", "cpf", "rg", "school", "schoolGrade", "church", "invitedBy", "qrToken", "externalId", "guardianCpf", "guardianEmail"] as const;
   for (const field of shorts) {
     if (!has(field)) continue;
     const v = parseText(body[field], SHORT_MAX);
@@ -221,6 +241,20 @@ async function buildPatch(
   }
 
   return { patch };
+}
+
+/**
+ * The caretaker must sleep in the kid's room and be a CARETAKER there. A room
+ * change without a caretaker leaves the kid an orphan; one with a caretaker
+ * from another room is refused. Returns an error message or null.
+ */
+async function caretakerConsistent(bedroom: string | null, caretakerId: string | null): Promise<string | null> {
+  if (!caretakerId) return null;
+  const s = await findStaffById(caretakerId);
+  if (!s || !s.active) return "Responsável não encontrado.";
+  if (!bedroom || s.bedroom !== bedroom) return `${s.name.split(" ")[0]} não dorme neste quarto.`;
+  if (s.roomRole !== "caretaker") return `${s.name.split(" ")[0]} é auxiliar neste quarto, não responsável.`;
+  return null;
 }
 
 campers.use("*", requireAuth);
@@ -329,6 +363,8 @@ campers.post("/", async (c) => {
 
   const full = await bedroomFullMessage(data.bedroom, null);
   if (full) return fail(c, "BEDROOM_FULL", full, 409);
+  const bad = await caretakerConsistent(data.bedroom, data.caretakerId);
+  if (bad) return fail(c, "CARETAKER_INVALID", bad, 409);
 
   const created = await insertCamper(data);
   publish("campers", "bedrooms");
@@ -349,6 +385,14 @@ campers.put("/:id", async (c) => {
   if (result.patch.bedroom !== undefined && result.patch.bedroom !== existing.bedroom) {
     const full = await bedroomFullMessage(result.patch.bedroom, existing.bedroom);
     if (full) return fail(c, "BEDROOM_FULL", full, 409);
+    // moved without naming a caretaker of the new room → orphan (the old caretaker stays behind)
+    if (result.patch.caretakerId === undefined) result.patch.caretakerId = null;
+  }
+  const bedroom = result.patch.bedroom !== undefined ? result.patch.bedroom : existing.bedroom;
+  const caretakerId = result.patch.caretakerId !== undefined ? result.patch.caretakerId : existing.caretakerId;
+  if (result.patch.bedroom !== undefined || result.patch.caretakerId !== undefined) {
+    const bad = await caretakerConsistent(bedroom, caretakerId);
+    if (bad) return fail(c, "CARETAKER_INVALID", bad, 409);
   }
 
   const updated = await updateCamper(existing._id, result.patch);

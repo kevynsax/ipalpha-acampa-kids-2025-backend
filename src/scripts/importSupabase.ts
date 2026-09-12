@@ -12,7 +12,9 @@
  * name that ENDS with the remote name is also accepted and renamed). Every
  * field that exists remotely is overwritten (identity, guardian, links to
  * team / room / bed / bus, weight, notes…); kids that exist only locally are
- * DELETED. Only the locally-curated health categories (allergies /
+ * DELETED. `tio_atribuido` (a first name / nickname) is resolved to the staff
+ * member sleeping in the kid's room — who is then flagged `roomRole:
+ * "caretaker"`; unresolved names are reported and the kid stays an orphan. Only the locally-curated health categories (allergies /
  * drugAllergies / healthIssues) and `healthNotes` are kept on existing kids.
  *
  *   bun run import:supabase          # apply
@@ -22,6 +24,8 @@ import { closeDb } from "../db";
 import { listBedrooms } from "../models/bedrooms";
 import { deleteCamper, ensureCamperIndexes, findCamperByExternalId, insertCamper, listCampers, updateCamper, type CamperData } from "../models/campers";
 import { listCategories } from "../models/categories";
+import { listStaff, updateStaff } from "../models/staff";
+import { listTeams } from "../models/teams";
 import type { Camper, CamperSex } from "../types";
 import { normalizeBrazilPhone } from "../utils";
 
@@ -78,6 +82,9 @@ function titleCase(name: string): string {
 }
 
 const str = (v: string | null | undefined) => (v ?? "").trim();
+const words = (s: string) => norm(s).replace(/[^a-z0-9 ]/g, "").split(" ").filter(Boolean);
+/** hand-made aliases: nickname in the registration system → staff name here */
+const ALIASES: Record<string, string> = { lolly: "Isa Mafra", riciella: "Gabi Santa Cruz", ricciella: "Gabi Santa Cruz", "aurelio dici": "Aurélio Carlos Martino Jr", wesley: "Weslei", leone: "Lucas Leone", lais: "Laís" };
 const NO = /^(n[aã]o|nenhum[a]?|-)$/i;
 const meaningful = (v: string | null | undefined) => (NO.test(str(v)) ? "" : str(v));
 
@@ -99,10 +106,11 @@ async function main() {
   const categories = await listCategories();
   const cat = (key: string) => categories.find((c) => c.key === key)!;
   const optByLabel = (key: string, label: string) => cat(key).options.find((o) => norm(o.label) === norm(label))?.id ?? null;
+  const teams = await listTeams();
   const teamId = (raw: string | undefined) => {
     if (!raw) return null;
     const want = norm(raw).replace(/^time /, "").replace("galeleia", "galileia");
-    return cat("equipe").options.find((o) => norm(o.label).replace(/^time /, "") === want)?.id ?? null;
+    return teams.find((t) => norm(t.name).replace(/^time /, "") === want)?._id ?? null;
   };
   const bedrooms = await listBedrooms();
   const bedroomId = (raw: string | undefined) => {
@@ -110,6 +118,18 @@ async function main() {
     return m ? (bedrooms.find((b) => b.name === m[0])?._id ?? null) : null;
   };
   const busId = (raw: string | undefined) => (raw ? optByLabel("transporte", raw) : null);
+  const staff = await listStaff({ active: true });
+  /** "RAFA MARANO" in room X → the staff of room X whose name words start with every token (alias first) */
+  const caretakerOf = (raw: string, bedroom: string | null): string | null => {
+    if (!raw || !bedroom) return null;
+    const alias = ALIASES[norm(raw)];
+    const inRoom = staff.filter((s) => s.bedroom === bedroom);
+    const pool = alias ? inRoom.filter((s) => norm(s.name) === norm(alias)) : inRoom;
+    const toks = words(alias ?? raw);
+    const hit = pool.filter((s) => toks.every((t) => words(s.name).some((w) => w.startsWith(t))));
+    return hit.length === 1 ? hit[0]._id : null;
+  };
+  const promote = new Set<string>();
 
   const remote: RemoteChild[] = JSON.parse(await Bun.file(JSON_PATH).text());
   const local = await listCampers();
@@ -137,6 +157,7 @@ async function main() {
     if (r.teams?.nome && !links.team) warn.push(`team "${r.teams.nome}" (${name})`);
     if (r.rooms?.nome && !links.bedroom) warn.push(`room "${r.rooms.nome}" (${name})`);
     if (r.buses?.nome && !links.transportation) warn.push(`bus "${r.buses.nome}" (${name})`);
+    if (str(r.tio_atribuido) && !caretakerOf(str(r.tio_atribuido), links.bedroom)) warn.push(`tio "${r.tio_atribuido}" in ${r.rooms?.nome ?? "no room"} (${name})`);
 
     const identity = {
       sex: sexOf(r.sexo),
@@ -146,7 +167,7 @@ async function main() {
       schoolGrade: str(r.serie_escolar),
       church: str(r.frequenta_igreja),
       invitedBy: str(r.convidado_por),
-      caretaker: str(r.tio_atribuido),
+      caretakerId: caretakerOf(str(r.tio_atribuido), links.bedroom),
       qrToken: str(r.qr_token),
       externalId: r.id,
       guardianCpf: str(g?.cpf),
@@ -166,6 +187,7 @@ async function main() {
       guardianPhone: g?.telefone ? normalizeBrazilPhone(g.telefone) : null,
     };
 
+    if (identity.caretakerId) promote.add(identity.caretakerId);
     const existing = await locate(r);
     if (existing) {
       matched.add(existing._id);
@@ -196,6 +218,15 @@ async function main() {
     if (!DRY) await insertCamper(data);
     inserted++;
   }
+
+  let promoted = 0;
+  for (const id of promote) {
+    const s = staff.find((x) => x._id === id)!;
+    if (s.roomRole === "caretaker") continue;
+    if (!DRY) await updateStaff(id, { roomRole: "caretaker" });
+    promoted++;
+  }
+  if (promoted) console.log(`  🧑 ${promoted} staff flagged as caretaker (responsável)`);
 
   const orphans = local.filter((c) => !matched.has(c._id));
   for (const o of orphans) {

@@ -14,6 +14,10 @@ import { ensurePrepIndexes } from "./models/preparation";
 import { ensureInstructionIndexes } from "./models/instructions";
 import { ensureOccurrenceIndexes } from "./models/occurrences";
 import { ensureFileIndexes } from "./models/files";
+import { ensureTeamIndexes } from "./models/teams";
+import { ensureScoreIndexes } from "./models/scores";
+import teamRoutes from "./routes/teams";
+import scoreRoutes from "./routes/scores";
 import authRoutes from "./routes/auth";
 import categoryRoutes from "./routes/categories";
 import staffRoutes from "./routes/staff";
@@ -57,6 +61,9 @@ app.route("/api/settings", settingsRoutes);
 app.route("/api/preparation", preparationRoutes);
 app.route("/api/instructions", instructionRoutes);
 app.route("/api/occurrences", occurrenceRoutes);
+// camp teams (admin-managed) + the games scoreboard (admin / game organizers)
+app.route("/api/teams", teamRoutes);
+app.route("/api/scores", scoreRoutes);
 // images for the WYSIWYG editor (upload: admin / organizer / medical; read: public, unguessable ids)
 app.route("/api/files", fileRoutes);
 // AI helper for the WYSIWYG editor (proxies the OpenAI-compatible gateway; AI_API_KEY)
@@ -78,6 +85,8 @@ await ensurePrepIndexes();
 await ensureInstructionIndexes();
 await ensureOccurrenceIndexes();
 await ensureFileIndexes();
+await ensureTeamIndexes(); // also migrates the legacy "equipe" category into teams
+await ensureScoreIndexes();
 console.log(`MongoDB connected → ${config.dbName}`);
 // re-arm the check-in window timers (they live in memory)
 {

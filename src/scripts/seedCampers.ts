@@ -6,7 +6,7 @@
  * Source (kept OUT of git — see .gitignore):
  *   data/acampakids_lista_geral_alfabetica.xlsx
  *
- * Requires: seed:categories, seed:bedrooms (run before).
+ * Requires: seed:categories, seed:teams, seed:bedrooms (run before).
  *
  * Re-runnable: kids are matched by name (case/accent-insensitive). Links are
  * refreshed on every run; notes/health text only set on insert.
@@ -18,6 +18,7 @@ import { closeDb } from "../db";
 import { listBedrooms } from "../models/bedrooms";
 import { ensureCamperIndexes, findCamperByName, insertCamper, updateCamper, type CamperData } from "../models/campers";
 import { listCategories } from "../models/categories";
+import { listTeams } from "../models/teams";
 import { normalizeBrazilPhone } from "../utils";
 import { splitHealthNotes } from "./_healthNotes";
 
@@ -88,10 +89,11 @@ async function main() {
   const categories = await listCategories();
   const cat = (key: string) => categories.find((c) => c.key === key)!;
   const optByLabel = (key: string, label: string) => cat(key).options.find((o) => norm(o.label) === norm(label))?.id ?? null;
+  const teams = await listTeams();
   const teamId = (raw: string) => {
     if (!raw) return null;
     const want = norm(raw).replace(/^time /, "").replace("galeleia", "galileia");
-    return cat("equipe").options.find((o) => norm(o.label).replace(/^time /, "") === want)?.id ?? null;
+    return teams.find((t) => norm(t.name).replace(/^time /, "") === want)?._id ?? null;
   };
   const bedrooms = await listBedrooms();
   const bedroomId = (raw: string) => {
