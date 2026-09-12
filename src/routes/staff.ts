@@ -1,4 +1,5 @@
 import { Hono, type Context } from "hono";
+import { createMiddleware } from "hono/factory";
 import { publish } from "../services/realtime";
 import { requireAuth } from "../middleware/auth";
 import { requireAdmin, requireRole } from "../middleware/roles";
@@ -12,14 +13,16 @@ import {
   findStaffByPhone,
   insertStaff,
   listStaff,
+  NO_VEST,
   setStaffCheckin,
   setStaffPrepDone,
+  setStaffVest,
   updateStaff,
   type StaffData,
 } from "../models/staff";
 import { logCheckin } from "../models/campers";
 import { STAFF_CATEGORY_KEYS, type Role, type SessionUser, type Staff } from "../types";
-import { hideOwnBedroom, resolveScope, staffVisibility, type Scope } from "../services/scope";
+import { canHandleVests, hideOwnBedroom, resolveScope, staffVisibility, type Scope } from "../services/scope";
 import { bedroomFullMessage, isInvalid, parseBedroom, parseMulti, parseSingle, parseText } from "./_validate";
 import { distanceMeters, normalizeBrazilPhone, nowInSaoPauloWallClock, saoPauloWallClock, saoPauloWallClockToIso, todayInSaoPaulo } from "../utils";
 import { getSettings } from "../models/settings";
@@ -52,7 +55,9 @@ export function serializeStaff(s: Staff) {
  * Serializes `s` according to the viewer's scope, or returns `null` when the
  * viewer may not see this person at all. A colleague in the same room comes
  * back as a NAME-ONLY record (`redacted: true`): no phone, no health data,
- * no team/transport — just what is needed to know who shares the room.
+ * no team/transport — just what is needed to know who shares the room. The
+ * VEST helper gets everyone as name + phone + vest status (`redacted: true`
+ * too: nothing else leaves the server).
  */
 export function serializeStaffFor(s: Staff, scope: Scope) {
   const vis = staffVisibility(scope, s);
@@ -63,8 +68,9 @@ export function serializeStaffFor(s: Staff, scope: Scope) {
   return {
     ...full,
     redacted: true,
-    phone: null,
+    phone: vis === "contact" ? s.phone : null,
     team: null,
+    bedroom: null,
     transportation: null,
     allergies: [],
     drugAllergies: [],
@@ -73,6 +79,7 @@ export function serializeStaffFor(s: Staff, scope: Scope) {
     medicines: "",
     healthNotes: "",
     checkin: null,
+    vest: vis === "contact" ? s.vest : NO_VEST,
     prepDone: [],
   };
 }
@@ -98,6 +105,7 @@ function serialize(s: Staff) {
     medicines: s.medicines,
     healthNotes: s.healthNotes,
     checkin: s.checkin,
+    vest: s.vest,
     prepDone: s.prepDone,
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
@@ -389,6 +397,56 @@ async function doCheckin(c: Context<Env>, action: "checkin" | "undo") {
 /** POST /api/staff/:id/checkin — the person arrived. DELETE undoes. */
 staff.post("/:id/checkin", canCheckin, (c) => doCheckin(c, "checkin"));
 staff.delete("/:id/checkin", canCheckin, (c) => doCheckin(c, "undo"));
+
+// ── vest (colete): admin or a listed vest helper hands it out / takes it back ──
+
+const requireVestHandler = createMiddleware<Env>(async (c, next) => {
+  if (!canHandleVests(await resolveScope(c.get("user")))) {
+    return c.json({ error: { code: "FORBIDDEN", message: "Só quem cuida dos coletes pode registrar entrega e devolução." } }, 403);
+  }
+  await next();
+});
+
+type VestAction = "deliver" | "undo-deliver" | "return" | "undo-return";
+
+async function doVest(c: Context<Env>, action: VestAction) {
+  const existing = await findStaffById(c.req.param("id") ?? "");
+  if (!existing) return fail(c, "STAFF_NOT_FOUND", "Pessoa não encontrada.", 404);
+  const first = existing.name.split(" ")[0];
+  const { delivered, returned } = existing.vest;
+  const user = c.get("user");
+  const stamp = { at: new Date(), byUserId: user.id, byName: user.name, byRole: user.activeRole };
+  let next: Staff["vest"];
+  switch (action) {
+    case "deliver":
+      if (delivered) return fail(c, "ALREADY_DELIVERED", `${first} já recebeu o colete.`, 409);
+      next = { delivered: stamp, returned: null };
+      break;
+    case "undo-deliver":
+      if (!delivered) return fail(c, "NOT_DELIVERED", `${first} ainda não recebeu o colete.`, 409);
+      next = NO_VEST;
+      break;
+    case "return":
+      if (!delivered) return fail(c, "NOT_DELIVERED", `${first} ainda não recebeu o colete.`, 409);
+      if (returned) return fail(c, "ALREADY_RETURNED", `${first} já devolveu o colete.`, 409);
+      next = { delivered, returned: stamp };
+      break;
+    case "undo-return":
+      if (!returned) return fail(c, "NOT_RETURNED", `${first} ainda não devolveu o colete.`, 409);
+      next = { delivered, returned: null };
+      break;
+  }
+  const updated = await setStaffVest(existing._id, next);
+  publish("staff");
+  return c.json({ staff: serializeStaffFor(updated!, await resolveScope(user)) });
+}
+
+/** POST /api/staff/:id/vest/delivery — the person received the vest. DELETE undoes. */
+staff.post("/:id/vest/delivery", requireRole("admin", "staff", "health_staff"), requireVestHandler, (c) => doVest(c, "deliver"));
+staff.delete("/:id/vest/delivery", requireRole("admin", "staff", "health_staff"), requireVestHandler, (c) => doVest(c, "undo-deliver"));
+/** POST /api/staff/:id/vest/return — the person handed the vest back. DELETE undoes. */
+staff.post("/:id/vest/return", requireRole("admin", "staff", "health_staff"), requireVestHandler, (c) => doVest(c, "return"));
+staff.delete("/:id/vest/return", requireRole("admin", "staff", "health_staff"), requireVestHandler, (c) => doVest(c, "undo-return"));
 
 // ── write: admin only ──────────────────────────────────────────────────────
 

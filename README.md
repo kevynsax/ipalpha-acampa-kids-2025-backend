@@ -232,13 +232,13 @@ bun run import:supabase [--dry]   # sync with the registration system (data/chil
 
 `import:supabase` reads the JSON answered by the registration system
 (Supabase `children` joined with `guardians`, `teams`, `rooms`, `buses` —
-save the REST response as `data/children.json`). It matches kids by
-`externalId` (Supabase id) then by name, inserts the missing ones, refreshes
-the identity fields (`sex`, `cpf`, `rg`, `school`, `schoolGrade`, `church`,
-`invitedBy`, `caretaker`, `qrToken`, `guardianCpf`, `guardianEmail`) and only
-FILLS empty local fields for everything else — local edits win. Room / team /
-bus links that differ are reported (`↔️`), never overwritten; kids that exist
-only locally are listed (`👻`).
+save the REST response as `data/children.json`). The registration system is
+the source of truth: kids are matched by `externalId` (Supabase id) then by
+name, missing ones are inserted, every remote field (identity, guardian,
+room / team / bed / bus, weight, notes) overwrites the local one, and kids
+that exist only locally are DELETED. Only the curated health categories
+(`allergies`, `drugAllergies`, `healthIssues`) and `healthNotes` of existing
+kids are kept. Link changes are printed (`↔️`).
 
 The form's "Observações médicas" column repeats weight, insurance, daily
 medication, chronic condition and general notes as `Key: value | …`. The seed

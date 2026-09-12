@@ -1,6 +1,6 @@
 import { ObjectId } from "mongodb";
 import { getDb } from "../db";
-import type { CamperCheckin, Staff } from "../types";
+import type { CamperCheckin, Staff, VestStatus } from "../types";
 import { toCheckin } from "./campers";
 
 const COLLECTION = "staff";
@@ -22,6 +22,7 @@ function toStaff(doc: Record<string, unknown> | null): Staff | null {
     medicines: (doc.medicines as string) ?? "",
     healthNotes: (doc.healthNotes as string) ?? "",
     checkin: toCheckin(doc.checkin),
+    vest: toVest(doc.vest),
     prepDone: (doc.prepDone as string[]) ?? [],
     welcomeSentAt: (doc.welcomeSentAt as Date) ?? null,
     createdAt: doc.createdAt as Date,
@@ -29,7 +30,16 @@ function toStaff(doc: Record<string, unknown> | null): Staff | null {
   };
 }
 
-export type StaffData = Omit<Staff, "_id" | "createdAt" | "updatedAt" | "checkin" | "prepDone" | "welcomeSentAt">;
+function toVest(v: unknown): VestStatus {
+  const o = v && typeof v === "object" ? (v as Record<string, unknown>) : {};
+  const delivered = toCheckin(o.delivered);
+  // a return without a delivery makes no sense: ignore it
+  return { delivered, returned: delivered ? toCheckin(o.returned) : null };
+}
+
+export const NO_VEST: VestStatus = { delivered: null, returned: null };
+
+export type StaffData = Omit<Staff, "_id" | "createdAt" | "updatedAt" | "checkin" | "vest" | "prepDone" | "welcomeSentAt">;
 
 export async function listStaff(filter: { active?: boolean } = {}): Promise<Staff[]> {
   const db = await getDb();
@@ -59,7 +69,7 @@ export async function insertStaff(data: StaffData): Promise<Staff> {
   const db = await getDb();
   const now = new Date();
   const { insertedId } = await db.collection(COLLECTION).insertOne({ ...data, createdAt: now, updatedAt: now });
-  return { ...data, checkin: null, prepDone: [], welcomeSentAt: null, _id: insertedId.toString(), createdAt: now, updatedAt: now };
+  return { ...data, checkin: null, vest: NO_VEST, prepDone: [], welcomeSentAt: null, _id: insertedId.toString(), createdAt: now, updatedAt: now };
 }
 
 export async function updateStaff(id: string, patch: Partial<StaffData>): Promise<Staff | null> {
@@ -82,6 +92,23 @@ export async function setStaffCheckin(id: string, checkin: CamperCheckin | null)
     .collection(COLLECTION)
     .findOneAndUpdate({ _id: new ObjectId(id) }, { $set: { checkin, updatedAt: new Date() } }, { returnDocument: "after" });
   return toStaff(res as Record<string, unknown> | null);
+}
+
+/** Sets the vest (colete) status: delivered / returned stamps. */
+export async function setStaffVest(id: string, vest: VestStatus): Promise<Staff | null> {
+  if (!ObjectId.isValid(id)) return null;
+  const db = await getDb();
+  const res = await db
+    .collection(COLLECTION)
+    .findOneAndUpdate({ _id: new ObjectId(id) }, { $set: { vest, updatedAt: new Date() } }, { returnDocument: "after" });
+  return toStaff(res as Record<string, unknown> | null);
+}
+
+/** Clears every vest stamp (rehearsal reset). Returns how many had one. */
+export async function resetStaffVests(): Promise<number> {
+  const db = await getDb();
+  const res = await db.collection(COLLECTION).updateMany({ "vest.delivered": { $ne: null } }, { $set: { vest: NO_VEST, updatedAt: new Date() } });
+  return res.modifiedCount;
 }
 
 /**

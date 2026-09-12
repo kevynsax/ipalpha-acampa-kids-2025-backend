@@ -3,7 +3,7 @@ import { requireAuth } from "../middleware/auth";
 import { requireAdmin } from "../middleware/roles";
 import { findCategoryByKey } from "../models/categories";
 import { checkinWindowOpen, getSettings, staffAccessOpen, updateSettings } from "../models/settings";
-import { listStaff, resetStaffCheckins } from "../models/staff";
+import { listStaff, resetStaffCheckins, resetStaffVests } from "../models/staff";
 import { clearCheckinLog, resetCamperCheckins } from "../models/campers";
 import { comteleEnabled } from "../services/comtele";
 import { notifyAccessListChange, syncWelcomes } from "../services/notify";
@@ -50,6 +50,7 @@ export function serializeSettings(s: Settings) {
     busHelpers: { helpers: s.busHelpers.helpers.map((h) => ({ staffId: h.staffId, vehicleId: h.vehicleId })) },
     organizers: { staffIds: s.organizers.staffIds },
     medicalStaff: { staffIds: s.medicalStaff.staffIds },
+    vestHelpers: { staffIds: s.vestHelpers.staffIds },
     parentContacts: s.parentContacts.map((contact) => ({ ...contact })),
     /** whether SMS can actually go out (Comtele key configured) — read-only, shown on the settings page */
     smsEnabled: comteleEnabled(),
@@ -175,7 +176,7 @@ settings.use("*", requireAuth);
 /** GET /api/settings — any logged-in role (the team needs the check-in spot to know how far they are). */
 settings.get("/", async (c) => c.json({ settings: serializeSettings(await getSettings()) }));
 
-/** PUT /api/settings — admin only. { checkinLocation?, notifications?, checkinWindow?: { from, until }, checkinReminder?: { at }, checkinHelpers?: { staffIds }, busHelpers?: { helpers: [{ staffId, vehicleId }] }, organizers?: { staffIds }, medicalStaff?: { staffIds }, parentContacts?: [{ id, title, staffId }] } */
+/** PUT /api/settings — admin only. { checkinLocation?, notifications?, checkinWindow?: { from, until }, checkinReminder?: { at }, checkinHelpers?: { staffIds }, busHelpers?: { helpers: [{ staffId, vehicleId }] }, organizers?: { staffIds }, medicalStaff?: { staffIds }, vestHelpers?: { staffIds }, parentContacts?: [{ id, title, staffId }] } */
 settings.put("/", requireAdmin, async (c) => {
   const body = await c.req.json<Record<string, unknown>>().catch(() => null);
   if (!body) return fail(c, "BODY_INVALID", "Corpo da requisição inválido.");
@@ -192,8 +193,8 @@ settings.put("/", requireAdmin, async (c) => {
     patch.notifications = n;
   }
   let windowChanged = false;
-  const LIST_ERROR = { checkinHelpers: "HELPERS_INVALID", organizers: "ORGANIZERS_INVALID", medicalStaff: "MEDICAL_INVALID" } as const;
-  for (const key of ["checkinHelpers", "organizers", "medicalStaff"] as const) {
+  const LIST_ERROR = { checkinHelpers: "HELPERS_INVALID", organizers: "ORGANIZERS_INVALID", medicalStaff: "MEDICAL_INVALID", vestHelpers: "VEST_HELPERS_INVALID" } as const;
+  for (const key of ["checkinHelpers", "organizers", "medicalStaff", "vestHelpers"] as const) {
     if (body[key] === undefined) continue;
     const l = await parseStaffList(body[key]);
     if ("error" in l) return fail(c, LIST_ERROR[key], l.error);
@@ -247,7 +248,7 @@ settings.put("/", requireAdmin, async (c) => {
   const previous = await getSettings();
   const updated = await updateSettings(patch);
   void notifyAccessListChange(previous, updated); // fire-and-forget: the SMS never delays the write
-  const scopeChanged = patch.organizers || patch.checkinHelpers || patch.busHelpers || patch.medicalStaff || windowChanged || draftChanged;
+  const scopeChanged = patch.organizers || patch.checkinHelpers || patch.busHelpers || patch.medicalStaff || patch.vestHelpers || windowChanged || draftChanged;
   if (scopeChanged) {
     // Any access-list change may alter which records a phone is allowed to keep.
     // Re-send every scoped collection so gains and revocations happen live.
@@ -269,13 +270,13 @@ settings.put("/", requireAdmin, async (c) => {
   return c.json({ settings: serializeSettings(updated) });
 });
 
-/** POST /api/settings/checkin/reset — admin only. Clears EVERY check-in (kids' church + bus, team) and the audit log, so the process can be rehearsed. */
+/** POST /api/settings/checkin/reset — admin only. Clears EVERY check-in (kids' church + bus, team), the team vests and the audit log, so the process can be rehearsed. */
 settings.post("/checkin/reset", requireAdmin, async (c) => {
-  const [campers, staff] = await Promise.all([resetCamperCheckins(), resetStaffCheckins()]);
+  const [campers, staff, vests] = await Promise.all([resetCamperCheckins(), resetStaffCheckins(), resetStaffVests()]);
   await clearCheckinLog();
-  console.log(`🧹 check-ins reset by ${c.get("user").name}: ${campers} campers, ${staff} staff`);
+  console.log(`🧹 check-ins reset by ${c.get("user").name}: ${campers} campers, ${staff} staff, ${vests} vests`);
   publish("campers", "staff");
-  return c.json({ campers, staff });
+  return c.json({ campers, staff, vests });
 });
 
 export default settings;

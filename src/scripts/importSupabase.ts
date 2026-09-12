@@ -7,20 +7,20 @@
  *
  * Requires: seed:categories, seed:bedrooms (run before).
  *
- * Re-runnable. Kids are matched by `externalId` (Supabase id), then by name
- * (case/accent-insensitive; a local name that ENDS with the remote name is
- * also accepted and renamed). On every run the new identity fields (sex, cpf,
- * rg, school, grade, church, invitedBy, caretaker, qrToken, guardian cpf/email)
- * are refreshed; every other field is only FILLED when empty locally — what
- * the admins edited here wins. Links (team / room / bed / bus) that differ are
- * reported, never overwritten.
+ * The registration system is the SOURCE OF TRUTH. Kids are matched by
+ * `externalId` (Supabase id), then by name (case/accent-insensitive; a local
+ * name that ENDS with the remote name is also accepted and renamed). Every
+ * field that exists remotely is overwritten (identity, guardian, links to
+ * team / room / bed / bus, weight, notes…); kids that exist only locally are
+ * DELETED. Only the locally-curated health categories (allergies /
+ * drugAllergies / healthIssues) and `healthNotes` are kept on existing kids.
  *
  *   bun run import:supabase          # apply
  *   bun run import:supabase --dry    # only report
  */
 import { closeDb } from "../db";
 import { listBedrooms } from "../models/bedrooms";
-import { ensureCamperIndexes, findCamperByExternalId, insertCamper, listCampers, updateCamper, type CamperData } from "../models/campers";
+import { deleteCamper, ensureCamperIndexes, findCamperByExternalId, insertCamper, listCampers, updateCamper, type CamperData } from "../models/campers";
 import { listCategories } from "../models/categories";
 import type { Camper, CamperSex } from "../types";
 import { normalizeBrazilPhone } from "../utils";
@@ -169,16 +169,11 @@ async function main() {
     const existing = await locate(r);
     if (existing) {
       matched.add(existing._id);
-      const patch: Partial<CamperData> = { ...identity };
+      const patch: Partial<CamperData> = { ...identity, ...fillable, ...links };
       if (norm(existing.name) !== norm(name)) patch.name = name;
-      for (const [k, v] of Object.entries(fillable) as [keyof typeof fillable, unknown][]) {
-        const cur = existing[k];
-        if ((cur === null || cur === "" || cur === undefined) && v !== null && v !== "") (patch as Record<string, unknown>)[k] = v;
-      }
       const remoteLabel = { team: r.teams?.nome, bedroom: r.rooms?.nome, bed: r.posicao_cama, transportation: r.buses?.nome };
       for (const [k, v] of Object.entries(links) as [keyof typeof links, string | null][]) {
-        if (!existing[k] && v) patch[k] = v;
-        else if (existing[k] && v && existing[k] !== v) diff.push(`${name}: ${k} local≠remoto (remoto: ${remoteLabel[k]})`);
+        if (existing[k] !== v) diff.push(`${name}: ${k} → ${remoteLabel[k] ?? "—"}`);
       }
       if (!DRY) await updateCamper(existing._id, patch);
       updated++;
@@ -203,10 +198,13 @@ async function main() {
   }
 
   const orphans = local.filter((c) => !matched.has(c._id));
+  for (const o of orphans) {
+    console.warn(`  🗑️  removing (not in the registration system): ${o.name}`);
+    if (!DRY) await deleteCamper(o._id);
+  }
   for (const w of warn) console.warn(`  ⚠️  not found: ${w}`);
-  for (const d of diff) console.warn(`  ↔️  ${d}`);
-  for (const o of orphans) console.warn(`  👻 only local (not in the registration system): ${o.name}`);
-  console.log(`  🧒 ${inserted + updated} acampantes (${inserted} inseridos, ${updated} atualizados)${DRY ? " — DRY RUN, nothing written" : ""}`);
+  for (const d of diff) console.log(`  ↔️  ${d}`);
+  console.log(`  🧒 ${inserted + updated} acampantes (${inserted} inseridos, ${updated} atualizados, ${orphans.length} removidos)${DRY ? " — DRY RUN, nothing written" : ""}`);
   await closeDb();
 }
 

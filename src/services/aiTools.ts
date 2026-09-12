@@ -203,6 +203,7 @@ export const AI_TOOLS: AiTool[] = [
         contatos_para_pais: settings.parentContacts.map((c) => ({ funcao: c.title, ...person(c.staffId) })),
         organizacao: list(settings.organizers.staffIds),
         equipe_medica: list(settings.medicalStaff.staffIds),
+        responsaveis_coletes: list(settings.vestHelpers.staffIds),
         ajudantes_checkin_igreja: list(settings.checkinHelpers.staffIds),
         ajudantes_onibus: settings.busHelpers.helpers.map((h) => ({ veiculo: option.get(h.vehicleId) ?? h.vehicleId, ...person(h.staffId) })),
       };

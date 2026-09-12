@@ -30,7 +30,7 @@ import { staffHasAccess } from "./scope";
  * Each kind can be switched off by the admin (Settings → Notificações).
  * ORDINARY team members are only texted inside `settings.staffAccessWindow`
  * (Settings → Geral) — the same period in which they may use the app; people
- * on an admin list (organizers, helpers, medical, contacts) are always texted.
+ * on an admin list (organizers, helpers, medical, vest helpers, contacts) are always texted.
  * Checked at SEND time, so a queued text is dropped if the window closed.
  *
  * Sends are COALESCED: every change for the same person within a short window
@@ -529,6 +529,7 @@ async function listRolesOf(id: string, s: Settings): Promise<string[]> {
     out.push(v ? `ajudante do ${v}` : "ajudante do ônibus");
   }
   if (s.medicalStaff.staffIds.includes(id)) out.push("equipe médica");
+  if (s.vestHelpers.staffIds.includes(id)) out.push("responsável pelos coletes (entrega e devolução)");
   for (const p of s.parentContacts) if (p.staffId === id) out.push(`contato dos pais (${p.title})`);
   return out;
 }
@@ -536,7 +537,7 @@ async function listRolesOf(id: string, s: Settings): Promise<string[]> {
 /**
  * Call after Settings are written with the document BEFORE and AFTER. Texts
  * each person who was ADDED to an admin list (organizers, check-in / bus
- * helpers, medical team, parent contacts) — one SMS per person, naming every
+ * helpers, medical team, vest helpers, parent contacts) — one SMS per person, naming every
  * list they entered. Being on a list is what lets the person use the app
  * outside the team window, so this is NOT gated by the window. Nobody is
  * texted when they LEAVE a list (or the team): no need to rub it in.
@@ -546,7 +547,7 @@ export async function notifyAccessListChange(before: Settings, after: Settings):
     if (!after.notifications.enrolments) return;
     const ids = new Set<string>();
     for (const s of [before, after]) {
-      for (const id of [...s.organizers.staffIds, ...s.checkinHelpers.staffIds, ...s.medicalStaff.staffIds]) ids.add(id);
+      for (const id of [...s.organizers.staffIds, ...s.checkinHelpers.staffIds, ...s.medicalStaff.staffIds, ...s.vestHelpers.staffIds]) ids.add(id);
       for (const h of s.busHelpers.helpers) ids.add(h.staffId);
       for (const p of s.parentContacts) ids.add(p.staffId);
     }

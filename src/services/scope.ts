@@ -37,6 +37,11 @@ import type { CampEvent, Camper, Role, ScheduleRole, Settings, Staff } from "../
  *                  bedroom — hence every vehicle — the whole time. Read-only:
  *                  never writes campers, rooms or check-ins. Staff / programme:
  *                  as any team member.
+ *   vest helper  → a staff member the admin listed as a VEST (colete) helper
+ *                  (no time window): every staff member as NAME + PHONE +
+ *                  vest status ("contact" visibility) — never health, room,
+ *                  team or check-in — and may stamp the vest delivery /
+ *                  return. Everything else: as any team member.
  *   parent       → nothing from these collections (categories only)
  *
  * ORDINARY team members (on none of the lists above, nor a parent contact)
@@ -66,17 +71,20 @@ export type Scope =
       organizer: boolean;
       /** true when this person is on the MEDICAL team (no window): every camper + bedroom in full, read-only */
       medical: boolean;
+      /** true when this person hands out / takes back the team VESTS (no window): every staff member as name + phone */
+      vestHelper: boolean;
       /** true while the kids' room allocation is still a draft (Settings → Geral): the viewer's OWN room shows no kids */
       kidsRoomsDraft: boolean;
     };
 
-export const NO_ACCESS: Scope = { all: false, staffId: null, bedroom: null, checkinHelper: false, busHelperVehicle: null, organizer: false, medical: false, kidsRoomsDraft: false };
+export const NO_ACCESS: Scope = { all: false, staffId: null, bedroom: null, checkinHelper: false, busHelperVehicle: null, organizer: false, medical: false, vestHelper: false, kidsRoomsDraft: false };
 
-/** On some admin list (organizer, church / bus helper, medical, parent contact)? These people are never gated by the staff access window. */
+/** On some admin list (organizer, church / bus helper, medical, vest helper, parent contact)? These people are never gated by the staff access window. */
 export function isPrivilegedStaff(staffId: string, s: Settings): boolean {
   return (
     s.organizers.staffIds.includes(staffId) ||
     s.medicalStaff.staffIds.includes(staffId) ||
+    s.vestHelpers.staffIds.includes(staffId) ||
     s.checkinHelpers.staffIds.includes(staffId) ||
     s.busHelpers.helpers.some((h) => h.staffId === staffId) ||
     s.parentContacts.some((p) => p.staffId === staffId)
@@ -96,16 +104,22 @@ export async function resolveScope(viewer: Viewer): Promise<Scope> {
   const settings = await getSettings();
   // ORDINARY team members (on no list at all) only get in during the staff access window
   if (!staffHasAccess(me._id, settings)) return NO_ACCESS;
-  const { checkinWindow, checkinTestMode, checkinHelpers, busHelpers, organizers, medicalStaff, kidsRoomsDraft } = settings;
+  const { checkinWindow, checkinTestMode, checkinHelpers, busHelpers, organizers, medicalStaff, vestHelpers, kidsRoomsDraft } = settings;
   const organizer = organizers.staffIds.includes(me._id);
   const medical = medicalStaff.staffIds.includes(me._id);
+  const vestHelper = vestHelpers.staffIds.includes(me._id);
   const listedChurch = checkinHelpers.staffIds.includes(me._id);
   const linkedVehicle = busHelpers.helpers.find((h) => h.staffId === me._id)?.vehicleId ?? null;
   // test mode opens the kids' roll calls for the helpers regardless of the window
   const windowOpen = checkinTestMode || checkinWindowOpen(checkinWindow);
   const checkinHelper = windowOpen && listedChurch;
   const busHelperVehicle = windowOpen ? linkedVehicle : null;
-  return { all: false, staffId: me._id, bedroom: me.bedroom, checkinHelper, busHelperVehicle, organizer, medical, kidsRoomsDraft };
+  return { all: false, staffId: me._id, bedroom: me.bedroom, checkinHelper, busHelperVehicle, organizer, medical, vestHelper, kidsRoomsDraft };
+}
+
+/** May this session hand out / take back the team vests? (admin or vest helper) */
+export function canHandleVests(scope: Scope): boolean {
+  return scope.all || scope.vestHelper;
 }
 
 /** May this session write the programme (events, roles, assignments)? (admin or organizer) */
@@ -142,12 +156,17 @@ export function canSeeCamper(scope: Scope, k: Pick<Camper, "bedroom" | "transpor
   return camperVisibility(scope, k) !== "none";
 }
 
-/** "full" = whole record, "name" = colleague in the same room (name only), "none" = invisible. */
-export type StaffVisibility = "full" | "name" | "none";
+/**
+ * "full" = whole record, "contact" = name + phone + vest status (vest helper),
+ * "name" = colleague in the same room (name only), "none" = invisible.
+ */
+export type StaffVisibility = "full" | "contact" | "name" | "none";
 
 export function staffVisibility(scope: Scope, s: Pick<Staff, "_id" | "bedroom">): StaffVisibility {
   if (scope.all || scope.organizer) return "full";
   if (scope.staffId === s._id) return "full";
+  // the vest helper reaches everyone by phone, and nothing more
+  if (scope.vestHelper) return "contact";
   // roommates are unknown while the rooms are still a draft
   if (!scope.kidsRoomsDraft && scope.bedroom !== null && s.bedroom === scope.bedroom) return "name";
   return "none";

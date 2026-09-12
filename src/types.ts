@@ -140,6 +140,8 @@ export interface Staff {
   healthNotes: string;
   /** set when the person arrived on departure day */
   checkin: CamperCheckin | null;
+  /** the camp VEST (colete) the person wears during the camp: handed out, then taken back (see routes/staff.ts vest) */
+  vest: VestStatus;
   /**
    * Preparação items the person ticked as done: "section:<id>" for a general
    * section, "role:<id>" for a role's preparation. Their own checklist —
@@ -219,6 +221,16 @@ export interface Camper {
 }
 
 export type CamperSex = "F" | "M";
+
+/**
+ * Check-out / check-in of the team vest (colete): `delivered` is stamped when
+ * the person receives it, `returned` when they hand it back. Both null = not
+ * delivered yet; `returned` is never set without `delivered`.
+ */
+export interface VestStatus {
+  delivered: CamperCheckin | null;
+  returned: CamperCheckin | null;
+}
 
 export interface CamperCheckin {
   at: Date;
@@ -401,7 +413,7 @@ export interface NotificationSettings {
   contentChanges: boolean;
   /** the person's OWN allocation changed: bedroom, team or vehicle (bus) */
   staffChanges: boolean;
-  /** the person was added to the team, or to an admin list (organizer, check-in / bus helper, medical, parent contact) — always carries the app link */
+  /** the person was added to the team, or to an admin list (organizer, check-in / bus helper, medical, vest helper, parent contact) — always carries the app link */
   enrolments: boolean;
   /** an occurrence was registered (by the admin or the medical team) — every admin is texted */
   occurrences: boolean;
@@ -486,6 +498,13 @@ export interface Settings {
   medicalStaff: StaffList;
   /** ordered contacts that will be shared with parents */
   parentContacts: ParentContact[];
+  /**
+   * VEST helpers (no time window): the people who hand out and take back the
+   * team vests (coletes). They see EVERY staff member as NAME + PHONE only
+   * (plus the vest status) — never health, room, team or anything else — and
+   * may stamp the vest delivery / return. Nothing else changes for them.
+   */
+  vestHelpers: StaffList;
   /**
    * When ORDINARY team members (not organizers, check-in helpers, medical
    * team or parent contacts) may use the app. Both ends null = always. Outside
