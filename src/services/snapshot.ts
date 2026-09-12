@@ -22,7 +22,8 @@ import { serializeStaffList } from "../routes/staff";
 import { getSettings } from "../models/settings";
 import type { Role } from "../types";
 import { COLLECTIONS, type Collection, type Snapshot } from "./realtime";
-import { canSeeBedroom, canSeeDoc, resolveScope, scopeEvent, scopeRoles, type Viewer } from "./scope";
+import { canSeeBedroom, canSeeDoc, canSeePrep, isParent, resolveScope, scopeEvent, scopeRoles, type Viewer } from "./scope";
+import { parentEvents } from "./camp";
 
 /**
  * Collections each role may read (mirrors the REST `requireRole` guards).
@@ -33,15 +34,17 @@ const READABLE: Record<Role, readonly Collection[]> = {
   admin: COLLECTIONS,
   staff: ["campers", "staff", "bedrooms", "categories", "teams", "scores", "roles", "events", "preparation", "instructions", "occurrences", "settings"],
   health_staff: ["campers", "staff", "bedrooms", "categories", "teams", "scores", "roles", "events", "preparation", "instructions", "occurrences", "settings"],
-  parent: ["categories"],
+  // parents: their own kids + rooms, the team of those rooms / important contacts (inside the window), the programme
+  parent: ["campers", "staff", "bedrooms", "categories", "teams", "roles", "events", "preparation", "settings"],
 };
 
 /**
- * Cache key for a built payload: admins/parents get the same data regardless
- * of who they are; staff payloads differ per person (scoped to their room).
+ * Cache key for a built payload: admins get the same data regardless of who
+ * they are; staff and parent payloads differ per person (scoped to their
+ * room / their kids).
  */
 export function snapshotKey(viewer: Viewer): string {
-  return viewer.activeRole === "admin" || viewer.activeRole === "parent" ? viewer.activeRole : `${viewer.activeRole}|${viewer.phone}`;
+  return viewer.activeRole === "admin" ? viewer.activeRole : `${viewer.activeRole}|${viewer.phone}`;
 }
 
 /** Reads and serializes `names` exactly like the REST endpoints do, honouring the viewer's role and scope. */
@@ -62,8 +65,10 @@ export async function loadCollections(viewer: Viewer, names: readonly Collection
   if (wantsSchedule && !scope.all) wanted = [...new Set([...wanted, "roles" as const, "events" as const])];
   const schedule = wantsSchedule
     ? (async () => {
-        const [roles, events] = await Promise.all([listRoles(), listEvents()]);
+        const [roles, all] = await Promise.all([listRoles(), listEvents()]);
         const roleById = new Map(roles.map((r) => [r._id, r]));
+        // parents only get the programme from the check-in start onwards
+        const events = isParent(scope) ? parentEvents(await getSettings(), all) : all;
         const scopedEvents = events.map((e) => scopeEvent(scope, e, roleById));
         return { roles: scopeRoles(scope, roles, scopedEvents), events: scopedEvents };
       })()
@@ -104,7 +109,7 @@ export async function loadCollections(viewer: Viewer, names: readonly Collection
           out.events = (await schedule!).events.map(serializeEvent);
           break;
         case "preparation":
-          out.preparation = (await listPrepSections()).filter((s) => canSeeDoc(scope, s)).map(serializePrepSection);
+          out.preparation = (await listPrepSections()).filter((s) => canSeePrep(scope, s)).map(serializePrepSection);
           break;
         case "instructions":
           out.instructions = (await listInstructions()).filter((d) => canSeeDoc(scope, d)).map(serializeInstruction);
@@ -114,7 +119,7 @@ export async function loadCollections(viewer: Viewer, names: readonly Collection
           else if (scope.medical) out.occurrences = (await listOccurrences()).filter((occurrence) => occurrence.campers.length > 0).map(serializeOccurrence);
           break;
         case "settings":
-          out.settings = serializeSettings(await getSettings());
+          out.settings = await serializeSettings(await getSettings());
           break;
       }
     }),

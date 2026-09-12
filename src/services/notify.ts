@@ -1,14 +1,14 @@
 import { config } from "../config";
 import { findBedroomById } from "../models/bedrooms";
-import { countCampersPerBedroom } from "../models/campers";
+import { countCampersPerBedroom, listCampers } from "../models/campers";
 import { findCategoryByKey } from "../models/categories";
 import { listRoles } from "../models/schedule";
 import { claimCheckinReminder, getSettings, staffAccessOpen } from "../models/settings";
 import { claimStaffWelcome, findStaffById, listStaff } from "../models/staff";
 import { findTeamById } from "../models/teams";
-import { listAdmins } from "../models/users";
-import { STAFF_CATEGORY_KEYS } from "../types";
-import type { CampEvent, Camper, DocAudience, InstructionDoc, Occurrence, PrepSection, ScheduleRole, Settings, Staff } from "../types";
+import { claimParentWelcome, listAdmins, listParents } from "../models/users";
+import { PARENT_FIELD_LABEL, PREP_AUDIENCES, STAFF_CATEGORY_KEYS } from "../types";
+import type { CampEvent, Camper, CamperChangeLog, DocAudience, InstructionDoc, Occurrence, PrepAudience, PrepSection, ScheduleRole, Settings, Staff } from "../types";
 import { formatBrazilPhone } from "../utils";
 import { comteleEnabled, comteleSendSms } from "./comtele";
 import { staffHasAccess } from "./scope";
@@ -24,6 +24,8 @@ import { staffHasAccess } from "./scope";
  *     the event moved or was deleted)
  *   - a general Instruções / Preparação document changed, or the
  *     instructions / preparation text of one of the person's roles
+ *   - (PARENTS) a Preparação section posted to them changed — only inside
+ *     `settings.parentAccessWindow`
  *   - the person's own room / room role (responsável ↔ auxiliar) / team / vehicle changed
  *   - the person's church check-in was recorded (confirmation, sent at once)
  *   - an occurrence was registered (every ADMIN, sent at once)
@@ -50,8 +52,10 @@ interface Item {
   text: string;
 }
 
+/** whoever gets the coalesced text: a team member (gated by the team window) or a parent (gated by the parents' window) */
 interface Pending {
-  staff: Staff;
+  to: { name: string; phone: string | null };
+  gate: { kind: "staff"; staffId: string } | { kind: "parent" };
   items: Item[];
 }
 
@@ -64,18 +68,32 @@ const COALESCE_MS = Number(process.env.NOTIFY_COALESCE_SECONDS ?? 20) * 1000;
 const queue = new Map<string, Pending>();
 let timer: ReturnType<typeof setTimeout> | null = null;
 
-function enqueue(staff: Staff, kind: NotifyKind, text: string, settings: Settings): void {
-  if (!staff.phone) return;
-  if (!staffHasAccess(staff._id, settings)) return;
-  const p = queue.get(staff._id) ?? { staff, items: [] };
+/** may this queued person still be texted right now? (checked when queued AND when sent) */
+function gateOpen(gate: Pending["gate"], settings: Settings): boolean {
+  return gate.kind === "staff" ? staffHasAccess(gate.staffId, settings) : staffAccessOpen(settings.parentAccessWindow);
+}
+
+function push(key: string, to: Pending["to"], gate: Pending["gate"], kind: NotifyKind, text: string, settings: Settings): void {
+  if (!to.phone) return;
+  if (!gateOpen(gate, settings)) return;
+  const p = queue.get(key) ?? { to, gate, items: [] };
   if (!p.items.some((i) => i.text === text)) p.items.push({ kind, text }); // same change twice (double save) → once
-  queue.set(staff._id, p);
+  queue.set(key, p);
   if (!timer) {
     timer = setTimeout(() => {
       timer = null;
       void flush();
     }, COALESCE_MS);
   }
+}
+
+function enqueue(staff: Staff, kind: NotifyKind, text: string, settings: Settings): void {
+  push(`staff:${staff._id}`, staff, { kind: "staff", staffId: staff._id }, kind, text, settings);
+}
+
+/** a PARENT (users doc with the parent role) — only inside the parents' access window */
+function enqueueParent(parent: { _id: string; name: string; phone: string | null }, kind: NotifyKind, text: string, settings: Settings): void {
+  push(`parent:${parent._id}`, parent, { kind: "parent" }, kind, text, settings);
 }
 
 function first(name: string): string {
@@ -129,8 +147,8 @@ async function optionLabel(key: string, id: string | null): Promise<string | nul
  * The SMS text — one line, packed into a single segment: as many change
  * lines as fit, then "+N mudanças" for the rest, and the app link.
  */
-export function composeSms(p: Pending): string {
-  const head = `${config.comtele.prefix}: ${first(p.staff.name)}, `;
+export function composeSms(p: Pick<Pending, "to" | "items">): string {
+  const head = `${config.comtele.prefix}: ${first(p.to.name)}, `;
   const texts = p.items.map((i) => i.text);
 
   const render = (shown: string[], rest: number): string => {
@@ -164,8 +182,8 @@ async function flush(): Promise<void> {
   if (batch.length === 0) return;
   const settings = await getSettings().catch(() => null);
   for (const p of batch) {
-    if (settings && !staffHasAccess(p.staff._id, settings)) continue; // window closed while coalescing
-    await deliver(p.staff, composeSms(p), [...new Set(p.items.map((i) => i.kind))].join("+"));
+    if (settings && !gateOpen(p.gate, settings)) continue; // window closed while coalescing
+    await deliver(p.to, composeSms(p), [...new Set(p.items.map((i) => i.kind))].join("+"));
   }
 }
 
@@ -246,6 +264,48 @@ export async function sendCheckinReminder(): Promise<void> {
     for (const s of team) await deliver(s, composeCheckinReminderSms(s), "checkin-reminder");
   } catch (err) {
     console.error("notify: check-in reminder failed", err);
+  }
+}
+
+// ── a parent edited their kid's "Pontos de atenção" ───────────────────────────────────
+
+/**
+ * The parent-edit text — who edited what on which kid, then the app link.
+ * The values stay in the app (they may be long and sensitive).
+ */
+export function composeParentEditSms(toName: string, kid: Camper, entry: Pick<CamperChangeLog, "byName" | "medical" | "changes">): string {
+  const fields = [...new Set(entry.changes.map((x) => PARENT_FIELD_LABEL[x.field]))];
+  const what = entry.medical ? "dados médicos" : "observações";
+  const build = (list: string) => `${config.comtele.prefix}: ${first(toName)}, ${first(entry.byName)} alterou ${what} de ${first(kid.name)}${list ? ` (${list})` : ""}. Veja em ${appLink()}`;
+  const msg = build(fields.join(", "));
+  return msg.length <= SMS_MAX ? msg : build("");
+}
+
+/**
+ * Call right after a parent's edit is saved. MEDICAL fields changed → the
+ * medical team, every admin and the kid's caretaker; only the observations
+ * changed → the caretaker alone. Not coalesced: it is about ONE kid and the
+ * team may need to act before the camp. The caretaker is gated by the team
+ * access window like every other text (people on admin lists never are).
+ */
+export async function notifyParentEdit(kid: Camper, entry: Pick<CamperChangeLog, "byName" | "medical" | "changes">): Promise<void> {
+  try {
+    const settings = await getSettings();
+    if (!settings.notifications.parentEdits) return;
+    const sent = new Set<string>();
+    const send = async (to: { _id: string; name: string; phone: string | null }, label: string) => {
+      if (!to.phone || sent.has(to.phone)) return;
+      sent.add(to.phone);
+      await deliver(to, composeParentEditSms(to.name, kid, entry), label);
+    };
+    const caretaker = kid.caretakerId ? await findStaffById(kid.caretakerId) : null;
+    if (caretaker?.active && staffHasAccess(caretaker._id, settings)) await send(caretaker, "parent-edit");
+    if (!entry.medical) return;
+    const staff = await listStaff({ active: true });
+    for (const s of staff) if (settings.medicalStaff.staffIds.includes(s._id)) await send(s, "parent-edit-medical");
+    for (const admin of await listAdmins()) await send(admin, "parent-edit-admin");
+  } catch (err) {
+    console.error("notify: parent edit failed", err);
   }
 }
 
@@ -360,7 +420,7 @@ export async function notifyStaffChange(before: Staff, after: Staff): Promise<vo
       enqueue(after, "myRoom", room ? `seu quarto agora é o ${room}` : "você saiu do seu quarto", settings);
     }
     if (before.roomRole !== after.roomRole) {
-      const text = after.roomRole === "caretaker" ? "agora você é RESPONSÁVEL por crianças no seu quarto (veja quais no app)" : "agora você é AUXILIAR no seu quarto (sem crianças próprias)";
+      const text = after.roomRole === "caretaker" ? "agora você é LÍDER de crianças no seu quarto (veja quais no app)" : "agora você é AUXILIAR no seu quarto (sem crianças próprias)";
       enqueue(after, "myRoomRole", text, settings);
     }
     if (before.team !== after.team) {
@@ -482,15 +542,128 @@ export async function notifyInstructionChange(before: InstructionDoc | null, aft
   }
 }
 
-/** A Preparação section was created or its title / content changed → the whole active team. */
+/**
+ * A Preparação section was created, its title / content changed, or it was
+ * posted to a new group. The team members in its audiences are texted
+ * (`contentChanges`); when it is posted to the PARENTS every parent with a
+ * phone is texted too (`parentContentChanges`) — only while the parents'
+ * access window is open (checked at send time, like the team's window).
+ * Somebody who just LOST the section (audience removed) is not texted.
+ */
 export async function notifyPreparationChange(before: PrepSection | null, after: PrepSection): Promise<void> {
   try {
-    if (before && before.title === after.title && before.content === after.content) return;
-    const text = !before ? `nova preparação: "${after.title}"` : before.title !== after.title ? `preparação "${before.title}" virou "${after.title}"` : `preparação "${after.title}" atualizada`;
-    await notifyEveryone("preparation", text, (n) => n.contentChanges, after.audience);
+    const changed = !before || before.title !== after.title || before.content !== after.content;
+    const gained = (a: PrepAudience) => after.audiences.includes(a) && (!before || !before.audiences.includes(a));
+    const isNew = (a: PrepAudience) => !before || gained(a);
+    const textFor = (a: PrepAudience) => (isNew(a) ? `nova preparação: "${after.title}"` : before!.title !== after.title ? `preparação "${before!.title}" virou "${after.title}"` : `preparação "${after.title}" atualizada`);
+    const concerned = (a: PrepAudience) => after.audiences.includes(a) && (changed || gained(a));
+    if (!PREP_AUDIENCES.some(concerned)) return;
+
+    const settings = await getSettings();
+    const n = settings.notifications;
+    if (n.contentChanges && (concerned("caretaker") || concerned("helper"))) {
+      for (const s of await listStaff({ active: true })) if (concerned(s.roomRole)) enqueue(s, "preparation", textFor(s.roomRole), settings);
+    }
+    if (n.parentContentChanges && concerned("parent")) {
+      const text = textFor("parent");
+      for (const p of await listParents()) enqueueParent(p, "preparation", text, settings);
+    }
   } catch (err) {
     console.error("notify: preparation change failed", err);
   }
+}
+
+// ── parents: the kid boarded the bus ─────────────────────────────────────────
+
+/**
+ * "Maria, a Ana está a caminho de um fim de semana incrível para aprender
+ * sobre Jesus! Aproveite o fim de semana livre e fique tranquila: vamos
+ * cuidar muito bem dela." — gendered by the kid's `sex` ("dele" / "dela").
+ * Exported so the admin panel shows the exact text.
+ */
+export function composeBusCheckinSms(kid: Pick<Camper, "name" | "sex" | "guardianName">): string {
+  const article = kid.sex === "F" ? "a" : "o";
+  const pron = kid.sex === "F" ? "dela" : "dele";
+  const to = first(kid.guardianName || "");
+  const build = (greet: string) => `${config.comtele.prefix}: ${greet}${article} ${first(kid.name)} está a caminho de um fim de semana incrível para aprender sobre Jesus! Aproveite o fim de semana livre: vamos cuidar muito bem ${pron}.`;
+  const msg = build(to ? `${to}, ` : "");
+  return msg.length <= SMS_MAX ? msg : build("");
+}
+
+/**
+ * Call right after a kid's BUS check-in is recorded. Texts the guardian
+ * (`Camper.guardianPhone`). Not coalesced; undoing a check-in sends nothing.
+ * Parents are never texted about anything else (rooms, roles…).
+ */
+export async function notifyBusCheckin(kid: Camper): Promise<void> {
+  try {
+    if (!kid.guardianPhone) return;
+    const settings = await getSettings();
+    if (!settings.notifications.busCheckin) return;
+    await deliver({ name: kid.guardianName || `responsável de ${first(kid.name)}`, phone: kid.guardianPhone }, composeBusCheckinSms(kid), "bus-checkin");
+  } catch (err) {
+    console.error("notify: bus check-in failed", err);
+  }
+}
+
+// ── parents: welcome (app link) ──────────────────────────────────────────────
+
+/** "Maria, a Ana está inscrita no Acampa Kids! Acompanhe tudo pelo app. Entre com o celular (11) 9… em <app>" */
+export function composeParentWelcomeSms(parent: { name: string; phone: string }, kids: Pick<Camper, "name" | "sex">[]): string {
+  const names = kids.map((k) => first(k.name));
+  const who =
+    kids.length === 0
+      ? "sua criança está inscrita"
+      : kids.length === 1
+        ? `${kids[0].sex === "F" ? "a" : "o"} ${names[0]} está inscrit${kids[0].sex === "F" ? "a" : "o"}`
+        : `${names.slice(0, -1).join(", ")} e ${names[names.length - 1]} estão inscrit${kids.every((k) => k.sex === "F") ? "as" : "os"}`;
+  const build = (w: string, p: string) => `${config.comtele.prefix}: ${first(parent.name)}, ${w} no Acampa Kids! Acompanhe tudo pelo app.${p ? ` Entre com o celular ${p}` : " Entre"} em ${appLink()}`;
+  for (const msg of [build(who, formatBrazilPhone(parent.phone)), build(who, ""), build("sua criança está inscrita", "")]) if (msg.length <= SMS_MAX) return msg;
+  return build("sua criança está inscrita", "");
+}
+
+/** the parents who would be welcomed right now: parent role, a phone, never welcomed (the window is checked by the caller) */
+async function pendingParentWelcomes(): Promise<{ id: string; name: string; phone: string; kids: Pick<Camper, "name" | "sex">[] }[]> {
+  const [parents, kids] = await Promise.all([listParents(), listCampers()]);
+  const kidsOf = new Map<string, Pick<Camper, "name" | "sex">[]>();
+  for (const k of kids) if (k.guardianPhone) kidsOf.set(k.guardianPhone, [...(kidsOf.get(k.guardianPhone) ?? []), { name: k.name, sex: k.sex }]);
+  return parents.filter((p) => !p.welcomeSentAt && p.phone && kidsOf.has(p.phone)).map((p) => ({ id: p._id, name: p.name, phone: p.phone, kids: kidsOf.get(p.phone)! }));
+}
+
+/**
+ * THE parents' welcome scheduler — same logic as `syncWelcomes` for the
+ * team: whoever may use the app right now (parentAccessWindow open) and was
+ * never welcomed gets the SMS, ONCE ever (atomic claim). Called at boot, at
+ * the window edges, when the window is edited, when the toggle is switched on.
+ */
+export async function syncParentWelcomes(): Promise<void> {
+  try {
+    const settings = await getSettings();
+    if (!settings.notifications.parentWelcome) return;
+    if (!staffAccessOpen(settings.parentAccessWindow)) return;
+    for (const p of await pendingParentWelcomes()) {
+      if (!(await claimParentWelcome(p.id))) continue;
+      await deliver(p, composeParentWelcomeSms(p, p.kids), "parent-welcome");
+    }
+  } catch (err) {
+    console.error("notify: parent welcome sync failed", err);
+  }
+}
+
+/**
+ * What the admin sees before switching a welcome toggle on: how many people
+ * would be texted RIGHT NOW (never welcomed + phone + their window open).
+ */
+export async function welcomePreview(): Promise<{ staff: { count: number; windowOpen: boolean; names: string[] }; parents: { count: number; windowOpen: boolean; names: string[] } }> {
+  const settings = await getSettings();
+  const staffOpen = staffAccessOpen(settings.staffAccessWindow);
+  const team = (await listStaff({ active: true })).filter((s) => !s.welcomeSentAt && s.phone);
+  const parentsOpen = staffAccessOpen(settings.parentAccessWindow);
+  const parents = await pendingParentWelcomes();
+  return {
+    staff: { count: staffOpen ? team.length : 0, windowOpen: staffOpen, names: staffOpen ? team.map((s) => s.name) : [] },
+    parents: { count: parentsOpen ? parents.length : 0, windowOpen: parentsOpen, names: parentsOpen ? parents.map((p) => p.name) : [] },
+  };
 }
 
 // ── enrolment: added to the team / to an admin list ─────────────────────────
@@ -551,6 +724,7 @@ async function listRolesOf(id: string, s: Settings): Promise<string[]> {
   const out: string[] = [];
   if (s.organizers.staffIds.includes(id)) out.push("organizador da programação");
   if (s.gameOrganizers.staffIds.includes(id)) out.push("organizador dos jogos (placar)");
+  if (s.scoreHelpers.staffIds.includes(id)) out.push("ajudante do placar (lança pontos)");
   if (s.checkinHelpers.staffIds.includes(id)) out.push("ajudante do check-in");
   const bus = s.busHelpers.helpers.find((h) => h.staffId === id);
   if (bus) {
@@ -576,7 +750,7 @@ export async function notifyAccessListChange(before: Settings, after: Settings):
     if (!after.notifications.enrolments) return;
     const ids = new Set<string>();
     for (const s of [before, after]) {
-      for (const id of [...s.organizers.staffIds, ...s.gameOrganizers.staffIds, ...s.checkinHelpers.staffIds, ...s.medicalStaff.staffIds, ...s.vestHelpers.staffIds]) ids.add(id);
+      for (const id of [...s.organizers.staffIds, ...s.gameOrganizers.staffIds, ...s.scoreHelpers.staffIds, ...s.checkinHelpers.staffIds, ...s.medicalStaff.staffIds, ...s.vestHelpers.staffIds]) ids.add(id);
       for (const h of s.busHelpers.helpers) ids.add(h.staffId);
       for (const p of s.parentContacts) ids.add(p.staffId);
     }

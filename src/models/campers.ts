@@ -33,6 +33,7 @@ function toCamper(doc: Record<string, unknown> | null): Camper | null {
     allergies: (doc.allergies as string[]) ?? [],
     drugAllergies: (doc.drugAllergies as string[]) ?? [],
     healthIssues: (doc.healthIssues as string[]) ?? [],
+    neurodivergent: doc.neurodivergent === true,
     medicines: s("medicines"),
     foodRestrictions: s("foodRestrictions"),
     healthNotes: s("healthNotes"),

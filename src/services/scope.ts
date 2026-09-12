@@ -1,7 +1,9 @@
+import { listCampersOfGuardian } from "../models/campers";
+import { listEvents } from "../models/schedule";
 import { checkinWindowOpen, getSettings, staffAccessOpen } from "../models/settings";
 import { findStaffByPhone } from "../models/staff";
-import type { CampEvent, Camper, DocAudience, Role, RoomRole, ScheduleRole, Settings, Staff } from "../types";
-import { campInProgress, campPeriod } from "./camp";
+import type { CampEvent, Camper, DocAudience, PrepAudience, Role, RoomRole, ScheduleRole, Settings, Staff } from "../types";
+import { campInProgress, campPeriod, parentWindowOf, parentWindowOpen } from "./camp";
 
 /**
  * Data scope of a session — the ONE place that decides what a non-admin may
@@ -42,6 +44,13 @@ import { campInProgress, campPeriod } from "./camp";
  *   game         → a staff member the admin listed as a GAME organizer (no
  *   organizer      window): everything an organizer may do, plus the
  *                  scoreboard (Placar): give / take / zero points of any team.
+ *   score helper → a staff member the admin listed as a SCORE helper (no
+ *                  window): ONLY the bulk QR scan tied to a programme event
+ *                  (the kid's team gets the event's points). Never gives /
+ *                  takes points by team, never zeroes, deletes only their
+ *                  own scan lines, no organizer rights. Every camper reaches
+ *                  them as a "name" record (name + team) so the scan can be
+ *                  resolved and shown. Everything else: as any team member.
  *   medical      → a staff member the admin listed as MEDICAL team (no time
  *                  window): every camper in FULL (health included), every
  *                  bedroom — hence every vehicle — the whole time. Read-only:
@@ -52,7 +61,16 @@ import { campInProgress, campPeriod } from "./camp";
  *                  vest status ("contact" visibility) — never health, room,
  *                  team or check-in — and may stamp the vest delivery /
  *                  return. Everything else: as any team member.
- *   parent       → nothing from these collections (categories only)
+ *   parent       → their OWN kids (matched by the guardian phone), in full,
+ *                  and the kids' rooms. WHILE THE PARENTS' WINDOW is open
+ *                  (from the kids' check-in start to the end of the last
+ *                  event — see services/camp.ts#parentWindow) additionally
+ *                  the team members of those rooms and the "important
+ *                  contacts" (Settings → Contatos) as NAME + PHONE records.
+ *                  Outside the window: no staff at all. The programme: every
+ *                  event from the check-in start onwards, without roles or
+ *                  assignments. They may edit their kid's health block
+ *                  (PUT /api/campers/:id/parent).
  *
  * ORDINARY team members (on none of the lists above, nor a parent contact)
  * are further gated by `settings.staffAccessWindow`: outside it they get
@@ -81,6 +99,8 @@ export type Scope =
       organizer: boolean;
       /** true when this person is a listed GAME organizer (no window): organizer + writes the scoreboard */
       gameOrganizer: boolean;
+      /** true when this person is a listed SCORE helper (no window): bulk QR scan by event only — no per-team points, no zero, no organizer rights */
+      scoreHelper: boolean;
       /** true when this person is on the MEDICAL team (no window): every camper + bedroom in full, read-only */
       medical: boolean;
       /** true when this person hands out / takes back the team VESTS (no window): every staff member as name + phone */
@@ -91,15 +111,34 @@ export type Scope =
       campActive: boolean;
       /** the viewer's role in their room — decides which general documents (Instruções / Preparação) they get */
       roomRole: RoomRole;
+      /** PARENT session: the ids of their own kids (empty for every other role) */
+      parentKids: string[];
+      /** PARENT session: the rooms of those kids */
+      parentBedrooms: string[];
+      /** PARENT session: true while the parents' window is open — room staff + important contacts are sent (name + phone) */
+      parentContacts: boolean;
+      /** PARENT session: staff ids listed as important contacts (Settings → Contatos), inside the window */
+      parentContactIds: string[];
     };
 
-export const NO_ACCESS: Scope = { all: false, staffId: null, bedroom: null, checkinHelper: false, busHelperVehicle: null, organizer: false, gameOrganizer: false, medical: false, vestHelper: false, kidsRoomsDraft: false, campActive: false, roomRole: "helper" };
+export const NO_ACCESS: Extract<Scope, { all: false }> = { all: false, staffId: null, bedroom: null, checkinHelper: false, busHelperVehicle: null, organizer: false, gameOrganizer: false, scoreHelper: false, medical: false, vestHelper: false, kidsRoomsDraft: false, campActive: false, roomRole: "helper", parentKids: [], parentBedrooms: [], parentContacts: false, parentContactIds: [] };
+
+/** Is this a PARENT session with at least one kid enrolled? */
+export function isParent(scope: Scope): boolean {
+  return !scope.all && scope.parentKids.length > 0;
+}
+
+/** the parent branch of a scope (only meaningful when `isParent(scope)`) */
+function asParent(scope: Scope): Extract<Scope, { all: false }> {
+  return scope as Extract<Scope, { all: false }>;
+}
 
 /** On some admin list (organizer, church / bus helper, medical, vest helper, parent contact)? These people are never gated by the staff access window. */
 export function isPrivilegedStaff(staffId: string, s: Settings): boolean {
   return (
     s.organizers.staffIds.includes(staffId) ||
     s.gameOrganizers.staffIds.includes(staffId) ||
+    s.scoreHelpers.staffIds.includes(staffId) ||
     s.medicalStaff.staffIds.includes(staffId) ||
     s.vestHelpers.staffIds.includes(staffId) ||
     s.checkinHelpers.staffIds.includes(staffId) ||
@@ -113,16 +152,33 @@ export function staffHasAccess(staffId: string, s: Settings, now = new Date()): 
   return isPrivilegedStaff(staffId, s) || staffAccessOpen(s.staffAccessWindow, now);
 }
 
+/** The parent's scope: their kids (by guardian phone), the kids' rooms and — inside the parents' window — the contacts. */
+async function resolveParentScope(phone: string): Promise<Scope> {
+  const [kids, settings, events] = await Promise.all([listCampersOfGuardian(phone), getSettings(), listEvents()]);
+  if (kids.length === 0) return NO_ACCESS;
+  const open = parentWindowOpen(parentWindowOf(settings, events));
+  return {
+    ...NO_ACCESS,
+    kidsRoomsDraft: settings.kidsRoomsDraft,
+    parentKids: kids.map((k) => k._id),
+    parentBedrooms: settings.kidsRoomsDraft ? [] : [...new Set(kids.map((k) => k.bedroom).filter((b): b is string => !!b))],
+    parentContacts: open,
+    parentContactIds: open ? settings.parentContacts.map((p) => p.staffId) : [],
+  };
+}
+
 export async function resolveScope(viewer: Viewer): Promise<Scope> {
   if (viewer.activeRole === "admin") return { all: true };
+  if (viewer.activeRole === "parent") return resolveParentScope(viewer.phone);
   if (viewer.activeRole !== "staff" && viewer.activeRole !== "health_staff") return NO_ACCESS;
   const me = await findStaffByPhone(viewer.phone);
   if (!me || !me.active) return NO_ACCESS;
   const settings = await getSettings();
   // ORDINARY team members (on no list at all) only get in during the staff access window
   if (!staffHasAccess(me._id, settings)) return NO_ACCESS;
-  const { checkinWindow, checkinTestMode, checkinHelpers, busHelpers, organizers, gameOrganizers, medicalStaff, vestHelpers, kidsRoomsDraft } = settings;
+  const { checkinWindow, checkinTestMode, checkinHelpers, busHelpers, organizers, gameOrganizers, scoreHelpers, medicalStaff, vestHelpers, kidsRoomsDraft } = settings;
   const gameOrganizer = gameOrganizers.staffIds.includes(me._id);
+  const scoreHelper = scoreHelpers.staffIds.includes(me._id);
   // a game organizer IS an organizer (same rights) + the scoreboard
   const organizer = gameOrganizer || organizers.staffIds.includes(me._id);
   const medical = medicalStaff.staffIds.includes(me._id);
@@ -134,18 +190,39 @@ export async function resolveScope(viewer: Viewer): Promise<Scope> {
   const checkinHelper = windowOpen && listedChurch;
   const busHelperVehicle = windowOpen ? linkedVehicle : null;
   const campActive = campInProgress(await campPeriod());
-  return { all: false, staffId: me._id, bedroom: me.bedroom, checkinHelper, busHelperVehicle, organizer, gameOrganizer, medical, vestHelper, kidsRoomsDraft, campActive, roomRole: me.roomRole };
+  return { ...NO_ACCESS, staffId: me._id, bedroom: me.bedroom, checkinHelper, busHelperVehicle, organizer, gameOrganizer, scoreHelper, medical, vestHelper, kidsRoomsDraft, campActive, roomRole: me.roomRole };
 }
 
-/** A general document (Instruções / Preparação) reaches everyone, or only the caretakers / helpers. Admins and organizers see all. */
+/** May this PARENT session edit `k`'s "Pontos de atenção"? (their own kid) */
+export function canParentEdit(scope: Scope, k: Pick<Camper, "_id">): boolean {
+  return isParent(scope) && asParent(scope).parentKids.includes(k._id);
+}
+
+/** A general Instruções document reaches everyone, or only the caretakers / helpers. Admins and organizers see all. */
 export function canSeeDoc(scope: Scope, d: { audience: DocAudience }): boolean {
   if (scope.all || scope.organizer) return true;
   return d.audience === "all" || d.audience === scope.roomRole;
 }
 
-/** May this session write the scoreboard (give / take / zero points)? (admin or game organizer) */
+/**
+ * A Preparação section is posted to one or more groups: parents see only the
+ * sections posted to `parent`; a team member sees the ones posted to their room
+ * role. Admins and organizers see all.
+ */
+export function canSeePrep(scope: Scope, s: { audiences: PrepAudience[] }): boolean {
+  if (scope.all || scope.organizer) return true;
+  if (isParent(scope)) return s.audiences.includes("parent");
+  return s.audiences.includes(scope.roomRole);
+}
+
+/** May this session write the scoreboard (give / take / zero points, delete any line)? (admin or game organizer) */
 export function canKeepScore(scope: Scope): boolean {
   return scope.all || scope.gameOrganizer;
+}
+
+/** May this session run the bulk QR scan (points by event)? (scorekeepers + score helpers) */
+export function canLaunchScore(scope: Scope): boolean {
+  return scope.all || scope.gameOrganizer || scope.scoreHelper;
 }
 
 /** May this session hand out / take back the team vests? (admin or vest helper) */
@@ -169,6 +246,7 @@ export function canRunBusCheckin(scope: Scope, k: Pick<Camper, "transportation">
 }
 
 export function canSeeBedroom(scope: Scope, bedroomId: string): boolean {
+  if (isParent(scope)) return asParent(scope).parentBedrooms.includes(bedroomId);
   return scope.all || scope.medical || scope.checkinHelper || scope.busHelperVehicle !== null || (!scope.kidsRoomsDraft && scope.bedroom !== null && scope.bedroom === bedroomId);
 }
 
@@ -179,8 +257,10 @@ export function canSeeBedroom(scope: Scope, bedroomId: string): boolean {
  */
 export type CamperVisibility = "full" | "care" | "name" | "none";
 
-export function camperVisibility(scope: Scope, k: Pick<Camper, "bedroom" | "transportation" | "caretakerId">): CamperVisibility {
+export function camperVisibility(scope: Scope, k: Pick<Camper, "_id" | "bedroom" | "transportation" | "caretakerId">): CamperVisibility {
   if (scope.all || scope.medical || scope.checkinHelper) return "full";
+  // a parent: their own kids, nothing else
+  if (isParent(scope)) return asParent(scope).parentKids.includes(k._id) ? "full" : "none";
   if (!scope.kidsRoomsDraft && scope.staffId !== null) {
     // the kids under my care: any time
     if (k.caretakerId === scope.staffId) return "care";
@@ -188,10 +268,12 @@ export function camperVisibility(scope: Scope, k: Pick<Camper, "bedroom" | "tran
     if (scope.campActive && k.bedroom !== null && k.bedroom === scope.bedroom) return "care";
   }
   // a bus helper works the door of ONE vehicle: its kids, names only
-  return scope.busHelperVehicle !== null && k.transportation === scope.busHelperVehicle ? "name" : "none";
+  if (scope.busHelperVehicle !== null && k.transportation === scope.busHelperVehicle) return "name";
+  // a score helper scans any kid at the door: name + team, nothing else
+  return scope.scoreHelper ? "name" : "none";
 }
 
-export function canSeeCamper(scope: Scope, k: Pick<Camper, "bedroom" | "transportation" | "caretakerId">): boolean {
+export function canSeeCamper(scope: Scope, k: Pick<Camper, "_id" | "bedroom" | "transportation" | "caretakerId">): boolean {
   return camperVisibility(scope, k) !== "none";
 }
 
@@ -201,8 +283,13 @@ export function canSeeCamper(scope: Scope, k: Pick<Camper, "bedroom" | "transpor
  */
 export type StaffVisibility = "full" | "contact" | "name" | "none";
 
-export function staffVisibility(scope: Scope, s: Pick<Staff, "_id" | "bedroom">): StaffVisibility {
+export function staffVisibility(scope: Scope, s: Pick<Staff, "_id" | "bedroom" | "active">): StaffVisibility {
   if (scope.all || scope.organizer) return "full";
+  // a parent, inside the parents' window: the team of their kids' rooms + the important contacts, name + phone only
+  if (isParent(scope)) {
+    if (!scope.parentContacts || !s.active) return "none";
+    return scope.parentContactIds.includes(s._id) || (s.bedroom !== null && scope.parentBedrooms.includes(s.bedroom)) ? "contact" : "none";
+  }
   if (scope.staffId === s._id) return "full";
   // the vest helper reaches everyone by phone, and nothing more
   if (scope.vestHelper) return "contact";
@@ -225,6 +312,8 @@ export function hideOwnBedroom(scope: Scope): boolean {
  */
 export function scopeEvent(scope: Scope, e: CampEvent, roleById: Map<string, ScheduleRole>): CampEvent {
   if (scope.all || scope.organizer) return e;
+  // parents see the programme, never who does what
+  if (isParent(scope)) return { ...e, roles: [], assignments: [] };
   const mine = scope.staffId ? e.assignments.find((a) => a.staffId === scope.staffId) : undefined;
   const roles = mine ? e.roles.filter((id) => id === mine.roleId) : e.roles.filter((id) => roleById.get(id)?.forEveryone);
   return { ...e, roles, assignments: mine ? [mine] : [] };

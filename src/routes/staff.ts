@@ -23,7 +23,7 @@ import {
 } from "../models/staff";
 import { logCheckin } from "../models/campers";
 import { bedroomCapacity, ROOM_ROLES, STAFF_CATEGORY_KEYS, type Role, type RoomRole, type SessionUser, type Staff } from "../types";
-import { canHandleVests, hideOwnBedroom, resolveScope, staffVisibility, type Scope } from "../services/scope";
+import { canHandleVests, hideOwnBedroom, isParent, resolveScope, staffVisibility, type Scope } from "../services/scope";
 import { bedroomFullMessage, isInvalid, parseBedroom, parseMulti, parseSingle, parseTeam, parseText } from "./_validate";
 import { clearJokerEverywhere } from "../models/teams";
 import { distanceMeters, normalizeBrazilPhone, nowInSaoPauloWallClock, saoPauloWallClock, saoPauloWallClockToIso, todayInSaoPaulo } from "../utils";
@@ -59,7 +59,10 @@ export function serializeStaff(s: Staff) {
  * back as a NAME-ONLY record (`redacted: true`): no phone, no health data,
  * no team/transport — just what is needed to know who shares the room. The
  * VEST helper gets everyone as name + phone + vest status (`redacted: true`
- * too: nothing else leaves the server).
+ * too: nothing else leaves the server). A PARENT (inside the parents'
+ * window) gets the team of their kid's room and the important contacts as
+ * name + phone (+ the room and room role, so the app can tell the caretaker
+ * from the rest) — never the vest, health or check-in.
  */
 export function serializeStaffFor(s: Staff, scope: Scope) {
   const vis = staffVisibility(scope, s);
@@ -67,14 +70,15 @@ export function serializeStaffFor(s: Staff, scope: Scope) {
   const full = serialize(s);
   // draft rooms: the person's own record travels without the bedroom
   if (vis === "full") return hideOwnBedroom(scope) ? { ...full, bedroom: null } : full;
-  // the room is only revealed for a roommate (the viewer already knows their own room)
+  // the room is only revealed for a roommate (the viewer already knows their own room) or to the parent of a kid sleeping there
   const roommate = !scope.all && !scope.kidsRoomsDraft && scope.bedroom !== null && s.bedroom === scope.bedroom;
+  const parentRoom = !scope.all && scope.parentKids.length > 0 && s.bedroom !== null && scope.parentBedrooms.includes(s.bedroom);
   return {
     ...full,
     redacted: true,
     phone: vis === "contact" ? s.phone : null,
     team: null,
-    bedroom: roommate ? s.bedroom : null,
+    bedroom: roommate || parentRoom ? s.bedroom : null,
     transportation: null,
     allergies: [],
     drugAllergies: [],
@@ -83,7 +87,7 @@ export function serializeStaffFor(s: Staff, scope: Scope) {
     medicines: "",
     healthNotes: "",
     checkin: null,
-    vest: vis === "contact" ? s.vest : NO_VEST,
+    vest: vis === "contact" && !isParent(scope) ? s.vest : NO_VEST,
     prepDone: [],
   };
 }
@@ -174,7 +178,7 @@ async function buildPatch(
 
   if (has("roomRole")) {
     const v = body.roomRole === undefined ? "helper" : body.roomRole;
-    if (!ROOM_ROLES.includes(v as RoomRole)) return { code: "ROOM_ROLE_INVALID", message: "Função no quarto deve ser responsável ou auxiliar." };
+    if (!ROOM_ROLES.includes(v as RoomRole)) return { code: "ROOM_ROLE_INVALID", message: "Função no quarto deve ser líder ou auxiliar." };
     patch.roomRole = v as RoomRole;
   }
 
@@ -205,14 +209,14 @@ staff.use("*", requireAuth);
 // ── read: admin sees everyone; staff/health staff only their own room (see services/scope.ts) ──
 
 /** GET /api/staff?active=true|false — lists members sorted by name (scoped). */
-staff.get("/", requireRole("admin", "staff", "health_staff"), async (c) => {
+staff.get("/", requireRole("admin", "staff", "health_staff", "parent"), async (c) => {
   const q = c.req.query("active");
   const active = q === "true" ? true : q === "false" ? false : undefined;
   const [list, scope] = await Promise.all([listStaff({ active }), resolveScope(c.get("user"))]);
   return c.json({ staff: serializeStaffList(list, scope) });
 });
 
-staff.get("/:id", requireRole("admin", "staff", "health_staff"), async (c) => {
+staff.get("/:id", requireRole("admin", "staff", "health_staff", "parent"), async (c) => {
   const s = await findStaffById(c.req.param("id"));
   // outside the viewer's scope → same answer as "does not exist" (no probing)
   const out = s ? serializeStaffFor(s, await resolveScope(c.get("user"))) : null;

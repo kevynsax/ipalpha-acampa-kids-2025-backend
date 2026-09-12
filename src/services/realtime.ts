@@ -103,10 +103,18 @@ export async function evictStaffOutsideWindow(): Promise<void> {
   ]);
   const settings = await getSettings();
   const now = new Date();
+  const { staffAccessOpen } = await import("../models/settings");
   for (const client of [...clients]) {
-    if (client.role !== "staff" && client.role !== "health_staff") continue;
-    const me = await findStaffByPhone(client.phone);
-    if (!me || staffHasAccess(me._id, settings, now)) continue;
+    let name: string;
+    if (client.role === "parent") {
+      if (staffAccessOpen(settings.parentAccessWindow, now)) continue;
+      name = `parent ${client.phone}`;
+    } else {
+      if (client.role !== "staff" && client.role !== "health_staff") continue;
+      const me = await findStaffByPhone(client.phone);
+      if (!me || staffHasAccess(me._id, settings, now)) continue;
+      name = me.name;
+    }
     await revokeUserSessions(client.userId);
     try {
       client.ws.send(JSON.stringify({ type: "error", code: "UNAUTHORIZED", message: "O período de acesso da equipe terminou." }));
@@ -115,7 +123,7 @@ export async function evictStaffOutsideWindow(): Promise<void> {
       /* already gone */
     }
     clients.delete(client);
-    console.log(`🚪 access window closed → logged out ${me.name}`);
+    console.log(`🚪 access window closed → logged out ${name}`);
   }
 }
 
@@ -130,11 +138,24 @@ export async function evictStaffOutsideWindow(): Promise<void> {
 let edgeTimers: ReturnType<typeof setTimeout>[] = [];
 const MAX_TIMEOUT = 2 ** 31 - 1;
 
-export function scheduleCheckinWindow(w: CheckinWindow, staffAccess?: CheckinWindow): void {
+/**
+ * Re-arms every window edge from the current settings + programme: the
+ * check-in window, the team access window and the PARENTS' window (check-in
+ * start → end of the last event, see services/camp.ts). Call after any write
+ * to the settings or to the programme's events, and at boot.
+ */
+export async function rearmWindows(): Promise<void> {
+  const [{ getSettings }, { listEvents }, { parentWindowOf }] = await Promise.all([import("../models/settings"), import("../models/schedule"), import("./camp")]);
+  const s = await getSettings();
+  const pw = parentWindowOf(s, await listEvents());
+  scheduleCheckinWindow(s.checkinWindow, s.staffAccessWindow, pw, s.parentAccessWindow);
+}
+
+export function scheduleCheckinWindow(w: CheckinWindow, staffAccess?: CheckinWindow, parents?: CheckinWindow, parentAccess?: CheckinWindow): void {
   for (const t of edgeTimers) clearTimeout(t);
   edgeTimers = [];
   const now = Date.now();
-  for (const edge of [w.from, w.until, staffAccess?.from ?? null, staffAccess?.until ?? null]) {
+  for (const edge of [w.from, w.until, staffAccess?.from ?? null, staffAccess?.until ?? null, parents?.from ?? null, parents?.until ?? null, parentAccess?.from ?? null, parentAccess?.until ?? null]) {
     if (!edge) continue;
     const wait = edge.getTime() - now + 500; // a hair after, so the check sees the new state
     if (wait <= 0 || wait > MAX_TIMEOUT) continue;
@@ -143,7 +164,7 @@ export function scheduleCheckinWindow(w: CheckinWindow, staffAccess?: CheckinWin
         console.log("⏰ check-in window edge reached → re-publishing scoped collections");
         publish("campers", "staff", "bedrooms", "roles", "events", "settings");
         void evictStaffOutsideWindow().catch((err) => console.error("realtime: evict failed", err));
-        void import("./notify").then((m) => m.syncWelcomes()); // the team window may have just opened → welcome SMS
+        void import("./notify").then((m) => Promise.all([m.syncWelcomes(), m.syncParentWelcomes()])); // a window may have just opened → welcome SMS
       }, wait),
     );
   }
@@ -167,7 +188,7 @@ export function scheduleCheckinReminder(at: Date | null): void {
 }
 
 // ── safety net: an instant further than setTimeout's limit (~24 days) can't be armed, so re-check hourly
-setInterval(() => void import("./notify").then((m) => Promise.all([m.syncWelcomes(), m.sendCheckinReminder()])), 60 * 60_000);
+setInterval(() => void import("./notify").then((m) => Promise.all([m.syncWelcomes(), m.syncParentWelcomes(), m.sendCheckinReminder()])), 60 * 60_000);
 
 // ── heartbeat (lets phones notice a dead connection and reconnect) ─────────
 

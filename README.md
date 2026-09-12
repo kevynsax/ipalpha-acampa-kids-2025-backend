@@ -240,6 +240,8 @@ document data. Admin, medical team and check-in helpers keep the full record.
 
 ```bash
 bun run seed:campers   # 152 kids (+ dedup of emergency contacts and health notes)
+bun run seed:parents   # one parent login per guardian phone (idempotent; rerun after every import)
+bun run seed:welcomed  # rollout: marks EVERY team member + parent as already welcomed (no welcome SMS to people already in the camp)
 bun run seed:notifications  # resets settings.notifications: every SMS kind OFF, reminder date cleared
 bun run src/scripts/cleanHealthNotes.ts --dry   # preview the health-notes cleanup on existing rows
 bun run import:supabase [--dry]   # sync with the registration system (data/children.json, git-ignored)
@@ -334,16 +336,25 @@ audit line as the admin roll call.
 
 ## Preparação (before the camp) 🎒
 
-General sections every team member reads before leaving home ("O que levar",
-"Uniforme", "Chegada na igreja"…). Collection `prep_sections`:
-`{ title, emoji, content (sanitized HTML, may include images), order }`. It is
-pushed in the realtime snapshot (`preparation`) to admin / staff /
-health_staff. Role-specific preparation is `schedule_roles.preparation`.
+General sections read before leaving home ("O que levar", "Uniforme",
+"Chegada na igreja"…). Collection `prep_sections`:
+`{ title, emoji, audiences, content (sanitized HTML, may include images), order }`.
+`audiences` is a non-empty list of `"parent" | "caretaker" | "helper"` — the
+section is POSTED to those groups (older docs with a single `audience` are read
+as `caretaker`+`helper` for `"all"`). Pushed in the realtime snapshot
+(`preparation`) to admin / staff / health_staff (their room role) and to
+PARENTS (only sections listing `parent`); admins and organizers see all.
+`AUDIENCE_INVALID` when empty or unknown. Role-specific preparation is
+`schedule_roles.preparation`.
+
+Creating / editing a section posted to the parents texts every parent with a
+phone (`notifications.parentContentChanges`), only while the parents' access
+window is open (checked at send time, coalesced like the team's SMS).
 
 | Method | Path | Who | Body |
 |---|---|---|---|
-| GET | `/api/preparation` | admin, staff, health_staff | — |
-| POST | `/api/preparation` | admin | `{ title, emoji?, content? }` |
+| GET | `/api/preparation` | admin, staff, health_staff, parent | — (filtered to what the session may see) |
+| POST | `/api/preparation` | admin | `{ title, emoji?, audiences?, content? }` |
 | PUT | `/api/preparation/reorder` | admin | `{ ids: string[] }` |
 | PUT | `/api/preparation/:id` | admin | partial |
 | DELETE | `/api/preparation/:id` | admin | — |
@@ -395,7 +406,8 @@ Until an admin saves it, the defaults apply.
 | Method | Path | Who | Body |
 |---|---|---|---|
 | GET | `/api/settings` | any logged-in role | — |
-| PUT | `/api/settings` | admin | `{ checkinLocation?: { lat, lng, radiusM }, notifications?: { bedroomChanges?, roleChanges?, checkinConfirmation?, …, checkinReminder? }, checkinWindow?: { from, until }, checkinReminder?: { at }, checkinHelpers?: { staffIds }, busHelpers?: { helpers: [{ staffId, vehicleId }] }, organizers?: { staffIds }, gameOrganizers?: { staffIds }, medicalStaff?: { staffIds }, vestHelpers?: { staffIds }, parentContacts?: [{ id, title, staffId }] }` |
+| GET | `/api/settings/welcome-preview` | admin | → `{ staff: { count, windowOpen, names }, parents: { … } }` — who would get the welcome SMS right now |
+| PUT | `/api/settings` | admin | `{ checkinLocation?: { lat, lng, radiusM }, notifications?: { bedroomChanges?, roleChanges?, checkinConfirmation?, …, checkinReminder? }, checkinWindow?: { from, until }, checkinReminder?: { at }, checkinHelpers?: { staffIds }, busHelpers?: { helpers: [{ staffId, vehicleId }] }, organizers?: { staffIds }, gameOrganizers?: { staffIds }, scoreHelpers?: { staffIds }, medicalStaff?: { staffIds }, vestHelpers?: { staffIds }, parentContacts?: [{ id, title, staffId }], parentAccessWindow?: { from, until } }` |
 
 `checkinLocation` defaults to Igreja Presbiteriana em Alphaville
 (`-23.48053637134259, -46.83077891444747`, radius 300 m). `radiusM` must be
@@ -408,7 +420,51 @@ whether a Comtele key is configured). Errors: `LOCATION_INVALID`,
 
 ### Contacts shared with parents 📞
 
-`parentContacts: [{ id, title, staffId }]` is an ordered list managed by the admin. Each entry points to one active staff member and gives that person a purpose-specific title such as "Coordenação do acampamento". A later parent screen can join `staffId` to the staff record and show the saved title with the person's contact details.
+`parentContacts: [{ id, title, staffId }]` is an ordered list managed by the admin. Each entry points to one active staff member and gives that person a purpose-specific title such as "Coordenação do acampamento". Parents see them (name + phone) while the parents' window is open.
+
+## Parents 👨‍👩‍👧
+
+A parent is a `users` doc with the `parent` role whose phone matches
+`Camper.guardianPhone` (`bun run seed:parents` creates / updates one account
+per distinct guardian phone; staff who are also parents just gain the role).
+`services/scope.ts#resolveParentScope`:
+
+- **campers**: only their own kids, full record (while `kidsRoomsDraft` the
+  room, bed and caretaker are blanked).
+- **bedrooms**: the kids' rooms.
+- **staff**: ONLY while the **parents' window** is open — the team of the
+  kids' rooms and the `parentContacts`, as `redacted` records with `name`,
+  `phone`, `bedroom`, `roomRole` (no vest, health, team or check-in).
+  Outside the window nothing.
+- **events**: from the check-in window start onwards (`services/camp.ts#parentEvents`),
+  with `roles` / `assignments` emptied. **roles**: none.
+- categories (active options), teams, settings.
+
+The parents' window (`services/camp.ts#parentWindow`, read-only
+`settings.parentWindow: { from, until, open }`) runs from `checkinWindow.from`
+(one hour before the first event when unset) to the end of the last event.
+`services/realtime.ts#rearmWindows` arms timers at both edges (re-armed on
+every settings / event write and at boot) so the staff records are pushed /
+withdrawn live.
+
+| Method | Path | Who | Body |
+|---|---|---|---|
+| PUT | `/api/campers/:id/parent` | parent (own kid) | any of `allergies, drugAllergies, healthIssues, medicines, foodRestrictions, healthNotes, weightKg, insurance, insuranceCard, generalNotes` — other keys ignored → `{ camper, changed }` |
+| GET | `/api/campers/:id/changes` | admin | → `{ changes: [{ id, at, byName, medical, changes: [{ field, before, after }] }] }` (newest first) |
+
+Every real change is appended to `camperChangeLog` and texted
+(`notifications.parentEdits`): a MEDICAL field (anything but `generalNotes`)
+→ the medical team, every admin and the kid's caretaker; observations alone
+→ the caretaker only (`services/notify.ts#notifyParentEdit`, sent at once).
+Parents may also `GET` campers, staff, bedrooms, teams and the schedule
+(scoped as above).
+
+**Access window.** `settings.parentAccessWindow: { from, until }` (Settings →
+Geral) gates parent logins and sessions exactly like `staffAccessWindow` does
+for the ordinary team (`STAFF_ACCESS_NOT_YET` / `STAFF_ACCESS_ENDED` with
+`audience: "parent"`, sockets closed with 4401 at the edge). Both ends null =
+always. Parents are NEVER texted about rooms, roles or any other change —
+only the welcome and the bus check-in.
 
 ### Check-in helpers (team members running the kids' roll calls) 🙋🚌
 
@@ -466,6 +522,17 @@ window-close purge skips medical members.
 `POST /api/scores/reset/:teamId`, `DELETE /api/scores/:id`). Joining the
 list sends the enrolment SMS.
 
+### Score helpers (ajudantes do placar) 📷
+
+`scoreHelpers: { staffIds: string[] }` — **no time window**. People who only
+run the bulk **QR scan** tied to a programme event: `POST /api/scores/scan`
+(the kid's QR at a door → the kid's team gets the event's points) and
+`PUT /api/scores/scan/:eventId`. Scope `scoreHelper: true`: every camper
+reaches them as a `"name"` record (name + team, `redacted`), so the scan can
+be resolved locally. They never give / take points by team (`POST
+/api/scores` is 403), never zero a team, `DELETE` only their **own scan**
+lines, and get no organizer rights. Joining the list sends the enrolment SMS.
+
 ### Vest helpers (coletes) 🦺
 
 `vestHelpers: { staffIds: string[] }` — **no time window**. The people who
@@ -504,16 +571,28 @@ the right team, then the category is deleted. `bun run seed:teams` creates the
 | DELETE | `/api/teams/:id` | admin | — (unlinks kids / staff, drops the team's score lines) |
 
 The scoreboard is a **ledger** (`scores`): each line is `{ teamId, points,
-kind: add | remove | reset, note, by, createdAt }`; a team's score is the sum
+kind: add | remove | reset, note, camperId, camperName, eventId, by, createdAt }`; a team's score is the sum
 of its lines. Zeroing writes a `reset` line cancelling the current total, so
-the history survives.
+the history survives. **Every write is refused with `409 SCORE_CLOSED`
+outside the camp days** (first → last programme day) unless
+`settings.scoreDraft` (Settings → Geral → "Placar em rascunho", `PUT
+/api/settings { scoreDraft: boolean }`) is on — the rehearsal switch that also
+makes the frontend show the Placar tab any day. `camperId` / `camperName` / `eventId` are set only on
+lines written by the QR scan. The programme **event** is the unit of the
+round, shared across every device: the same kid counts **once per event**
+(`409 ALREADY_SCANNED`) and the points are **one value per event** — a scan
+sent with a different value re-points every earlier scan of that event (so
+does `PUT /api/scores/scan/:eventId`). The note is always the event's
+`emoji + title`.
 
 | Method | Path | Who | Body |
 |---|---|---|---|
 | GET | `/api/scores` | admin, staff, health_staff | — (newest first) |
 | POST | `/api/scores` | admin, game organizer | `{ teamId, points (≠ 0), note? }` |
+| POST | `/api/scores/scan` | admin, game organizer, score helper | `{ camperId, eventId, points (> 0) }` → `{ score, team }`; errors `EVENT_NOT_FOUND`, `CAMPER_NOT_FOUND`, `CAMPER_WITHOUT_TEAM`, `ALREADY_SCANNED` |
+| PUT | `/api/scores/scan/:eventId` | admin, game organizer, score helper | `{ points (> 0) }` → `{ changed }` (re-points every scan of the event) |
 | POST | `/api/scores/reset/:teamId` | admin, game organizer | `{ note? }` |
-| DELETE | `/api/scores/:id` | admin, game organizer | — (undoes the line) |
+| DELETE | `/api/scores/:id` | admin, game organizer; score helper (own scan lines only) | — (undoes the line) |
 
 Errors: `TEAM_NOT_FOUND`, `NAME_DUPLICATE`, `COLOR_INVALID`, `JOKER_INVALID`,
 `POINTS_INVALID`, `ALREADY_ZERO`, `SCORE_NOT_FOUND`. Both collections travel
@@ -533,6 +612,9 @@ carries details — the app is the source of truth:
 | `roleChanges` | a person is assigned / reassigned (role or detail) / removed in an event, the event's date or time changes, the event is deleted, or a role's name / instructions / "for everyone" flag changes | each person whose duty in that event changed (explicit assignment or "for everyone" default) |
 | `checkinConfirmation` | a team member's church check-in is recorded (`POST /api/staff/me/checkin` or the admin roll call `POST /api/staff/:id/checkin`) | that person — *"seu check-in foi feito com sucesso. Lembre-se de conferir as crianças do seu quarto no app."* Sent at once (not coalesced); undoing a check-in sends nothing |
 | `occurrences` | an occurrence is registered (`POST /api/occurrences`, by an admin or the medical team) | every admin account with a phone, except the one who registered it — names who registered and who is involved (never the description). Sent at once; admins are not gated by the team access window |
+| `busCheckin` | a kid's BUS check-in is recorded (`POST /api/campers/:id/checkin/bus`) | the kid's guardian — *"a Ana está a caminho de um fim de semana incrível para aprender sobre Jesus! Aproveite o fim de semana livre: vamos cuidar muito bem dela."* (gendered by `Camper.sex`). Sent at once; undo sends nothing |
+| `parentWelcome` | the parents' access window (`settings.parentAccessWindow`) is open — checked at boot, at the window edges, when the window / toggle is edited, hourly | every parent account with a kid and a phone, ONCE ever (`users.welcomeSentAt`, atomic claim) — *"a Ana está inscrita no Acampa Kids! Acompanhe tudo pelo app. Entre com o celular … em <app>"*. **Off by default.** Switching a welcome toggle on (this one or `enrolments`) texts everyone pending at once — the admin UI previews the count via `GET /api/settings/welcome-preview` and asks first |
+| `parentEdits` | a parent edited their kid's "Pontos de atenção" (`PUT /api/campers/:id/parent`) | medical field changed → medical team + every admin + the kid's caretaker; observations only → the caretaker. Sent at once |
 | `checkinReminder` | the instant `settings.checkinReminder.at` is reached (timer re-armed on every settings write and at boot, hourly safety net) | every active team member with a phone who has no check-in yet — *"chegou a hora do seu check-in!"*. **Nothing goes out while the date is unset**; sent ONCE per date (atomic claim on `sentAt`), picking a new date re-arms it. Not gated by the team access window |
 
 Rules: only staff with a phone are texted; the notifier diffs BEFORE/AFTER

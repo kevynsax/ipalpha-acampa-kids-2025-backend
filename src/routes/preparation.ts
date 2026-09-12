@@ -12,10 +12,10 @@ import {
 } from "../models/preparation";
 import { cleanHtml } from "../services/html";
 import { publish } from "../services/realtime";
-import { canSeeDoc, resolveScope } from "../services/scope";
+import { canSeePrep, resolveScope } from "../services/scope";
 import { notifyPreparationChange } from "../services/notify";
 import { isEmojiLike } from "../utils";
-import { DOC_AUDIENCES, type DocAudience, type PrepSection, type Role, type SessionUser } from "../types";
+import { PREP_AUDIENCES, PREP_TEAM_AUDIENCES, type PrepAudience, type PrepSection, type Role, type SessionUser } from "../types";
 
 interface Env {
   Variables: {
@@ -27,12 +27,13 @@ interface Env {
 }
 
 /**
- * Preparação — general sections every team member reads before the camp
- * ("O que levar", "Chegada", "Uniforme"…). Role-specific preparation lives
- * on the role itself (PUT /api/schedule/roles/:id { preparation }).
+ * Preparação — general sections read before the camp ("O que levar",
+ * "Chegada", "Uniforme"…), each POSTED to one or more groups (`audiences`:
+ * parents, caretakers, helpers). Role-specific preparation lives on the role
+ * itself (PUT /api/schedule/roles/:id { preparation }).
  *
- *   GET    /api/preparation              team + admin
- *   POST   /api/preparation              admin   { title, emoji?, content? }
+ *   GET    /api/preparation              team + parents + admin (filtered to what the session may see)
+ *   POST   /api/preparation              admin   { title, emoji?, audiences?, content? }
  *   PUT    /api/preparation/reorder      admin   { ids }
  *   PUT    /api/preparation/:id          admin
  *   DELETE /api/preparation/:id          admin
@@ -51,7 +52,7 @@ export function serializePrepSection(s: PrepSection) {
     id: s._id,
     title: s.title,
     emoji: s.emoji,
-    audience: s.audience,
+    audiences: s.audiences,
     content: s.content,
     order: s.order,
     createdAt: s.createdAt,
@@ -72,10 +73,12 @@ function buildPatch(body: Record<string, unknown>, partial: boolean): { patch: P
     const e = typeof body.emoji === "string" ? body.emoji.trim() : "";
     patch.emoji = isEmojiLike(e) ? e : "📌";
   }
-  if (has("audience")) {
-    const a = body.audience === undefined ? "all" : body.audience;
-    if (!DOC_AUDIENCES.includes(a as DocAudience)) return { code: "AUDIENCE_INVALID", message: "Público deve ser todos, responsáveis ou auxiliares." };
-    patch.audience = a as DocAudience;
+  if (has("audiences")) {
+    const raw = body.audiences === undefined ? PREP_TEAM_AUDIENCES : body.audiences;
+    if (!Array.isArray(raw) || raw.some((a) => !PREP_AUDIENCES.includes(a as PrepAudience))) return { code: "AUDIENCE_INVALID", message: "Público deve ser pais, líderes e/ou auxiliares." };
+    const audiences = PREP_AUDIENCES.filter((a) => (raw as unknown[]).includes(a));
+    if (audiences.length === 0) return { code: "AUDIENCE_INVALID", message: "Escolha pelo menos um público para a seção." };
+    patch.audiences = audiences;
   }
   if (has("content")) {
     const html = cleanHtml(body.content, CONTENT_MAX);
@@ -87,9 +90,9 @@ function buildPatch(body: Record<string, unknown>, partial: boolean): { patch: P
 
 preparation.use("*", requireAuth);
 
-preparation.get("/", requireRole("admin", "staff", "health_staff"), async (c) => {
+preparation.get("/", requireRole("admin", "staff", "health_staff", "parent"), async (c) => {
   const scope = await resolveScope(c.get("user"));
-  const list = (await listPrepSections()).filter((s) => canSeeDoc(scope, s));
+  const list = (await listPrepSections()).filter((s) => canSeePrep(scope, s));
   return c.json({ sections: list.map(serializePrepSection) });
 });
 

@@ -212,6 +212,7 @@ async function main() {
       allergies: [],
       drugAllergies: [],
       healthIssues: [],
+      neurodivergent: false,
       healthNotes: [allergyText && `Alergias: ${allergyText}`, chronicText && `Condição: ${chronicText}`, str(r.observacoes_medicas)].filter(Boolean).join(" | "),
     };
     console.log(`  ➕ ${name} (${r.rooms?.nome ?? "sem quarto"}, ${r.teams?.nome ?? "sem time"})`);

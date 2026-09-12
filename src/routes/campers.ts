@@ -1,16 +1,16 @@
 import { Hono, type Context } from "hono";
 import { publish } from "../services/realtime";
-import { notifyCamperChange } from "../services/notify";
+import { notifyBusCheckin, notifyCamperChange, notifyParentEdit } from "../services/notify";
 import { requireAuth } from "../middleware/auth";
 import { requireAdmin, requireRole } from "../middleware/roles";
 import { findBedroomById } from "../models/bedrooms";
-import { CHECKIN_FIELD, deleteCamper, findCamperById, insertCamper, listCampers, listCheckinLog, logCheckin, setCamperCheckin, updateCamper, type CamperData } from "../models/campers";
+import { CHECKIN_FIELD, deleteCamper, findCamperById, insertCamper, listCamperChanges, listCampers, listCheckinLog, logCamperChange, logCheckin, setCamperCheckin, updateCamper, type CamperData } from "../models/campers";
 import { findStaffById, listStaff } from "../models/staff";
-import { CAMPER_CATEGORY_KEYS, type Camper, type CheckinKind, type Role, type SessionUser } from "../types";
+import { CAMPER_CATEGORY_KEYS, PARENT_EDITABLE_FIELDS, type Camper, type CamperChangeLog, type CheckinKind, type ParentEditableField, type Role, type SessionUser } from "../types";
 import { normalizeBrazilPhone } from "../utils";
 import { bedroomFullMessage, isInvalid, parseBedroom, parseMulti, parseSingle, parseTeam, parseText } from "./_validate";
 import { serializeStaffList } from "./staff";
-import { camperVisibility, canRunBusCheckin, canRunCheckin, resolveScope, type Scope } from "../services/scope";
+import { camperVisibility, canParentEdit, canRunBusCheckin, canRunCheckin, resolveScope, type Scope } from "../services/scope";
 
 interface Env {
   Variables: {
@@ -57,6 +57,7 @@ export function serializeCamper(k: Camper) {
     allergies: k.allergies,
     drugAllergies: k.drugAllergies,
     healthIssues: k.healthIssues,
+    neurodivergent: k.neurodivergent,
     medicines: k.medicines,
     foodRestrictions: k.foodRestrictions,
     healthNotes: k.healthNotes,
@@ -108,12 +109,16 @@ export function serializeCamperFor(k: Camper, scope: Scope) {
   const vis = camperVisibility(scope, k);
   if (vis === "none") return null;
   const full = serializeCamper(k);
+  // a parent while the rooms are still a draft: the room, bed and caretaker are not decided yet
+  if (vis === "full" && !scope.all && scope.kidsRoomsDraft && scope.parentKids.length > 0) return { ...full, bedroom: null, bed: null, caretakerId: null };
   if (vis === "full") return full;
-  if (vis === "care") return { ...full, ...CONTACT_BLANK, contactsHidden: true };
+  // neurodivergence is a diagnosis: admin + medical team only
+  if (vis === "care") return { ...full, ...CONTACT_BLANK, neurodivergent: false, contactsHidden: true };
   return {
     ...full,
     ...CONTACT_BLANK,
     redacted: true,
+    neurodivergent: false,
     bed: null,
     weightKg: null,
     allergies: [],
@@ -208,10 +213,16 @@ async function buildPatch(
     patch[field] = v;
   }
 
+  if (has("neurodivergent")) {
+    const v = body.neurodivergent === undefined ? false : body.neurodivergent;
+    if (typeof v !== "boolean") return { code: "NEURODIVERGENT_INVALID", message: "Neurodivergente deve ser sim ou não." };
+    patch.neurodivergent = v;
+  }
+
   if (has("caretakerId")) {
     const v = body.caretakerId;
     if (v === undefined || v === null || v === "") patch.caretakerId = null;
-    else if (typeof v !== "string" || !(await findStaffById(v))) return { code: "CARETAKER_INVALID", message: "Responsável não encontrado." };
+    else if (typeof v !== "string" || !(await findStaffById(v))) return { code: "CARETAKER_INVALID", message: "Líder não encontrado." };
     else patch.caretakerId = v;
   }
 
@@ -251,24 +262,24 @@ async function buildPatch(
 async function caretakerConsistent(bedroom: string | null, caretakerId: string | null): Promise<string | null> {
   if (!caretakerId) return null;
   const s = await findStaffById(caretakerId);
-  if (!s || !s.active) return "Responsável não encontrado.";
+  if (!s || !s.active) return "Líder não encontrado.";
   if (!bedroom || s.bedroom !== bedroom) return `${s.name.split(" ")[0]} não dorme neste quarto.`;
-  if (s.roomRole !== "caretaker") return `${s.name.split(" ")[0]} é auxiliar neste quarto, não responsável.`;
+  if (s.roomRole !== "caretaker") return `${s.name.split(" ")[0]} é auxiliar neste quarto, não líder.`;
   return null;
 }
 
 campers.use("*", requireAuth);
 
-// ── read: admin sees every kid; staff/health staff only the kids in their own room (see services/scope.ts) ──
+// ── read: admin sees every kid; staff/health staff only the kids in their own room; parents their own kids (see services/scope.ts) ──
 
 /** GET /api/campers?bedroom=<id> (scoped) */
-campers.get("/", requireRole("admin", "staff", "health_staff"), async (c) => {
+campers.get("/", requireRole("admin", "staff", "health_staff", "parent"), async (c) => {
   const bedroom = c.req.query("bedroom") || undefined;
   const [list, scope] = await Promise.all([listCampers({ bedroom }), resolveScope(c.get("user"))]);
   return c.json({ campers: serializeCamperList(list, scope) });
 });
 
-campers.get("/:id", requireRole("admin", "staff", "health_staff"), async (c) => {
+campers.get("/:id", requireRole("admin", "staff", "health_staff", "parent"), async (c) => {
   const k = await findCamperById(c.req.param("id"));
   // outside the viewer's scope → same answer as "does not exist" (no probing)
   const out = k ? serializeCamperFor(k, await resolveScope(c.get("user"))) : null;
@@ -326,6 +337,8 @@ async function doCheckin(c: Context<Env>, kind: CheckinKind, action: "checkin" |
   const updated = await setCamperCheckin(existing._id, kind, action === "checkin" ? stamp : null);
   await logCheckin({ camperId: existing._id, camperName: existing.name, kind, action, ...stamp });
   publish("campers");
+  // the kid is on the bus → tell the parent (undo sends nothing)
+  if (kind === "bus" && action === "checkin") void notifyBusCheckin(updated!);
   // the answer is scoped too: a bus helper gets the name-only record back
   return c.json({ camper: serializeCamperFor(updated!, scope) });
 }
@@ -347,6 +360,62 @@ campers.get("/:id/checkin/log", requireAdmin, async (c) => {
   const k = await findCamperById(c.req.param("id"));
   if (!k) return fail(c, "CAMPER_NOT_FOUND", "Acampante não encontrado.", 404);
   return c.json({ log: (await listCheckinLog(k._id)).map(serializeLog) });
+});
+
+// ── parent edits: the kid's own guardian may change the "Pontos de atenção" block ──
+
+function serializeChange(l: CamperChangeLog) {
+  return { id: l._id, camperId: l.camperId, camperName: l.camperName, at: l.at, byUserId: l.byUserId, byName: l.byName, byRole: l.byRole, medical: l.medical, changes: l.changes };
+}
+
+/** GET /api/campers/:id/changes — every edit the parent made to this kid, newest first (admin). */
+campers.get("/:id/changes", requireAdmin, async (c) => {
+  const k = await findCamperById(c.req.param("id"));
+  if (!k) return fail(c, "CAMPER_NOT_FOUND", "Acampante não encontrado.", 404);
+  return c.json({ changes: (await listCamperChanges(k._id)).map(serializeChange) });
+});
+
+const sameValue = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+
+/**
+ * PUT /api/campers/:id/parent — a PARENT edits the health block of THEIR kid
+ * (allergies, drug allergies, conditions, medicines, food, medical notes,
+ * weight, insurance + card) and / or the observations (`generalNotes`).
+ * Only the fields in PARENT_EDITABLE_FIELDS are accepted; everything else in
+ * the body is ignored. Every real change is written to the kid's change log
+ * (read by the admin) and texted: medical fields → medical team + admins +
+ * caretaker; observations alone → caretaker (see services/notify.ts).
+ */
+campers.put("/:id/parent", requireRole("parent"), async (c) => {
+  const [existing, scope] = await Promise.all([findCamperById(c.req.param("id")), resolveScope(c.get("user"))]);
+  // not their kid → same answer as "does not exist" (no probing)
+  if (!existing || !canParentEdit(scope, existing)) return fail(c, "CAMPER_NOT_FOUND", "Acampante não encontrado.", 404);
+
+  const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+  if (!body) return fail(c, "BODY_INVALID", "Corpo da requisição inválido.");
+  const allowed: Record<string, unknown> = {};
+  for (const f of PARENT_EDITABLE_FIELDS) if (body[f] !== undefined) allowed[f] = body[f];
+  if (Object.keys(allowed).length === 0) return fail(c, "NOTHING_TO_UPDATE", "Nada para atualizar.");
+
+  const result = await buildPatch(allowed, true);
+  if (!("patch" in result)) return fail(c, result.code, result.message);
+
+  const changes: CamperChangeLog["changes"] = [];
+  for (const f of PARENT_EDITABLE_FIELDS) {
+    if (!(f in result.patch)) continue;
+    const before = existing[f];
+    const after = (result.patch as Record<ParentEditableField, unknown>)[f];
+    if (!sameValue(before, after)) changes.push({ field: f, before, after });
+  }
+  if (changes.length === 0) return c.json({ camper: serializeCamperFor(existing, scope), changed: false });
+
+  const updated = (await updateCamper(existing._id, result.patch))!;
+  const user = c.get("user");
+  const entry = { camperId: existing._id, camperName: existing.name, at: new Date(), byUserId: user.id, byName: user.name, byRole: user.activeRole, medical: changes.some((x) => x.field !== "generalNotes"), changes };
+  await logCamperChange(entry);
+  publish("campers");
+  void notifyParentEdit(updated, entry);
+  return c.json({ camper: serializeCamperFor(updated, scope), changed: true });
 });
 
 // ── write: admin only ──────────────────────────────────────────────────────────

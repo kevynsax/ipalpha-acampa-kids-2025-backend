@@ -210,6 +210,7 @@ export const AI_TOOLS: AiTool[] = [
         contatos_para_pais: settings.parentContacts.map((c) => ({ funcao: c.title, ...person(c.staffId) })),
         organizacao: list(settings.organizers.staffIds),
         organizacao_dos_jogos: list(settings.gameOrganizers.staffIds),
+        ajudantes_do_placar: list(settings.scoreHelpers.staffIds),
         equipe_medica: list(settings.medicalStaff.staffIds),
         responsaveis_coletes: list(settings.vestHelpers.staffIds),
         ajudantes_checkin_igreja: list(settings.checkinHelpers.staffIds),

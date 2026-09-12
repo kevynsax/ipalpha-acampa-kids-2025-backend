@@ -133,7 +133,7 @@ bedrooms.use("*", requireAuth);
 // ── read: admin sees every room; staff/health staff only their own (see services/scope.ts) ──
 
 /** GET /api/bedrooms?group=girls|boys|staff — sorted by group then number (scoped). */
-bedrooms.get("/", requireRole("admin", "staff", "health_staff"), async (c) => {
+bedrooms.get("/", requireRole("admin", "staff", "health_staff", "parent"), async (c) => {
   const group = c.req.query("group");
   if (group && !BEDROOM_GROUPS.includes(group as BedroomGroup)) {
     return fail(c, "GROUP_INVALID", "Ala inválida. Use girls, boys ou staff.");
@@ -146,7 +146,7 @@ bedrooms.get("/", requireRole("admin", "staff", "health_staff"), async (c) => {
   return c.json({ bedrooms: list.filter((b) => canSeeBedroom(scope, b._id)).map((b) => serializeBedroom(b, occ.get(b._id))) });
 });
 
-bedrooms.get("/:id", requireRole("admin", "staff", "health_staff"), async (c) => {
+bedrooms.get("/:id", requireRole("admin", "staff", "health_staff", "parent"), async (c) => {
   const b = await findBedroomById(c.req.param("id"));
   // outside the viewer's scope → same answer as "does not exist" (no probing)
   if (!b || !canSeeBedroom(await resolveScope(c.get("user")), b._id)) return fail(c, "BEDROOM_NOT_FOUND", "Quarto não encontrado.", 404);

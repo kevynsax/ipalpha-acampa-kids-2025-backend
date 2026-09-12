@@ -6,8 +6,10 @@ import { checkinWindowOpen, getSettings, staffAccessOpen, updateSettings } from 
 import { listStaff, resetStaffCheckins, resetStaffVests } from "../models/staff";
 import { clearCheckinLog, resetCamperCheckins } from "../models/campers";
 import { comteleEnabled } from "../services/comtele";
-import { notifyAccessListChange, syncWelcomes } from "../services/notify";
-import { evictStaffOutsideWindow, publish, scheduleCheckinReminder, scheduleCheckinWindow } from "../services/realtime";
+import { notifyAccessListChange, syncParentWelcomes, syncWelcomes, welcomePreview } from "../services/notify";
+import { evictStaffOutsideWindow, publish, rearmWindows, scheduleCheckinReminder } from "../services/realtime";
+import { listEvents } from "../models/schedule";
+import { parentWindowOf, parentWindowOpen } from "../services/camp";
 import { CAMPER_CATEGORY_KEYS, type BusHelperList, type CheckinLocation, type CheckinWindow, type NotificationSettings, type ParentContact, type Role, type SessionUser, type Settings, type StaffList } from "../types";
 
 interface Env {
@@ -37,19 +39,29 @@ function serializeWindow(w: CheckinWindow, open: boolean) {
   };
 }
 
-export function serializeSettings(s: Settings) {
+/**
+ * Async because the PARENTS' window (when they see the team's contacts) is
+ * derived from the programme: check-in start → end of the last event.
+ */
+export async function serializeSettings(s: Settings) {
+  const pw = parentWindowOf(s, await listEvents());
   return {
     checkinLocation: s.checkinLocation,
+    /** read-only: when parents see the team's contacts (from the check-in start to the end of the last event) */
+    parentWindow: serializeWindow(pw, parentWindowOpen(pw)),
     notifications: s.notifications,
     checkinWindow: serializeWindow(s.checkinWindow, s.checkinTestMode || checkinWindowOpen(s.checkinWindow)),
     checkinTestMode: s.checkinTestMode,
     kidsRoomsDraft: s.kidsRoomsDraft,
+    scoreDraft: s.scoreDraft,
     staffAccessWindow: serializeWindow(s.staffAccessWindow, staffAccessOpen(s.staffAccessWindow)),
+    parentAccessWindow: serializeWindow(s.parentAccessWindow, staffAccessOpen(s.parentAccessWindow)),
     checkinReminder: { at: s.checkinReminder.at?.toISOString() ?? null, sentAt: s.checkinReminder.sentAt?.toISOString() ?? null },
     checkinHelpers: { staffIds: s.checkinHelpers.staffIds },
     busHelpers: { helpers: s.busHelpers.helpers.map((h) => ({ staffId: h.staffId, vehicleId: h.vehicleId })) },
     organizers: { staffIds: s.organizers.staffIds },
     gameOrganizers: { staffIds: s.gameOrganizers.staffIds },
+    scoreHelpers: { staffIds: s.scoreHelpers.staffIds },
     medicalStaff: { staffIds: s.medicalStaff.staffIds },
     vestHelpers: { staffIds: s.vestHelpers.staffIds },
     parentContacts: s.parentContacts.map((contact) => ({ ...contact })),
@@ -63,7 +75,7 @@ function parseNotifications(value: unknown, current: NotificationSettings): Noti
   if (!value || typeof value !== "object") return { error: "Informe as notificações." };
   const o = value as Record<string, unknown>;
   const out = { ...current };
-  for (const k of ["bedroomChanges", "roleChanges", "checkinConfirmation", "contentChanges", "staffChanges", "enrolments", "occurrences", "checkinReminder", "parentEdits"] as const) {
+  for (const k of ["bedroomChanges", "roleChanges", "checkinConfirmation", "contentChanges", "parentContentChanges", "staffChanges", "enrolments", "occurrences", "checkinReminder", "parentEdits", "busCheckin", "parentWelcome"] as const) {
     if (o[k] === undefined) continue;
     if (typeof o[k] !== "boolean") return { error: "Cada notificação deve ser ligada ou desligada." };
     out[k] = o[k] as boolean;
@@ -175,9 +187,9 @@ async function parseBusHelpers(value: unknown): Promise<BusHelperList | { error:
 settings.use("*", requireAuth);
 
 /** GET /api/settings — any logged-in role (the team needs the check-in spot to know how far they are). */
-settings.get("/", async (c) => c.json({ settings: serializeSettings(await getSettings()) }));
+settings.get("/", async (c) => c.json({ settings: await serializeSettings(await getSettings()) }));
 
-/** PUT /api/settings — admin only. { checkinLocation?, notifications?, checkinWindow?: { from, until }, checkinReminder?: { at }, checkinHelpers?: { staffIds }, busHelpers?: { helpers: [{ staffId, vehicleId }] }, organizers?: { staffIds }, gameOrganizers?: { staffIds }, medicalStaff?: { staffIds }, vestHelpers?: { staffIds }, parentContacts?: [{ id, title, staffId }] } */
+/** PUT /api/settings — admin only. { checkinLocation?, notifications?, checkinWindow?: { from, until }, checkinReminder?: { at }, checkinHelpers?: { staffIds }, busHelpers?: { helpers: [{ staffId, vehicleId }] }, organizers?: { staffIds }, gameOrganizers?: { staffIds }, scoreHelpers?: { staffIds }, medicalStaff?: { staffIds }, vestHelpers?: { staffIds }, parentContacts?: [{ id, title, staffId }] } */
 settings.put("/", requireAdmin, async (c) => {
   const body = await c.req.json<Record<string, unknown>>().catch(() => null);
   if (!body) return fail(c, "BODY_INVALID", "Corpo da requisição inválido.");
@@ -194,8 +206,8 @@ settings.put("/", requireAdmin, async (c) => {
     patch.notifications = n;
   }
   let windowChanged = false;
-  const LIST_ERROR = { checkinHelpers: "HELPERS_INVALID", organizers: "ORGANIZERS_INVALID", gameOrganizers: "GAME_ORGANIZERS_INVALID", medicalStaff: "MEDICAL_INVALID", vestHelpers: "VEST_HELPERS_INVALID" } as const;
-  for (const key of ["checkinHelpers", "organizers", "gameOrganizers", "medicalStaff", "vestHelpers"] as const) {
+  const LIST_ERROR = { checkinHelpers: "HELPERS_INVALID", organizers: "ORGANIZERS_INVALID", gameOrganizers: "GAME_ORGANIZERS_INVALID", scoreHelpers: "SCORE_HELPERS_INVALID", medicalStaff: "MEDICAL_INVALID", vestHelpers: "VEST_HELPERS_INVALID" } as const;
+  for (const key of ["checkinHelpers", "organizers", "gameOrganizers", "scoreHelpers", "medicalStaff", "vestHelpers"] as const) {
     if (body[key] === undefined) continue;
     const l = await parseStaffList(body[key]);
     if ("error" in l) return fail(c, LIST_ERROR[key], l.error);
@@ -223,6 +235,12 @@ settings.put("/", requireAdmin, async (c) => {
     patch.staffAccessWindow = w;
     windowChanged = true;
   }
+  if (body.parentAccessWindow !== undefined) {
+    const w = parseWindow(body.parentAccessWindow);
+    if ("error" in w) return fail(c, "WINDOW_INVALID", w.error);
+    patch.parentAccessWindow = w;
+    windowChanged = true;
+  }
   if (body.checkinTestMode !== undefined) {
     if (typeof body.checkinTestMode !== "boolean") return fail(c, "TEST_MODE_INVALID", "O modo de teste deve ser ligado ou desligado.");
     patch.checkinTestMode = body.checkinTestMode;
@@ -244,12 +262,16 @@ settings.put("/", requireAdmin, async (c) => {
     patch.kidsRoomsDraft = body.kidsRoomsDraft;
     draftChanged = true;
   }
+  if (body.scoreDraft !== undefined) {
+    if (typeof body.scoreDraft !== "boolean") return fail(c, "SCORE_DRAFT_INVALID", "O rascunho do placar deve ser ligado ou desligado.");
+    patch.scoreDraft = body.scoreDraft;
+  }
   if (Object.keys(patch).length === 0) return fail(c, "NOTHING_TO_UPDATE", "Nada para atualizar.");
 
   const previous = await getSettings();
   const updated = await updateSettings(patch);
   void notifyAccessListChange(previous, updated); // fire-and-forget: the SMS never delays the write
-  const scopeChanged = patch.organizers || patch.gameOrganizers || patch.checkinHelpers || patch.busHelpers || patch.medicalStaff || patch.vestHelpers || windowChanged || draftChanged;
+  const scopeChanged = patch.organizers || patch.gameOrganizers || patch.scoreHelpers || patch.checkinHelpers || patch.busHelpers || patch.medicalStaff || patch.vestHelpers || windowChanged || draftChanged;
   if (scopeChanged) {
     // Any access-list change may alter which records a phone is allowed to keep.
     // Re-send every scoped collection so gains and revocations happen live.
@@ -262,14 +284,21 @@ settings.put("/", requireAdmin, async (c) => {
   publish("settings");
   // the date or the toggle changed: re-arm (a pending past instant with the toggle now on fires at once)
   if (reminderChanged || patch.notifications) scheduleCheckinReminder(updated.checkinReminder.at);
+  // a welcome toggle switched ON: whoever is inside their window and was never welcomed gets the SMS now
+  if (patch.notifications?.enrolments && !previous.notifications.enrolments) void syncWelcomes();
+  if (patch.notifications?.parentWelcome && !previous.notifications.parentWelcome) void syncParentWelcomes();
   if (windowChanged) {
-    scheduleCheckinWindow(updated.checkinWindow, updated.staffAccessWindow);
+    void rearmWindows();
     if (patch.staffAccessWindow) void syncWelcomes(); // the window may have just opened (start moved to the past)
+    if (patch.parentAccessWindow) void syncParentWelcomes();
     // the admin may have closed the team's window right now: log those people out
     void evictStaffOutsideWindow().catch((err) => console.error("realtime: evict failed", err));
   }
-  return c.json({ settings: serializeSettings(updated) });
+  return c.json({ settings: await serializeSettings(updated) });
 });
+
+/** GET /api/settings/welcome-preview — admin. How many people would get the welcome SMS RIGHT NOW if the toggle were on (never welcomed, inside their window, with a phone). */
+settings.get("/welcome-preview", requireAdmin, async (c) => c.json(await welcomePreview()));
 
 /** POST /api/settings/checkin/reset — admin only. Clears EVERY check-in (kids' church + bus, team), the team vests and the audit log, so the process can be rehearsed. */
 settings.post("/checkin/reset", requireAdmin, async (c) => {

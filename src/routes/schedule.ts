@@ -1,6 +1,6 @@
 import { Hono, type Context } from "hono";
 import { isEmojiLike } from "../utils";
-import { publish } from "../services/realtime";
+import { publish, rearmWindows } from "../services/realtime";
 import { notifyEventChange, notifyRoleEdited } from "../services/notify";
 import { cleanHtml as sanitizeEditorHtml } from "../services/html";
 import { requireAuth } from "../middleware/auth";
@@ -102,7 +102,7 @@ schedule.use("*", requireAuth);
 // Roles (funções)
 // ═══════════════════════════════════════════════════════════════════════════
 
-const TEAM = requireRole("admin", "staff", "health_staff");
+const TEAM = requireRole("admin", "staff", "health_staff", "parent");
 
 /** Writes to the programme: admin, or a team member the admin listed as an ORGANIZER (Settings → Organizadores). */
 const ORGANIZER = requireOrganizer;
@@ -347,6 +347,7 @@ schedule.post("/events", ORGANIZER, async (c) => {
 
   const created = await insertEvent({ ...data, assignments: [] });
   publish("events");
+  void rearmWindows(); // the parents' window ends with the last event
   void notifyEventChange(null, created);
   return c.json({ event: serializeEvent(created) }, 201);
 });
@@ -382,6 +383,7 @@ schedule.put("/events/:id/assignments", ORGANIZER, async (c) => {
 
   const updated = await updateEvent(existing._id, { assignments });
   publish("events");
+  void rearmWindows(); // the parents' window ends with the last event
   void notifyEventChange(existing, updated);
   return c.json({ event: serializeEvent(updated!) });
 });
@@ -409,6 +411,7 @@ schedule.put("/events/:id", ORGANIZER, async (c) => {
 
   const updated = await updateEvent(existing._id, result.patch);
   publish("events");
+  void rearmWindows(); // the parents' window ends with the last event
   void notifyEventChange(existing, updated);
   return c.json({ event: serializeEvent(updated!) });
 });
@@ -431,6 +434,7 @@ schedule.put("/events/:id/assignments/:staffId", ORGANIZER, async (c) => {
   const assignments = [...existing.assignments.filter((a) => a.staffId !== staffId), { staffId, roleId: body.roleId, detail }];
   const updated = await updateEvent(existing._id, { assignments });
   publish("events");
+  void rearmWindows(); // the parents' window ends with the last event
   void notifyEventChange(existing, updated);
   return c.json({ event: serializeEvent(updated!) });
 });
@@ -442,6 +446,7 @@ schedule.delete("/events/:id/assignments/:staffId", ORGANIZER, async (c) => {
   const staffId = c.req.param("staffId");
   const updated = await updateEvent(existing._id, { assignments: existing.assignments.filter((a) => a.staffId !== staffId) });
   publish("events");
+  void rearmWindows(); // the parents' window ends with the last event
   void notifyEventChange(existing, updated);
   return c.json({ event: serializeEvent(updated!) });
 });
@@ -451,6 +456,7 @@ schedule.delete("/events/:id", ORGANIZER, async (c) => {
   const ok = existing ? await deleteEvent(existing._id) : false;
   if (!ok) return fail(c, "EVENT_NOT_FOUND", "Evento não encontrado.", 404);
   publish("events");
+  void rearmWindows(); // the parents' window ends with the last event
   void notifyEventChange(existing, null);
   return c.json({ success: true });
 });

@@ -1,9 +1,23 @@
 import { ObjectId } from "mongodb";
 import { getDb } from "../db";
-import type { PrepSection, DocAudience } from "../types";
-import { DOC_AUDIENCES } from "../types";
+import type { PrepSection, PrepAudience } from "../types";
+import { PREP_AUDIENCES, PREP_TEAM_AUDIENCES } from "../types";
 
 const COLLECTION = "prep_sections";
+
+/**
+ * `audiences: PrepAudience[]` — older documents held a single `audience`
+ * ("all" | "caretaker" | "helper"): "all" meant the whole team (parents did not exist yet).
+ */
+function toAudiences(doc: Record<string, unknown>): PrepAudience[] {
+  if (Array.isArray(doc.audiences)) {
+    const list = PREP_AUDIENCES.filter((a) => (doc.audiences as unknown[]).includes(a));
+    if (list.length) return list;
+  }
+  const legacy = doc.audience;
+  if (legacy === "caretaker" || legacy === "helper") return [legacy];
+  return [...PREP_TEAM_AUDIENCES];
+}
 
 function toSection(doc: Record<string, unknown> | null): PrepSection | null {
   if (!doc) return null;
@@ -11,7 +25,7 @@ function toSection(doc: Record<string, unknown> | null): PrepSection | null {
     _id: (doc._id as ObjectId).toString(),
     title: doc.title as string,
     emoji: (doc.emoji as string) ?? "📌",
-    audience: DOC_AUDIENCES.includes(doc.audience as DocAudience) ? (doc.audience as DocAudience) : "all",
+    audiences: toAudiences(doc),
     content: (doc.content as string) ?? "",
     order: (doc.order as number) ?? 0,
     createdAt: doc.createdAt as Date,

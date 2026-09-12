@@ -12,6 +12,9 @@ function toEntry(doc: Record<string, unknown> | null): ScoreEntry | null {
     points: typeof doc.points === "number" ? doc.points : 0,
     kind: (doc.kind as ScoreEntry["kind"]) ?? "add",
     note: (doc.note as string) ?? "",
+    camperId: (doc.camperId as string) ?? null,
+    camperName: (doc.camperName as string) ?? "",
+    eventId: (doc.eventId as string) ?? null,
     byUserId: (doc.byUserId as string) ?? "",
     byName: (doc.byName as string) ?? "",
     createdAt: doc.createdAt as Date,
@@ -44,6 +47,32 @@ export async function insertScore(data: ScoreEntryData): Promise<ScoreEntry> {
   return { ...data, _id: insertedId.toString(), createdAt };
 }
 
+export async function findScoreById(id: string): Promise<ScoreEntry | null> {
+  if (!ObjectId.isValid(id)) return null;
+  const db = await getDb();
+  return toEntry((await db.collection(COLLECTION).findOne({ _id: new ObjectId(id) })) as Record<string, unknown> | null);
+}
+
+/** Was this kid already scanned for this event (on any device)? */
+export async function scannedForEvent(eventId: string, camperId: string): Promise<boolean> {
+  const db = await getDb();
+  return (await db.collection(COLLECTION).countDocuments({ eventId, camperId }, { limit: 1 })) > 0;
+}
+
+/** The points every scan of this event currently carries (null when nobody was scanned yet). */
+export async function eventScanPoints(eventId: string): Promise<number | null> {
+  const db = await getDb();
+  const doc = await db.collection(COLLECTION).findOne({ eventId, camperId: { $ne: null } }, { sort: { createdAt: -1 }, projection: { points: 1 } });
+  return doc && typeof doc.points === "number" ? doc.points : null;
+}
+
+/** Re-points every scan line of the event (the admin changed the value mid-way). Returns how many lines changed. */
+export async function repointEventScans(eventId: string, points: number, note: string): Promise<number> {
+  const db = await getDb();
+  const res = await db.collection(COLLECTION).updateMany({ eventId, camperId: { $ne: null } }, { $set: { points, note } });
+  return res.modifiedCount;
+}
+
 export async function deleteScore(id: string): Promise<boolean> {
   if (!ObjectId.isValid(id)) return false;
   const db = await getDb();
@@ -61,4 +90,5 @@ export async function ensureScoreIndexes(): Promise<void> {
   const db = await getDb();
   await db.collection(COLLECTION).createIndex({ teamId: 1, createdAt: -1 });
   await db.collection(COLLECTION).createIndex({ createdAt: -1 });
+  await db.collection(COLLECTION).createIndex({ eventId: 1, camperId: 1 }, { sparse: true });
 }

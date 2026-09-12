@@ -13,7 +13,22 @@ function toUser(doc: Record<string, unknown> | null): User | null {
     updatedAt: doc.updatedAt as Date,
     otp: doc.otp as User["otp"],
     frozenUntil: doc.frozenUntil as Date | undefined,
+    welcomeSentAt: (doc.welcomeSentAt as Date) ?? null,
   };
+}
+
+/** Every account holding the parent role. */
+export async function listParents(): Promise<User[]> {
+  const db = await getDb();
+  const docs = await db.collection("users").find({ roles: "parent" }).sort({ name: 1 }).toArray();
+  return docs.map((d) => toUser(d as Record<string, unknown>)!);
+}
+
+/** Marks a parent's welcome SMS as sent — atomically, only if NOT sent yet. True when this call won. */
+export async function claimParentWelcome(id: string): Promise<boolean> {
+  const db = await getDb();
+  const res = await db.collection("users").updateOne({ _id: new ObjectId(id), $or: [{ welcomeSentAt: null }, { welcomeSentAt: { $exists: false } }] }, { $set: { welcomeSentAt: new Date() } });
+  return res.modifiedCount === 1;
 }
 
 /** A person is unique by phone — they may hold several roles at once. */

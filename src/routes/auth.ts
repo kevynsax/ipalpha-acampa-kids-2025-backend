@@ -2,12 +2,12 @@ import { Hono } from "hono";
 import { config } from "../config";
 import { findByPhone, toPublicUser, updateUser } from "../models/users";
 import { findStaffByPhone } from "../models/staff";
-import { getSettings } from "../models/settings";
+import { getSettings, staffAccessOpen } from "../models/settings";
 import { staffHasAccess } from "../services/scope";
 import { comteleEnabled, comteleSendSms } from "../services/comtele";
 import { generateLocalCode, hashCode, verifyLocalCode } from "../services/otp";
 import { createSession, revokeSession, verifySessionToken } from "../services/session";
-import type { PublicUser, Role, SessionUser } from "../types";
+import type { CheckinWindow, PublicUser, Role, SessionUser } from "../types";
 import { formatBrazilPhone, minutesBetween, normalizeBrazilPhone, pickActiveRole } from "../utils";
 import { requireAuth } from "../middleware/auth";
 
@@ -27,24 +27,35 @@ const auth = new Hono<AuthEnv>();
  * Returns the error payload to send (403) when the window is closed, or null.
  */
 async function staffWindowError(phone: string, role: Role) {
-  if (role !== "staff" && role !== "health_staff") return null;
-  const me = await findStaffByPhone(phone);
-  if (!me) return null;
   const settings = await getSettings();
   const now = new Date();
-  if (staffHasAccess(me._id, settings, now)) return null;
-  const { from, until } = settings.staffAccessWindow;
+  let window: CheckinWindow;
+  if (role === "parent") {
+    // parents: their own access window (Settings → Geral)
+    if (staffAccessOpen(settings.parentAccessWindow, now)) return null;
+    window = settings.parentAccessWindow;
+  } else {
+    if (role !== "staff" && role !== "health_staff") return null;
+    const me = await findStaffByPhone(phone);
+    if (!me) return null;
+    if (staffHasAccess(me._id, settings, now)) return null;
+    window = settings.staffAccessWindow;
+  }
+  const { from, until } = window;
+  const audience = role === "parent" ? "parent" : "staff";
   if (until && now >= until) {
     return {
       code: "STAFF_ACCESS_ENDED",
       message: "O acampamento já terminou. Esperamos você no ano que vem!",
+      audience,
       opensAt: from?.toISOString() ?? null,
       closesAt: until.toISOString(),
     };
   }
   return {
     code: "STAFF_ACCESS_NOT_YET",
-    message: "O app ainda não está liberado para a equipe.",
+    audience,
+    message: role === "parent" ? "O app ainda não está liberado para os pais." : "O app ainda não está liberado para a equipe.",
     opensAt: from?.toISOString() ?? null,
     closesAt: until?.toISOString() ?? null,
   };

@@ -64,7 +64,7 @@ async function buildPatch(body: Record<string, unknown>, partial: boolean): Prom
 teams.use("*", requireAuth);
 
 /** GET /api/teams — every logged-in team member / admin (names + colours are public inside the app). */
-teams.get("/", requireRole("admin", "staff", "health_staff"), async (c) => c.json({ teams: (await listTeams()).map(serializeTeam) }));
+teams.get("/", requireRole("admin", "staff", "health_staff", "parent"), async (c) => c.json({ teams: (await listTeams()).map(serializeTeam) }));
 
 // ── write: admin only ──────────────────────────────────────────────────────
 

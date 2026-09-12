@@ -24,6 +24,8 @@ export interface User {
   otp?: OtpState;
   /** set when the account is frozen after too many wrong OTP attempts */
   frozenUntil?: Date;
+  /** PARENTS: when the welcome SMS (app link) went out — null until then; sent ONCE, ever (services/notify.ts syncParentWelcomes) */
+  welcomeSentAt: Date | null;
 }
 
 /** User shape returned to the client (never leaks OTP internals) */
@@ -193,6 +195,11 @@ export interface ScoreEntry {
   kind: "add" | "remove" | "reset";
   /** optional: why ("Gincana da piscina — 1º lugar") */
   note: string;
+  /** set when the line came from scanning a kid's QR code (POST /api/scores/scan): the kid whose team earned the points */
+  camperId: string | null;
+  camperName: string;
+  /** the programme event the scan belongs to — a kid counts only once per event (across every device), and every scan of an event carries the same points */
+  eventId: string | null;
   byUserId: string;
   byName: string;
   createdAt: Date;
@@ -246,6 +253,8 @@ export interface Camper {
   /** category option ids (alergia-medicamentos) */
   drugAllergies: string[];
   healthIssues: string[];
+  /** neurodivergent (TEA, TDAH…) — ADMIN and MEDICAL team only; never sent to room staff */
+  neurodivergent: boolean;
   medicines: string;
   foodRestrictions: string;
   healthNotes: string;
@@ -438,15 +447,22 @@ export interface CampEvent {
  * ("O que levar", "Chegada na igreja", "Uniforme"…). Shown to the whole
  * team, in `order`. Role-specific preparation lives on ScheduleRole.preparation.
  */
-/** Who a general document is for: everyone, only the room CARETAKERS (responsáveis) or only the HELPERS (auxiliares). */
+/** Who a general INSTRUCTIONS document is for: everyone, only the room CARETAKERS (responsáveis) or only the HELPERS (auxiliares). */
 export type DocAudience = "all" | "caretaker" | "helper";
 export const DOC_AUDIENCES: readonly DocAudience[] = ["all", "caretaker", "helper"];
+
+/** One group a Preparação section is posted to: the PARENTS, the room CARETAKERS or the HELPERS — a section may target several at once. */
+export type PrepAudience = "parent" | "caretaker" | "helper";
+export const PREP_AUDIENCES: readonly PrepAudience[] = ["parent", "caretaker", "helper"];
+/** what an old `audience: "all"` section (before parents existed) meant: the whole team */
+export const PREP_TEAM_AUDIENCES: readonly PrepAudience[] = ["caretaker", "helper"];
 
 export interface PrepSection {
   _id: string;
   title: string;
   emoji: string;
-  audience: DocAudience;
+  /** who sees it (at least one) — parents only get sections listing `parent` */
+  audiences: PrepAudience[];
   /** sanitized HTML (may include uploaded images) */
   content: string;
   order: number;
@@ -501,8 +517,10 @@ export interface NotificationSettings {
   roleChanges: boolean;
   /** the person's church check-in was recorded (by themselves or by the admin roll call) */
   checkinConfirmation: boolean;
-  /** an Instruções document / Preparação section was created or edited, or the instructions / preparation text of one of the person's roles changed */
+  /** an Instruções document / Preparação section was created or edited, or the instructions / preparation text of one of the person's roles changed (TEAM) */
   contentChanges: boolean;
+  /** a Preparação section posted to the PARENTS was created or edited → every parent with a phone, only while the parents' access window is open */
+  parentContentChanges: boolean;
   /** the person's OWN allocation changed: bedroom, team or vehicle (bus) */
   staffChanges: boolean;
   /** the person was added to the team, or to an admin list (organizer, check-in / bus helper, medical, vest helper, parent contact) — always carries the app link */
@@ -513,6 +531,10 @@ export interface NotificationSettings {
   checkinReminder: boolean;
   /** a parent edited their kid's "Pontos de atenção": medical data → medical team + admins + caretaker; observations only → caretaker */
   parentEdits: boolean;
+  /** the kid boarded the bus → the guardian is texted ("a caminho de um fim de semana incrível…") */
+  busCheckin: boolean;
+  /** when the PARENTS' access window opens each parent gets, ONCE ever, the "you're enrolled, here's the app" SMS */
+  parentWelcome: boolean;
 }
 
 /** One-shot reminder to the whole team to do their check-in. */
@@ -589,6 +611,13 @@ export interface Settings {
    */
   gameOrganizers: StaffList;
   /**
+   * SCORE helpers (no time window): they only run the bulk QR scan tied to
+   * a programme event — scanning the kids' QR codes at a door (POST
+   * /api/scores/scan). Never per-team points, never zero, delete only
+   * their own scan lines. No organizer rights.
+   */
+  scoreHelpers: StaffList;
+  /**
    * MEDICAL team (no time window): they see EVERY camper in full (health
    * included), every bedroom and every vehicle, the whole time — before,
    * during and after the camp. Read-only: they never write campers, rooms or
@@ -610,6 +639,13 @@ export interface Settings {
    * it the server sends them nothing (see services/scope.ts).
    */
   staffAccessWindow: CheckinWindow;
+  /**
+   * When PARENTS may log in and use the app. Both ends null = always. Also
+   * the moment the parents' welcome SMS goes out (once per parent, see
+   * notifications.parentWelcome). Independent from the parents' CONTACTS
+   * window (check-in start → last event), which only decides what they see.
+   */
+  parentAccessWindow: CheckinWindow;
   /** test mode: church + bus check-in behave as if the window were open (the team's own self check-in is NOT affected) */
   checkinTestMode: boolean;
   /**
@@ -618,6 +654,14 @@ export interface Settings {
    * check-in helpers are unaffected) and no "kid moved room" SMS goes out.
    */
   kidsRoomsDraft: boolean;
+  /**
+   * Scoreboard DRAFT (rehearsal) mode: the scoreboard normally only opens on
+   * the camp days (first → last programme day). While true it opens for the
+   * whole team and points may be launched regardless of the date — for the
+   * organizers to test before the camp. Outside the camp days and with this
+   * off, every score write is refused (SCORE_CLOSED).
+   */
+  scoreDraft: boolean;
   /** the "do your check-in" SMS to the whole team, scheduled for one instant */
   checkinReminder: CheckinReminder;
   updatedAt: Date | null;

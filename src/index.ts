@@ -32,8 +32,8 @@ import occurrenceRoutes from "./routes/occurrences";
 import fileRoutes from "./routes/files";
 import aiRoutes from "./routes/ai";
 import { comteleEnabled } from "./services/comtele";
-import { scheduleCheckinReminder, scheduleCheckinWindow } from "./services/realtime";
-import { sendCheckinReminder, syncWelcomes } from "./services/notify";
+import { rearmWindows, scheduleCheckinReminder } from "./services/realtime";
+import { sendCheckinReminder, syncParentWelcomes, syncWelcomes } from "./services/notify";
 import { getSettings } from "./models/settings";
 
 const app = new Hono();
@@ -91,9 +91,10 @@ console.log(`MongoDB connected → ${config.dbName}`);
 // re-arm the check-in window timers (they live in memory)
 {
   const s = await getSettings();
-  scheduleCheckinWindow(s.checkinWindow, s.staffAccessWindow);
+  await rearmWindows(); // check-in, team access and parents' windows
   scheduleCheckinReminder(s.checkinReminder.at);
   void syncWelcomes(); // the team window may have opened while the server was down
+  void syncParentWelcomes();
   void sendCheckinReminder(); // the reminder instant may have passed while the server was down
 }
 

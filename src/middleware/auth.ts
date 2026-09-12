@@ -1,16 +1,21 @@
 import { createMiddleware } from "hono/factory";
 import { findById, toPublicUser } from "../models/users";
 import { revokeUserSessions, verifySessionToken } from "../services/session";
-import { getSettings } from "../models/settings";
+import { getSettings, staffAccessOpen } from "../models/settings";
 import { findStaffByPhone } from "../models/staff";
 import { staffHasAccess } from "../services/scope";
 import type { Role, SessionUser } from "../types";
 
 /**
  * Ordinary team members lose their session the moment `staffAccessWindow`
- * closes. Returns true when the session must be dropped (and drops it).
+ * closes; parents the moment `parentAccessWindow` closes. Returns true when the session must be dropped (and drops it).
  */
 export async function staffSessionExpired(role: Role, phone: string, userId: string): Promise<boolean> {
+  if (role === "parent") {
+    if (staffAccessOpen((await getSettings()).parentAccessWindow)) return false;
+    await revokeUserSessions(userId);
+    return true;
+  }
   if (role !== "staff" && role !== "health_staff") return false;
   const me = await findStaffByPhone(phone);
   if (!me) return false;
