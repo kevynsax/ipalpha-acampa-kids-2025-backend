@@ -8,7 +8,7 @@ import { claimStaffWelcome, findStaffById, listStaff } from "../models/staff";
 import { findTeamById } from "../models/teams";
 import { listAdmins } from "../models/users";
 import { STAFF_CATEGORY_KEYS } from "../types";
-import type { CampEvent, Camper, InstructionDoc, Occurrence, PrepSection, ScheduleRole, Settings, Staff } from "../types";
+import type { CampEvent, Camper, DocAudience, InstructionDoc, Occurrence, PrepSection, ScheduleRole, Settings, Staff } from "../types";
 import { formatBrazilPhone } from "../utils";
 import { comteleEnabled, comteleSendSms } from "./comtele";
 import { staffHasAccess } from "./scope";
@@ -24,7 +24,7 @@ import { staffHasAccess } from "./scope";
  *     the event moved or was deleted)
  *   - a general Instruções / Preparação document changed, or the
  *     instructions / preparation text of one of the person's roles
- *   - the person's own room / team / vehicle changed
+ *   - the person's own room / room role (responsável ↔ auxiliar) / team / vehicle changed
  *   - the person's church check-in was recorded (confirmation, sent at once)
  *   - an occurrence was registered (every ADMIN, sent at once)
  *   - the check-in reminder (WHOLE team, at the instant the admin picked)
@@ -42,7 +42,7 @@ import { staffHasAccess } from "./scope";
  * blocks the write.
  */
 
-export type NotifyKind = "bedroom" | "role" | "instructions" | "preparation" | "myRoom" | "myTeam" | "myBus";
+export type NotifyKind = "bedroom" | "role" | "instructions" | "preparation" | "myRoom" | "myRoomRole" | "myTeam" | "myBus";
 
 interface Item {
   kind: NotifyKind;
@@ -359,6 +359,10 @@ export async function notifyStaffChange(before: Staff, after: Staff): Promise<vo
       const room = await bedroomName(after.bedroom);
       enqueue(after, "myRoom", room ? `seu quarto agora é o ${room}` : "você saiu do seu quarto", settings);
     }
+    if (before.roomRole !== after.roomRole) {
+      const text = after.roomRole === "caretaker" ? "agora você é RESPONSÁVEL por crianças no seu quarto (veja quais no app)" : "agora você é AUXILIAR no seu quarto (sem crianças próprias)";
+      enqueue(after, "myRoomRole", text, settings);
+    }
     if (before.team !== after.team) {
       const team = after.team ? (await findTeamById(after.team))?.name ?? null : null;
       enqueue(after, "myTeam", team ? `seu time agora é ${team}` : "você saiu do seu time", settings);
@@ -460,10 +464,11 @@ export async function notifyRoleEdited(roleBefore: ScheduleRole, roleAfter: Sche
 
 // ── general documents (Instruções / Preparação) ─────────────────────────────
 
-async function notifyEveryone(kind: NotifyKind, text: string, enabled: (n: Settings["notifications"]) => boolean): Promise<void> {
+/** the whole active team, or only the caretakers / helpers when the document has a narrower audience */
+async function notifyEveryone(kind: NotifyKind, text: string, enabled: (n: Settings["notifications"]) => boolean, audience: DocAudience = "all"): Promise<void> {
   const settings = await getSettings();
   if (!enabled(settings.notifications)) return;
-  for (const s of await listStaff({ active: true })) enqueue(s, kind, text, settings);
+  for (const s of await listStaff({ active: true })) if (audience === "all" || s.roomRole === audience) enqueue(s, kind, text, settings);
 }
 
 /** A general instructions document was created or its title / content changed → the whole active team. */
@@ -471,7 +476,7 @@ export async function notifyInstructionChange(before: InstructionDoc | null, aft
   try {
     if (before && before.title === after.title && before.content === after.content) return; // reorder / emoji only
     const text = !before ? `novas instruções: "${after.title}"` : before.title !== after.title ? `instruções "${before.title}" viraram "${after.title}"` : `instruções "${after.title}" atualizadas`;
-    await notifyEveryone("instructions", text, (n) => n.contentChanges);
+    await notifyEveryone("instructions", text, (n) => n.contentChanges, after.audience);
   } catch (err) {
     console.error("notify: instruction change failed", err);
   }
@@ -482,7 +487,7 @@ export async function notifyPreparationChange(before: PrepSection | null, after:
   try {
     if (before && before.title === after.title && before.content === after.content) return;
     const text = !before ? `nova preparação: "${after.title}"` : before.title !== after.title ? `preparação "${before.title}" virou "${after.title}"` : `preparação "${after.title}" atualizada`;
-    await notifyEveryone("preparation", text, (n) => n.contentChanges);
+    await notifyEveryone("preparation", text, (n) => n.contentChanges, after.audience);
   } catch (err) {
     console.error("notify: preparation change failed", err);
   }

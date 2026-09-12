@@ -315,6 +315,41 @@ export interface Occurrence {
   createdAt: Date;
 }
 
+/**
+ * Fields a PARENT may edit on their own kid (Início → Pontos de atenção).
+ * Every one of them but `generalNotes` counts as MEDICAL: a change there is
+ * texted to the medical team, the admins and the caretaker; a change to the
+ * observations alone only to the caretaker (see services/notify.ts).
+ */
+export const PARENT_EDITABLE_FIELDS = ["allergies", "drugAllergies", "healthIssues", "medicines", "foodRestrictions", "healthNotes", "weightKg", "insurance", "insuranceCard", "generalNotes"] as const;
+export type ParentEditableField = (typeof PARENT_EDITABLE_FIELDS)[number];
+export const PARENT_FIELD_LABEL: Record<ParentEditableField, string> = {
+  allergies: "alergias",
+  drugAllergies: "alergia a medicamentos",
+  healthIssues: "condição de saúde",
+  medicines: "medicação",
+  foodRestrictions: "alimentação",
+  healthNotes: "observações médicas",
+  weightKg: "peso",
+  insurance: "convênio",
+  insuranceCard: "carteirinha do convênio",
+  generalNotes: "observações",
+};
+
+/** One edit a parent made to their kid's record — permanent history, read by the admin. */
+export interface CamperChangeLog {
+  _id: string;
+  camperId: string;
+  camperName: string;
+  at: Date;
+  byUserId: string;
+  byName: string;
+  byRole: Role;
+  /** true when at least one MEDICAL field changed (anything but `generalNotes`) */
+  medical: boolean;
+  changes: { field: ParentEditableField; before: unknown; after: unknown }[];
+}
+
 /** The two roll calls on departure day: at the church gate, then inside the bus. */
 export const CHECKIN_KINDS = ["church", "bus"] as const;
 export type CheckinKind = (typeof CHECKIN_KINDS)[number];
@@ -403,10 +438,15 @@ export interface CampEvent {
  * ("O que levar", "Chegada na igreja", "Uniforme"…). Shown to the whole
  * team, in `order`. Role-specific preparation lives on ScheduleRole.preparation.
  */
+/** Who a general document is for: everyone, only the room CARETAKERS (responsáveis) or only the HELPERS (auxiliares). */
+export type DocAudience = "all" | "caretaker" | "helper";
+export const DOC_AUDIENCES: readonly DocAudience[] = ["all", "caretaker", "helper"];
+
 export interface PrepSection {
   _id: string;
   title: string;
   emoji: string;
+  audience: DocAudience;
   /** sanitized HTML (may include uploaded images) */
   content: string;
   order: number;
@@ -423,6 +463,7 @@ export interface InstructionDoc {
   _id: string;
   title: string;
   emoji: string;
+  audience: DocAudience;
   /** sanitized HTML (may include uploaded images) — can be long */
   content: string;
   order: number;
@@ -470,6 +511,8 @@ export interface NotificationSettings {
   occurrences: boolean;
   /** at `settings.checkinReminder.at` the WHOLE team is reminded to do their check-in (nothing goes out while the date is unset) */
   checkinReminder: boolean;
+  /** a parent edited their kid's "Pontos de atenção": medical data → medical team + admins + caretaker; observations only → caretaker */
+  parentEdits: boolean;
 }
 
 /** One-shot reminder to the whole team to do their check-in. */

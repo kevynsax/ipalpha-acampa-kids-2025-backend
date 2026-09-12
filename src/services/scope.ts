@@ -1,6 +1,6 @@
 import { checkinWindowOpen, getSettings, staffAccessOpen } from "../models/settings";
 import { findStaffByPhone } from "../models/staff";
-import type { CampEvent, Camper, Role, ScheduleRole, Settings, Staff } from "../types";
+import type { CampEvent, Camper, DocAudience, Role, RoomRole, ScheduleRole, Settings, Staff } from "../types";
 import { campInProgress, campPeriod } from "./camp";
 
 /**
@@ -89,9 +89,11 @@ export type Scope =
       kidsRoomsDraft: boolean;
       /** true while the camp is happening (first → last programme day): the whole room's kids become visible */
       campActive: boolean;
+      /** the viewer's role in their room — decides which general documents (Instruções / Preparação) they get */
+      roomRole: RoomRole;
     };
 
-export const NO_ACCESS: Scope = { all: false, staffId: null, bedroom: null, checkinHelper: false, busHelperVehicle: null, organizer: false, gameOrganizer: false, medical: false, vestHelper: false, kidsRoomsDraft: false, campActive: false };
+export const NO_ACCESS: Scope = { all: false, staffId: null, bedroom: null, checkinHelper: false, busHelperVehicle: null, organizer: false, gameOrganizer: false, medical: false, vestHelper: false, kidsRoomsDraft: false, campActive: false, roomRole: "helper" };
 
 /** On some admin list (organizer, church / bus helper, medical, vest helper, parent contact)? These people are never gated by the staff access window. */
 export function isPrivilegedStaff(staffId: string, s: Settings): boolean {
@@ -132,7 +134,13 @@ export async function resolveScope(viewer: Viewer): Promise<Scope> {
   const checkinHelper = windowOpen && listedChurch;
   const busHelperVehicle = windowOpen ? linkedVehicle : null;
   const campActive = campInProgress(await campPeriod());
-  return { all: false, staffId: me._id, bedroom: me.bedroom, checkinHelper, busHelperVehicle, organizer, gameOrganizer, medical, vestHelper, kidsRoomsDraft, campActive };
+  return { all: false, staffId: me._id, bedroom: me.bedroom, checkinHelper, busHelperVehicle, organizer, gameOrganizer, medical, vestHelper, kidsRoomsDraft, campActive, roomRole: me.roomRole };
+}
+
+/** A general document (Instruções / Preparação) reaches everyone, or only the caretakers / helpers. Admins and organizers see all. */
+export function canSeeDoc(scope: Scope, d: { audience: DocAudience }): boolean {
+  if (scope.all || scope.organizer) return true;
+  return d.audience === "all" || d.audience === scope.roomRole;
 }
 
 /** May this session write the scoreboard (give / take / zero points)? (admin or game organizer) */

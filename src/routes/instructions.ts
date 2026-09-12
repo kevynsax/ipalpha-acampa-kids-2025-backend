@@ -12,9 +12,10 @@ import {
 } from "../models/instructions";
 import { cleanHtml } from "../services/html";
 import { publish } from "../services/realtime";
+import { canSeeDoc, resolveScope } from "../services/scope";
 import { notifyInstructionChange } from "../services/notify";
 import { isEmojiLike } from "../utils";
-import type { InstructionDoc, Role, SessionUser } from "../types";
+import { DOC_AUDIENCES, type DocAudience, type InstructionDoc, type Role, type SessionUser } from "../types";
 
 interface Env {
   Variables: {
@@ -52,6 +53,7 @@ export function serializeInstruction(d: InstructionDoc) {
     id: d._id,
     title: d.title,
     emoji: d.emoji,
+    audience: d.audience,
     content: d.content,
     order: d.order,
     createdAt: d.createdAt,
@@ -72,6 +74,11 @@ function buildPatch(body: Record<string, unknown>, partial: boolean): { patch: P
     const e = typeof body.emoji === "string" ? body.emoji.trim() : "";
     patch.emoji = isEmojiLike(e) ? e : "📖";
   }
+  if (has("audience")) {
+    const a = body.audience === undefined ? "all" : body.audience;
+    if (!DOC_AUDIENCES.includes(a as DocAudience)) return { code: "AUDIENCE_INVALID", message: "Público deve ser todos, responsáveis ou auxiliares." };
+    patch.audience = a as DocAudience;
+  }
   if (has("content")) {
     const html = cleanHtml(body.content, CONTENT_MAX);
     if (html === null) return { code: "CONTENT_INVALID", message: "Conteúdo inválido ou muito longo." };
@@ -83,8 +90,8 @@ function buildPatch(body: Record<string, unknown>, partial: boolean): { patch: P
 instructions.use("*", requireAuth);
 
 instructions.get("/", requireRole("admin", "staff", "health_staff"), async (c) => {
-  const list = await listInstructions();
-  return c.json({ instructions: list.map(serializeInstruction) });
+  const [list, scope] = await Promise.all([listInstructions(), resolveScope(c.get("user"))]);
+  return c.json({ instructions: list.filter((d) => canSeeDoc(scope, d)).map(serializeInstruction) });
 });
 
 instructions.post("/", requireAdmin, async (c) => {

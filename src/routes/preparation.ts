@@ -12,9 +12,10 @@ import {
 } from "../models/preparation";
 import { cleanHtml } from "../services/html";
 import { publish } from "../services/realtime";
+import { canSeeDoc, resolveScope } from "../services/scope";
 import { notifyPreparationChange } from "../services/notify";
 import { isEmojiLike } from "../utils";
-import type { PrepSection, Role, SessionUser } from "../types";
+import { DOC_AUDIENCES, type DocAudience, type PrepSection, type Role, type SessionUser } from "../types";
 
 interface Env {
   Variables: {
@@ -50,6 +51,7 @@ export function serializePrepSection(s: PrepSection) {
     id: s._id,
     title: s.title,
     emoji: s.emoji,
+    audience: s.audience,
     content: s.content,
     order: s.order,
     createdAt: s.createdAt,
@@ -70,6 +72,11 @@ function buildPatch(body: Record<string, unknown>, partial: boolean): { patch: P
     const e = typeof body.emoji === "string" ? body.emoji.trim() : "";
     patch.emoji = isEmojiLike(e) ? e : "📌";
   }
+  if (has("audience")) {
+    const a = body.audience === undefined ? "all" : body.audience;
+    if (!DOC_AUDIENCES.includes(a as DocAudience)) return { code: "AUDIENCE_INVALID", message: "Público deve ser todos, responsáveis ou auxiliares." };
+    patch.audience = a as DocAudience;
+  }
   if (has("content")) {
     const html = cleanHtml(body.content, CONTENT_MAX);
     if (html === null) return { code: "CONTENT_INVALID", message: "Conteúdo inválido ou muito longo." };
@@ -81,7 +88,8 @@ function buildPatch(body: Record<string, unknown>, partial: boolean): { patch: P
 preparation.use("*", requireAuth);
 
 preparation.get("/", requireRole("admin", "staff", "health_staff"), async (c) => {
-  const list = await listPrepSections();
+  const scope = await resolveScope(c.get("user"));
+  const list = (await listPrepSections()).filter((s) => canSeeDoc(scope, s));
   return c.json({ sections: list.map(serializePrepSection) });
 });
 

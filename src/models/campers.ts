@@ -1,8 +1,10 @@
 import { ObjectId } from "mongodb";
 import { getDb } from "../db";
-import type { Camper, CamperCheckin, CamperSex, CheckinKind, CheckinLog } from "../types";
+import type { Camper, CamperChangeLog, CamperCheckin, CamperSex, CheckinKind, CheckinLog } from "../types";
 
 const LOG_COLLECTION = "checkinLog";
+/** every edit a PARENT made to their kid (append-only) */
+const CHANGE_LOG_COLLECTION = "camperChangeLog";
 
 const COLLECTION = "campers";
 
@@ -163,6 +165,26 @@ export async function listCheckinLog(camperId?: string): Promise<CheckinLog[]> {
   return docs.map((d) => ({ ...(d as unknown as CheckinLog), _id: (d._id as ObjectId).toString() }));
 }
 
+/** Append-only: one line per parent edit, with the fields that changed (before / after). */
+export async function logCamperChange(entry: Omit<CamperChangeLog, "_id">): Promise<void> {
+  const db = await getDb();
+  await db.collection(CHANGE_LOG_COLLECTION).insertOne(entry);
+}
+
+/** The parent-edit history of one kid, newest first. */
+export async function listCamperChanges(camperId: string): Promise<CamperChangeLog[]> {
+  const db = await getDb();
+  const docs = await db.collection(CHANGE_LOG_COLLECTION).find({ camperId }).sort({ at: -1 }).toArray();
+  return docs.map((d) => ({ ...(d as unknown as CamperChangeLog), _id: (d._id as ObjectId).toString() }));
+}
+
+/** Every kid whose guardian phone is `phone` (a parent may have several kids enrolled). */
+export async function listCampersOfGuardian(phone: string): Promise<Camper[]> {
+  const db = await getDb();
+  const docs = await db.collection(COLLECTION).find({ guardianPhone: phone }).collation({ locale: "pt", strength: 1 }).sort({ name: 1 }).toArray();
+  return docs.map((d) => toCamper(d as Record<string, unknown>)!);
+}
+
 export async function deleteCamper(id: string): Promise<boolean> {
   const db = await getDb();
   const res = await db.collection(COLLECTION).deleteOne({ _id: new ObjectId(id) });
@@ -189,4 +211,6 @@ export async function ensureCamperIndexes(): Promise<void> {
   await db.collection(COLLECTION).createIndex({ qrToken: 1 }, { sparse: true });
   await db.collection(LOG_COLLECTION).createIndex({ camperId: 1, at: -1 });
   await db.collection(LOG_COLLECTION).createIndex({ at: -1 });
+  await db.collection(COLLECTION).createIndex({ guardianPhone: 1 }, { sparse: true });
+  await db.collection(CHANGE_LOG_COLLECTION).createIndex({ camperId: 1, at: -1 });
 }

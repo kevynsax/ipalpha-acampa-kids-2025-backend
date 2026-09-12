@@ -515,7 +515,7 @@ staff.put("/:id", async (c) => {
   // left the room, or stopped being a caretaker there → their kids are orphans now
   const lostKids = (updated!.bedroom !== existing.bedroom || updated!.roomRole !== "caretaker" || !updated!.active) && existing.roomRole === "caretaker";
   const orphaned = lostKids ? await reassignCampers(existing._id, null) : 0;
-  publish("staff", "bedrooms", ...(orphaned ? ["campers" as const] : []));
+  publish("staff", "bedrooms", ...(orphaned ? ["campers" as const] : []), ...(updated!.roomRole !== existing.roomRole ? ["instructions" as const, "preparation" as const] : []));
   // fire-and-forget: the SMS never delays the write (deactivation is silent)
   if (!existing.active && updated!.active) void syncWelcomes();
   else if (updated!.active) void notifyStaffChange(existing, updated!);
@@ -592,7 +592,7 @@ staff.post("/:id/move", async (c) => {
   }
 
   const after = (await findStaffById(me._id))!;
-  publish("staff", "bedrooms", "campers");
+  publish("staff", "bedrooms", "campers", "instructions", "preparation");
   void notifyStaffChange(me, after);
   if (other) void findStaffById(other._id).then((o) => o && notifyStaffChange(other, o));
   return c.json({ staff: serialize(after), movedKids: touched.size });

@@ -13,7 +13,7 @@ export const DEFAULT_SETTINGS: Settings = {
     radiusM: 300,
   },
   // every kind starts OFF: the admin switches on what they want texted
-  notifications: { bedroomChanges: false, roleChanges: false, checkinConfirmation: false, contentChanges: false, staffChanges: false, enrolments: false, occurrences: false, checkinReminder: false },
+  notifications: { bedroomChanges: false, roleChanges: false, checkinConfirmation: false, contentChanges: false, staffChanges: false, enrolments: false, occurrences: false, checkinReminder: false, parentEdits: false },
   checkinWindow: { from: null, until: null },
   checkinHelpers: { staffIds: [] },
   busHelpers: { helpers: [] },
@@ -114,6 +114,7 @@ function toSettings(doc: Record<string, unknown> | null): Settings {
       enrolments: typeof n.enrolments === "boolean" ? n.enrolments : DEFAULT_SETTINGS.notifications.enrolments,
       occurrences: typeof n.occurrences === "boolean" ? n.occurrences : DEFAULT_SETTINGS.notifications.occurrences,
       checkinReminder: typeof n.checkinReminder === "boolean" ? n.checkinReminder : DEFAULT_SETTINGS.notifications.checkinReminder,
+      parentEdits: typeof n.parentEdits === "boolean" ? n.parentEdits : DEFAULT_SETTINGS.notifications.parentEdits,
     },
     checkinLocation: {
       lat: typeof loc.lat === "number" ? loc.lat : DEFAULT_SETTINGS.checkinLocation.lat,

@@ -63,7 +63,7 @@ function parseNotifications(value: unknown, current: NotificationSettings): Noti
   if (!value || typeof value !== "object") return { error: "Informe as notificações." };
   const o = value as Record<string, unknown>;
   const out = { ...current };
-  for (const k of ["bedroomChanges", "roleChanges", "checkinConfirmation", "contentChanges", "staffChanges", "enrolments", "occurrences", "checkinReminder"] as const) {
+  for (const k of ["bedroomChanges", "roleChanges", "checkinConfirmation", "contentChanges", "staffChanges", "enrolments", "occurrences", "checkinReminder", "parentEdits"] as const) {
     if (o[k] === undefined) continue;
     if (typeof o[k] !== "boolean") return { error: "Cada notificação deve ser ligada ou desligada." };
     out[k] = o[k] as boolean;

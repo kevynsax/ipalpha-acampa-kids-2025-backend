@@ -1,6 +1,7 @@
 import { ObjectId } from "mongodb";
 import { getDb } from "../db";
-import type { PrepSection } from "../types";
+import type { PrepSection, DocAudience } from "../types";
+import { DOC_AUDIENCES } from "../types";
 
 const COLLECTION = "prep_sections";
 
@@ -10,6 +11,7 @@ function toSection(doc: Record<string, unknown> | null): PrepSection | null {
     _id: (doc._id as ObjectId).toString(),
     title: doc.title as string,
     emoji: (doc.emoji as string) ?? "📌",
+    audience: DOC_AUDIENCES.includes(doc.audience as DocAudience) ? (doc.audience as DocAudience) : "all",
     content: (doc.content as string) ?? "",
     order: (doc.order as number) ?? 0,
     createdAt: doc.createdAt as Date,

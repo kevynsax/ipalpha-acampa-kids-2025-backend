@@ -364,6 +364,11 @@ frontend resolves it against `VITE_API_URL` when rendering.
 
 ## Instructions (general documents) 📖
 
+Both Instruções documents and Preparação sections carry an `audience`:
+`"all"` (default), `"caretaker"` or `"helper"` — only team members with that
+`roomRole` receive the document (lists, snapshot and the content-change SMS);
+admins and organizers always see everything. `AUDIENCE_INVALID` otherwise.
+
 Long rich-text documents for the whole camp ("Regras do acampamento", "Plano
 de emergência", "Rotina do dia"…), written by the admin in the WYSIWYG editor
 and read by every team member. Collection `instructions`, pushed in the

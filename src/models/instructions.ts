@@ -1,6 +1,7 @@
 import { ObjectId } from "mongodb";
 import { getDb } from "../db";
-import type { InstructionDoc } from "../types";
+import type { InstructionDoc, DocAudience } from "../types";
+import { DOC_AUDIENCES } from "../types";
 
 const COLLECTION = "instructions";
 
@@ -10,6 +11,7 @@ function toDoc(doc: Record<string, unknown> | null): InstructionDoc | null {
     _id: (doc._id as ObjectId).toString(),
     title: doc.title as string,
     emoji: (doc.emoji as string) ?? "📖",
+    audience: DOC_AUDIENCES.includes(doc.audience as DocAudience) ? (doc.audience as DocAudience) : "all",
     content: (doc.content as string) ?? "",
     order: (doc.order as number) ?? 0,
     createdAt: doc.createdAt as Date,

@@ -22,7 +22,7 @@ import { serializeStaffList } from "../routes/staff";
 import { getSettings } from "../models/settings";
 import type { Role } from "../types";
 import { COLLECTIONS, type Collection, type Snapshot } from "./realtime";
-import { canSeeBedroom, resolveScope, scopeEvent, scopeRoles, type Viewer } from "./scope";
+import { canSeeBedroom, canSeeDoc, resolveScope, scopeEvent, scopeRoles, type Viewer } from "./scope";
 
 /**
  * Collections each role may read (mirrors the REST `requireRole` guards).
@@ -104,10 +104,10 @@ export async function loadCollections(viewer: Viewer, names: readonly Collection
           out.events = (await schedule!).events.map(serializeEvent);
           break;
         case "preparation":
-          out.preparation = (await listPrepSections()).map(serializePrepSection);
+          out.preparation = (await listPrepSections()).filter((s) => canSeeDoc(scope, s)).map(serializePrepSection);
           break;
         case "instructions":
-          out.instructions = (await listInstructions()).map(serializeInstruction);
+          out.instructions = (await listInstructions()).filter((d) => canSeeDoc(scope, d)).map(serializeInstruction);
           break;
         case "occurrences":
           if (scope.all) out.occurrences = (await listOccurrences()).map(serializeOccurrence);
