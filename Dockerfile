@@ -13,6 +13,8 @@ COPY tsconfig.json ./tsconfig.json
 
 ENV NODE_ENV=production
 ENV PORT=3000
+# uploaded images live here (mount a volume at /app/data/files in production)
+ENV FILES_DIR=data/files
 
 EXPOSE 3000
 

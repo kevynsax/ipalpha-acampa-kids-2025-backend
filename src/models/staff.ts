@@ -127,6 +127,28 @@ export async function claimStaffWelcome(id: string): Promise<boolean> {
   return res.modifiedCount === 1;
 }
 
+/**
+ * Marks the "there are photos in the app" SMS as sent to this team member —
+ * atomically, only if it never went out. True when this call won, so the
+ * photographer can publish as many batches as they like and each person is
+ * still texted about the album ONCE for the whole camp.
+ */
+export async function claimStaffPhotosNotice(id: string): Promise<boolean> {
+  if (!ObjectId.isValid(id)) return false;
+  const db = await getDb();
+  const res = await db
+    .collection(COLLECTION)
+    .updateOne({ _id: new ObjectId(id), $or: [{ photosSmsSentAt: null }, { photosSmsSentAt: { $exists: false } }] }, { $set: { photosSmsSentAt: new Date() } });
+  return res.modifiedCount === 1;
+}
+
+/** Clears the album notice stamp on the whole team (a new camp starts → everyone may be told again). */
+export async function resetStaffPhotosNotice(): Promise<number> {
+  const db = await getDb();
+  const res = await db.collection(COLLECTION).updateMany({ photosSmsSentAt: { $ne: null } }, { $set: { photosSmsSentAt: null } });
+  return res.modifiedCount;
+}
+
 /** Clears every team member's check-in (rehearsal reset). Returns how many had one. */
 export async function resetStaffCheckins(): Promise<number> {
   const db = await getDb();

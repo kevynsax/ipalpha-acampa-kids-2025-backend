@@ -15,11 +15,13 @@ import { campInProgress, campPeriod, parentWindowOf, parentWindowOpen, vestWindo
  *   health_staff   kids under THEIR care (Camper.caretakerId) any time, and the
  *                  other kids of the room only WHILE THE CAMP IS HAPPENING
  *                  (see services/camp.ts); a HELPER gets the room's kids only
- *                  during the camp. Both as "care" records: health, notes and
- *                  preferences included, but NO guardian / emergency contact
- *                  data (that stays with the admin, the medical team and the
- *                  check-in helpers). Plus their own staff record and the
- *                  NAME + room role of the colleagues in the same room.
+ *                  during the camp. Both as "care" records: health, notes,
+ *                  preferences and the guardian's NAME + PHONE (so they can
+ *                  reach the parents), but NO emergency contact, documents,
+ *                  insurance or e-mail (that stays with the admin, the medical
+ *                  team and the check-in helpers). Plus their own staff record
+ *                  and the NAME + PHONE + room role + TEAM of the colleagues
+ *                  in the same room.
  *                  The programme: every event, but only the roles that apply
  *                  to THEM (see scopeEvent) — never who does what elsewhere.
  *   check-in     → a staff member the admin listed as a check-in helper, WHILE
@@ -66,7 +68,11 @@ import { campInProgress, campPeriod, parentWindowOf, parentWindowOpen, vestWindo
  *                  vest status ("contact" visibility) — never health, room,
  *                  team or check-in — and may stamp the vest delivery /
  *                  return. Everything else: as any team member.
- *   parent       → their OWN kids (matched by the guardian phone), in full,
+  *   photographer → a staff member the admin listed as a PHOTOGRAPHER (no
+ *   window): uploads the camp's photos (POST /api/gallery), edits and
+ *   publishes them, and sees the drafts on the Fotos tab. Everything else:
+ *   as any team member.
+*   parent       → their OWN kids (matched by the guardian phone), in full,
  *                  and the kids' rooms. WHILE THE PARENTS' WINDOW is open
  *                  (from the kids' check-in start to the end of the last
  *                  event — see services/camp.ts#parentWindow) additionally
@@ -102,8 +108,12 @@ export type Scope =
       bedroom: string | null;
       /** true while this person is a listed CHURCH check-in helper AND that window is open */
       checkinHelper: boolean;
-      /** the vehicle (transportation option id) the admin linked this person to as a BUS helper, while the window is open; null otherwise */
+      /** the vehicle (transportation option id) linked to this BUS helper while either trip window is open; null otherwise */
       busHelperVehicle: string | null;
+      /** may record the outbound bus roll call right now */
+      busOutboundHelper: boolean;
+      /** may record the return bus roll call right now */
+      busReturnHelper: boolean;
       /** true when this person may write the PROGRAMME (events, roles, assignments) and sees the whole team: game organizers (real organizers get `all: true` instead) */
       organizer: boolean;
       /** true when this person is a listed GAME organizer (no window): programme + writes the scoreboard */
@@ -114,6 +124,8 @@ export type Scope =
       medical: boolean;
       /** true when this person hands out / takes back the team VESTS — listed AND before / during / up to VEST_GRACE_DAYS after the camp: every staff member as name + phone */
       vestHelper: boolean;
+      /** true when this person is a listed PHOTOGRAPHER (no window): uploads, edits and publishes the camp's photos */
+      photographer: boolean;
       /** true while the kids' room allocation is still a draft (Settings → Geral): the viewer's OWN room shows no kids */
       kidsRoomsDraft: boolean;
       /** true while the camp is happening (first → last programme day): the whole room's kids become visible */
@@ -130,7 +142,7 @@ export type Scope =
       parentContactIds: string[];
     };
 
-export const NO_ACCESS: Extract<Scope, { all: false }> = { all: false, staffId: null, bedroom: null, checkinHelper: false, busHelperVehicle: null, organizer: false, gameOrganizer: false, scoreHelper: false, medical: false, vestHelper: false, kidsRoomsDraft: false, campActive: false, roomRole: "helper", parentKids: [], parentBedrooms: [], parentContacts: false, parentContactIds: [] };
+export const NO_ACCESS: Extract<Scope, { all: false }> = { all: false, staffId: null, bedroom: null, checkinHelper: false, busHelperVehicle: null, busOutboundHelper: false, busReturnHelper: false, organizer: false, gameOrganizer: false, scoreHelper: false, medical: false, vestHelper: false, photographer: false, kidsRoomsDraft: false, campActive: false, roomRole: "helper", parentKids: [], parentBedrooms: [], parentContacts: false, parentContactIds: [] };
 
 /** Is this a PARENT session with at least one kid enrolled? */
 export function isParent(scope: Scope): boolean {
@@ -142,7 +154,7 @@ function asParent(scope: Scope): Extract<Scope, { all: false }> {
   return scope as Extract<Scope, { all: false }>;
 }
 
-/** On some admin list (organizer, church / bus helper, medical, vest helper, parent contact)? These people are never gated by the staff access window. */
+/** On some admin list (organizer, church / bus helper, medical, vest helper, photographer, parent contact)? These people are never gated by the staff access window. */
 export function isPrivilegedStaff(staffId: string, s: Settings): boolean {
   return (
     s.organizers.staffIds.includes(staffId) ||
@@ -150,6 +162,7 @@ export function isPrivilegedStaff(staffId: string, s: Settings): boolean {
     s.scoreHelpers.staffIds.includes(staffId) ||
     s.medicalStaff.staffIds.includes(staffId) ||
     s.vestHelpers.staffIds.includes(staffId) ||
+    s.photographers.staffIds.includes(staffId) ||
     s.checkinHelpers.staffIds.includes(staffId) ||
     s.busHelpers.helpers.some((h) => h.staffId === staffId) ||
     s.parentContacts.some((p) => p.staffId === staffId)
@@ -188,7 +201,7 @@ export async function resolveScope(viewer: Viewer): Promise<Scope> {
   const settings = await getSettings();
   // ORDINARY team members (on no list at all) only get in during the staff access window
   if (!staffHasAccess(me._id, settings)) return NO_ACCESS;
-  const { checkinWindow, checkinTestMode, checkinHelpers, busHelpers, organizers, gameOrganizers, scoreHelpers, medicalStaff, vestHelpers, kidsRoomsDraft } = settings;
+  const { checkinWindow, busReturnWindow, checkinTestMode, checkinHelpers, busHelpers, organizers, gameOrganizers, scoreHelpers, medicalStaff, vestHelpers, photographers, kidsRoomsDraft } = settings;
   // an ORGANIZER is an admin minus a few settings: same data scope
   if (organizers.staffIds.includes(me._id)) return ORGANIZER;
   const gameOrganizer = gameOrganizers.staffIds.includes(me._id);
@@ -199,14 +212,18 @@ export async function resolveScope(viewer: Viewer): Promise<Scope> {
   const period = await campPeriod();
   // the vest helper keeps the tab for a few days after the camp (vests come back then), not forever
   const vestHelper = vestHelpers.staffIds.includes(me._id) && vestWindowOpen(period);
+  const photographer = photographers.staffIds.includes(me._id);
   const listedChurch = checkinHelpers.staffIds.includes(me._id);
   const linkedVehicle = busHelpers.helpers.find((h) => h.staffId === me._id)?.vehicleId ?? null;
-  // test mode opens the kids' roll calls for the helpers regardless of the window
-  const windowOpen = checkinTestMode || checkinWindowOpen(checkinWindow);
-  const checkinHelper = windowOpen && listedChurch;
-  const busHelperVehicle = windowOpen ? linkedVehicle : null;
+  // test mode opens every kids' roll call; bus helpers stay active in either trip's window
+  const departureWindowOpen = checkinTestMode || checkinWindowOpen(checkinWindow);
+  const busWindowOpen = departureWindowOpen || checkinWindowOpen(busReturnWindow);
+  const checkinHelper = departureWindowOpen && listedChurch;
+  const busHelperVehicle = busWindowOpen ? linkedVehicle : null;
+  const busOutboundHelper = linkedVehicle !== null && departureWindowOpen;
+  const busReturnHelper = linkedVehicle !== null && (checkinTestMode || checkinWindowOpen(busReturnWindow));
   const campActive = campInProgress(period);
-  return { ...NO_ACCESS, staffId: me._id, bedroom: me.bedroom, checkinHelper, busHelperVehicle, organizer, gameOrganizer, scoreHelper, medical, vestHelper, kidsRoomsDraft, campActive, roomRole: me.roomRole };
+  return { ...NO_ACCESS, staffId: me._id, bedroom: me.bedroom, checkinHelper, busHelperVehicle, busOutboundHelper, busReturnHelper, organizer, gameOrganizer, scoreHelper, medical, vestHelper, photographer, kidsRoomsDraft, campActive, roomRole: me.roomRole };
 }
 
 /** May this PARENT session edit `k`'s "Pontos de atenção"? (their own kid) */
@@ -256,6 +273,11 @@ export function canHandleVests(scope: Scope): boolean {
   return scope.all || scope.vestHelper;
 }
 
+/** May this session upload / edit / publish the camp's photos? (admin or photographer) */
+export function canManageGallery(scope: Scope): boolean {
+  return scope.all || scope.photographer;
+}
+
 /** May this session write the programme (events, roles, assignments)? (admin, organizer or game organizer) */
 export function canOrganize(scope: Scope): boolean {
   return scope.all || scope.organizer;
@@ -266,9 +288,11 @@ export function canRunCheckin(scope: Scope): boolean {
   return scope.all || scope.checkinHelper;
 }
 
-/** May this session roll-call `k` on the bus right now? (admin, or a bus helper inside the window — only for kids of the vehicle they were linked to) */
-export function canRunBusCheckin(scope: Scope, k: Pick<Camper, "transportation">): boolean {
-  return scope.all || (scope.busHelperVehicle !== null && k.transportation === scope.busHelperVehicle);
+/** May this session roll-call `k` on this bus trip right now? */
+export function canRunBusCheckin(scope: Scope, k: Pick<Camper, "transportation">, kind: "bus" | "bus_return"): boolean {
+  if (scope.all) return true;
+  const tripOpen = kind === "bus" ? scope.busOutboundHelper : scope.busReturnHelper;
+  return tripOpen && scope.busHelperVehicle !== null && k.transportation === scope.busHelperVehicle;
 }
 
 export function canSeeBedroom(scope: Scope, bedroomId: string): boolean {
@@ -278,7 +302,7 @@ export function canSeeBedroom(scope: Scope, bedroomId: string): boolean {
 
 /**
  * "full" = whole record, "care" = what a room caretaker / helper needs (health,
- * notes, preferences — no guardian / emergency / documents), "name" = roll-call
+ * notes, preferences, guardian name + phone — no emergency / documents), "name" = roll-call
  * view (no health / contacts / notes), "none" = invisible.
  */
 export type CamperVisibility = "full" | "care" | "name" | "none";
@@ -304,10 +328,11 @@ export function canSeeCamper(scope: Scope, k: Pick<Camper, "_id" | "bedroom" | "
 }
 
 /**
- * "full" = whole record, "contact" = name + phone + vest status (vest helper),
- * "name" = colleague in the same room (name only), "none" = invisible.
+ * "full" = whole record, "contact" = name + phone + room role (a colleague in
+ * the same room, a parent's contact, or everyone for the vest helper — who also
+ * gets the vest status), "none" = invisible.
  */
-export type StaffVisibility = "full" | "contact" | "name" | "none";
+export type StaffVisibility = "full" | "contact" | "none";
 
 export function staffVisibility(scope: Scope, s: Pick<Staff, "_id" | "bedroom" | "active">): StaffVisibility {
   if (scope.all || scope.organizer) return "full";
@@ -319,8 +344,8 @@ export function staffVisibility(scope: Scope, s: Pick<Staff, "_id" | "bedroom" |
   if (scope.staffId === s._id) return "full";
   // the vest helper reaches everyone by phone, and nothing more
   if (scope.vestHelper) return "contact";
-  // roommates are unknown while the rooms are still a draft
-  if (!scope.kidsRoomsDraft && scope.bedroom !== null && s.bedroom === scope.bedroom) return "name";
+  // roommates (name + phone + room role) are unknown while the rooms are still a draft
+  if (!scope.kidsRoomsDraft && scope.bedroom !== null && s.bedroom === scope.bedroom) return "contact";
   return "none";
 }
 

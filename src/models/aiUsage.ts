@@ -6,8 +6,8 @@ export interface AiUsageEntry {
   at: Date;
   vendor: string;
   model: string;
-  /** "edit" (assistant panel) or "suggest" (title/emoji) */
-  kind: "edit" | "suggest";
+  /** "edit" (assistant panel), "suggest" (title/emoji), "image" (generated illustration), "camper_notes" (sorting a kid's observations) or "dedup_field" (background repeat clean-up) */
+  kind: "edit" | "suggest" | "image" | "camper_notes" | "dedup_field";
   userId: string;
   promptTokens: number;
   completionTokens: number;

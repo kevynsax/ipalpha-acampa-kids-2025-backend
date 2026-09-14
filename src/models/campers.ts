@@ -48,6 +48,7 @@ function toCamper(doc: Record<string, unknown> | null): Camper | null {
     guardianEmail: s("guardianEmail"),
     checkin: toCheckin(doc.checkin),
     busCheckin: toCheckin(doc.busCheckin),
+    busReturnCheckin: toCheckin(doc.busReturnCheckin),
     parentEditedAt: (doc.parentEditedAt as Date) ?? null,
     createdAt: doc.createdAt as Date,
     updatedAt: doc.updatedAt as Date,
@@ -72,13 +73,17 @@ export function toCheckin(v: unknown): CamperCheckin | null {
   if (!v || typeof v !== "object") return null;
   const o = v as Record<string, unknown>;
   if (!(o.at instanceof Date)) return null;
-  return { at: o.at, byUserId: (o.byUserId as string) ?? "", byName: (o.byName as string) ?? "", byRole: (o.byRole as CamperCheckin["byRole"]) ?? "staff" };
+  return { at: o.at, byUserId: (o.byUserId as string) ?? "", byName: (o.byName as string) ?? "", byRole: (o.byRole as CamperCheckin["byRole"]) ?? "staff", ...(typeof o.note === "string" && o.note ? { note: o.note } : {}) };
 }
 
-export type CamperData = Omit<Camper, "_id" | "createdAt" | "updatedAt" | "checkin" | "busCheckin" | "parentEditedAt">;
+export type CamperData = Omit<Camper, "_id" | "createdAt" | "updatedAt" | "checkin" | "busCheckin" | "busReturnCheckin" | "parentEditedAt">;
 
 /** which document field holds each kind of check-in */
-export const CHECKIN_FIELD: Record<CheckinKind, "checkin" | "busCheckin"> = { church: "checkin", bus: "busCheckin" };
+export const CHECKIN_FIELD: Record<CheckinKind, "checkin" | "busCheckin" | "busReturnCheckin"> = {
+  church: "checkin",
+  bus: "busCheckin",
+  bus_return: "busReturnCheckin",
+};
 
 export async function listCampers(filter: { bedroom?: string; caretakerId?: string } = {}): Promise<Camper[]> {
   const db = await getDb();
@@ -114,7 +119,7 @@ export async function insertCamper(data: CamperData): Promise<Camper> {
   const db = await getDb();
   const now = new Date();
   const { insertedId } = await db.collection(COLLECTION).insertOne({ ...data, createdAt: now, updatedAt: now });
-  return { ...data, checkin: null, busCheckin: null, parentEditedAt: null, _id: insertedId.toString(), createdAt: now, updatedAt: now };
+  return { ...data, checkin: null, busCheckin: null, busReturnCheckin: null, parentEditedAt: null, _id: insertedId.toString(), createdAt: now, updatedAt: now };
 }
 
 export async function updateCamper(id: string, patch: Partial<CamperData>): Promise<Camper | null> {
@@ -149,12 +154,15 @@ export async function setCamperCheckin(id: string, kind: CheckinKind, checkin: C
   return toCamper(res as Record<string, unknown> | null);
 }
 
-/** Clears church + bus check-ins of every kid (rehearsal reset). Returns how many had one. */
+/** Clears church + both bus check-ins of every kid (rehearsal reset). Returns how many had one. */
 export async function resetCamperCheckins(): Promise<number> {
   const db = await getDb();
   const res = await db
     .collection(COLLECTION)
-    .updateMany({ $or: [{ checkin: { $ne: null } }, { busCheckin: { $ne: null } }] }, { $set: { checkin: null, busCheckin: null, updatedAt: new Date() } });
+    .updateMany(
+      { $or: [{ checkin: { $ne: null } }, { busCheckin: { $ne: null } }, { busReturnCheckin: { $ne: null } }] },
+      { $set: { checkin: null, busCheckin: null, busReturnCheckin: null, updatedAt: new Date() } },
+    );
   return res.modifiedCount;
 }
 

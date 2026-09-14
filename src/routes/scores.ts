@@ -2,7 +2,7 @@ import { Hono, type Context } from "hono";
 import { createMiddleware } from "hono/factory";
 import { requireAuth } from "../middleware/auth";
 import { requireRole } from "../middleware/roles";
-import { findCamperById } from "../models/campers";
+import { findCamperById, logCheckin, setCamperCheckin } from "../models/campers";
 import { findEventById } from "../models/schedule";
 import { deleteScore, eventScanPoints, findScoreById, insertScore, listScores, repointEventScans, scannedForEvent, teamTotal } from "../models/scores";
 import { getSettings } from "../models/settings";
@@ -25,6 +25,8 @@ const scores = new Hono<Env>();
 
 const NOTE_MAX = 200;
 const POINTS_MAX = 100_000;
+/** note stamped on a church check-in the SYSTEM made because the kid's wristband scored points before anyone checked them in */
+export const AUTO_CHECKIN_NOTE = "Check-in feito pelo sistema ao pontuar o crachá";
 
 /** the ledger note of a scan line: the event it belongs to */
 function scanNote(e: { emoji: string; title: string }): string {
@@ -116,6 +118,10 @@ scores.post("/", requireRole("admin", "staff", "health_staff"), requireScorekeep
  * ALREADY_SCANNED), and every scan of an event carries the same points —
  * sending a different value re-points the earlier scans of that event.
  * Admin, game organizer or score helper.
+ *
+ * A kid who scores is obviously at the camp: if they still have no church
+ * check-in, the system checks them in now (stamped with the scanner's name
+ * and a note saying the system did it) and the audit line says so.
  */
 scores.post("/scan", requireRole("admin", "staff", "health_staff"), requireScanner, requireScoreOpen, async (c) => {
   const body = await c.req.json<Record<string, unknown>>().catch(() => null);
@@ -137,7 +143,15 @@ scores.post("/scan", requireRole("admin", "staff", "health_staff"), requireScann
   if (current !== null && current !== points) await repointEventScans(event._id, points, note);
   const entry = await insertScore({ teamId: team._id, points, kind: "add", note, camperId: camper._id, camperName: camper.name, eventId: event._id, byUserId: user.id, byName: user.name });
   publish("scores");
-  return c.json({ score: serializeScore(entry), team: { id: team._id, name: team.name, color: team.color } }, 201);
+  let checkedIn = false;
+  if (!camper.checkin) {
+    const stamp = { at: new Date(), byUserId: user.id, byName: user.name, byRole: user.activeRole, note: AUTO_CHECKIN_NOTE };
+    await setCamperCheckin(camper._id, "church", stamp);
+    await logCheckin({ camperId: camper._id, camperName: camper.name, kind: "church", action: "checkin", ...stamp });
+    publish("campers");
+    checkedIn = true;
+  }
+  return c.json({ score: serializeScore(entry), team: { id: team._id, name: team.name, color: team.color }, checkedIn }, 201);
 });
 
 /**

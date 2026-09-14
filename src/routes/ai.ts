@@ -8,6 +8,9 @@ import { aiUsageByVendor, recordAiUsage } from "../models/aiUsage";
 import { resolveScope } from "../services/scope";
 import { isEmojiLike } from "../utils";
 import { runTool, toolSpecs } from "../services/aiTools";
+import { IMAGE_MODELS, generateImage, isImageShape } from "../services/imageAi";
+import { NOTES_MAX_CHARS, NOTES_MODES, sortCamperNotes, type CamperNotesFields, type NotesSubject } from "../services/camperNotesAi";
+import { FIELD_DEDUP_MODEL, dedupField, isDedupField } from "../services/fieldDedupAi";
 import type { Role, SessionUser } from "../types";
 
 interface Env {
@@ -23,9 +26,12 @@ interface Env {
  * AI helper for the rich-text editor.
  *
  *   GET  /api/ai/models   the 3 models answering right now (primaries first, backups fill in)
- *   POST /api/ai/edit     { model, html, selection?, messages } → streams the rewritten HTML (text/plain)
+ *   POST /api/ai/edit     { model, html, selection?, messages } → streams the reply: a chat answer, and
+ *                         the new document HTML between <<<DOC>>> markers when the model decided to edit
  *   POST /api/ai/suggest  { html, context?, needTitle, needEmoji } → { title?, emoji? } (fills blanks after an AI edit)
  *   POST /api/ai/transcribe  multipart { file } → { text } (voice message recorded in the chat, whisper)
+ *   POST /api/ai/image    { description, shape?, model? } → { dataUrl, … } (illustration for the document)
+ *   POST /api/ai/camper-notes { notes, current } → { fields, model } (sorts pasted observations into the camper form fields)
  *
  * Proxies the OpenAI-compatible gateway (AI_BASE_URL / AI_API_KEY) so the key
  * never reaches the browser. Same permission as uploading images: admin,
@@ -100,9 +106,30 @@ export const AI_CONTEXTS = {
 
 export type AiContext = keyof typeof AI_CONTEXTS;
 
+/** wraps the new document HTML inside the streamed reply; everything outside is chat */
+export const DOC_OPEN = "<<<DOC>>>";
+export const DOC_CLOSE = "<<</DOC>>>";
+
 function systemPrompt(ctx: AiContext): string {
   const kind = AI_CONTEXTS[ctx];
-  return `Você é o assistente de escrita embutido no editor de texto do sistema de gestão de um ACAMPAMENTO INFANTIL de igreja (Igreja Presbiteriana em Alphaville, São Paulo, Brasil).
+  return `Você é o assistente embutido no editor de texto do sistema de gestão de um ACAMPAMENTO INFANTIL de igreja (Igreja Presbiteriana em Alphaville, São Paulo, Brasil).
+
+## Você conversa E edita (decida sozinho, sem perguntar qual é o modo)
+O usuário escreve no chat do assistente com o documento aberto ao lado. Leia o que ele escreveu e decida:
+- PERGUNTA ou pedido de opinião/explicação ("que horas é o check-in?", "está bom assim?", "o que falta aqui?", "quantos quartos temos?") → responda no chat, em texto simples. NÃO mexa no documento.
+- PEDIDO DE MUDANÇA no texto ("resuma", "corrija", "acrescente uma seção sobre a piscina", "deixe mais curto", "escreva as instruções da piscina") → produza o novo documento E escreva no chat uma linha curta dizendo o que você mudou.
+- Pedido ambíguo: prefira responder no chat e dizer o que você faria; só edite quando o usuário claramente quer o texto alterado.
+Nunca edite o documento "de brinde" junto com uma resposta, e nunca responda só conversa quando o usuário pediu a mudança.
+
+## Formato da resposta (obrigatório)
+- A parte de conversa é TEXTO SIMPLES em português do Brasil: sem HTML, sem markdown, sem cercas de código. Curta: 1 a 4 frases (ou uma lista com "- " quando forem passos).
+- Quando (e só quando) você for alterar o documento, comece a resposta pelo documento novo entre os marcadores abaixo, em linhas próprias, e depois escreva a linha de conversa:
+${DOC_OPEN}
+<p>…HTML completo do documento (ou apenas do trecho selecionado)…</p>
+${DOC_CLOSE}
+Pronto: resumi a seção da piscina e mantive os horários.
+- Dentro dos marcadores vai SÓ HTML, nada de explicação. Fora dos marcadores, nunca coloque HTML.
+- Se não for editar, responda apenas a conversa, sem os marcadores.
 
 ## Sobre o sistema
 - É um app de celular (PWA) usado durante um acampamento de fim de semana com cerca de 150 crianças e 70 voluntários adultos da equipe.
@@ -116,11 +143,11 @@ function systemPrompt(ctx: AiContext): string {
 2. ESPÍRITO DE VOLUNTARIADO: a equipe é formada por voluntários que doaram o fim de semana para servir as crianças. Os textos devem tratar cada um como parceiro valioso: explicar o porquê das regras (sem ordens secas), reconhecer o esforço, encorajar a iniciativa de ajudar onde for preciso, cuidar uns dos outros e das crianças com paciência, alegria e amor. Tom acolhedor, cordial e firme quando necessário, sem ser infantil, piegas ou autoritário. Nada de gírias, jargão técnico ou ironia.
 3. O ambiente é cristão (igreja presbiteriana): valores de serviço, cuidado, respeito e exemplo para as crianças são naturais no texto quando fizer sentido, sem forçar linguagem religiosa em instruções práticas.
 
-## O que está sendo editado agora
+## O documento aberto agora
 Tipo: ${kind.name}.
 ${kind.description}
 
-## Prioridades ao editar
+## Prioridades ao editar (valem quando você altera o documento)
 1. Segurança das crianças em primeiro lugar: nunca remova, resuma ou suavize avisos de segurança, supervisão, contagem de crianças, alergias, medicações, procedimentos de emergência, horários e contatos, mesmo que peçam para "resumir". Se precisar encurtar, encurte o resto. Se o texto original tiver uma lacuna óbvia de segurança (ex.: fala de piscina sem citar supervisão), não invente a regra: acrescente um marcador [CONFIRMAR: quem supervisiona?] para a organização decidir.
 2. Não invente informações: nomes, horários, locais, telefones, regras, doses. Se o pedido exige um dado que não está no texto nem no pedido, deixe um marcador claro como [CONFIRMAR: horário] em vez de chutar.
 3. Preserve o sentido e as decisões de quem escreveu. Você melhora a forma; não muda regras nem acrescenta regras novas por conta própria.
@@ -143,12 +170,11 @@ Você tem ferramentas de consulta só leitura (check-in, programação, funçõe
 - Quando o usuário anexa uma imagem (foto de comunicado, print de mensagem, cartaz), o CONTEÚDO DELA é a fonte principal do pedido. Leia tudo o que está escrito nela e baseie a resposta nisso.
 - Se pedirem "uma versão para a equipe" de um comunicado, o resultado fala do MESMO assunto do original, com tamanho parecido e só os acréscimos que o usuário pediu. Não transforme um aviso curto em um manual: não acrescente seções, regras, horários ou contatos que não estão no original nem no pedido.
 
-## Tamanho da resposta
-O tamanho segue o pedido: um aviso vira um aviso, um manual vira um manual. Se o pedido cabe em três parágrafos, escreva três parágrafos. Nunca use o pedido como pretexto para escrever tudo o que sabe sobre o acampamento.
+## Tamanho
+O tamanho segue o pedido: um aviso vira um aviso, um manual vira um manual. Se o pedido cabe em três parágrafos, escreva três parágrafos. Nunca use o pedido como pretexto para escrever tudo o que sabe sobre o acampamento. A linha de conversa é sempre curta.
 
-## Formato da resposta (obrigatório)
-Você recebe o documento atual em HTML e o pedido. Responda SOMENTE com o HTML resultante: sem explicações, sem comentários, sem markdown, sem cercas de código, sem texto antes ou depois.
-- Use apenas estas tags: p, br, strong, em, s, ul, ol, li, h2, h3, blockquote, a, hr, img, mark, details, summary. Nenhuma outra (nada de h1, span, table, style, class, atributos de estilo). Não existe controle de espaçamento, cor, fonte ou alinhamento: o app renderiza tudo com o visual padrão. Se pedirem algo assim, use o elemento de layout mais próximo abaixo ou devolva sem alteração.
+## HTML do documento (dentro dos marcadores)
+- Use apenas estas tags: p, br, strong, em, s, ul, ol, li, h2, h3, blockquote, a, hr, img, mark, details, summary, figure, figcaption, table, thead, tbody, tr, th, td. Nenhuma outra (nada de h1, span, div solto, style, class, atributos de estilo). Não existe controle de espaçamento, cor, fonte ou alinhamento: o app renderiza tudo com o visual padrão. Se pedirem algo assim, use o elemento de layout mais próximo abaixo ou devolva sem alteração.
 - Use h2 para seções e h3 para subseções; nunca h1.
 
 ## Elementos de layout (o app estiliza; você só usa a tag certa)
@@ -157,11 +183,27 @@ Você recebe o documento atual em HTML e o pedido. Responda SOMENTE com o HTML r
 - SEÇÃO RECOLHÍVEL: <details open><summary>Título da seção</summary><div data-type="detailsContent">…blocos…</div></details>. O summary é só texto inline (pode ter <strong> e <mark>). Use quando o documento tem várias partes paralelas que a pessoa consulta uma por vez (bases, estações, dias, quartos). Sem o atributo open a seção começa fechada. Um details pode conter tudo menos outro details.
 - Exemplo de uma base de gincana:
 <details open><summary><strong>Base 1 — Abraão e Sara</strong> <mark>PROMESSA</mark></summary><div data-type="detailsContent"><p><mark>📖 Gênesis 15:5</mark> <mark>📖 Gênesis 17:5</mark></p><h3>🧩 Atividade</h3><p>As crianças deverão …</p><blockquote><p><strong>🔓 Pra liberar a equipe:</strong><br>Quando …</p></blockquote><blockquote><p><strong>✅ SENHA + REFERÊNCIA DA BASE</strong><br><strong>PROMESSA, GÊNESIS 15:5</strong></p></blockquote></div></details>
+- TABELA: <table><thead><tr><th>Coluna</th></tr></thead><tbody><tr><td>célula</td></tr></tbody></table>. Use Só para dados realmente tabulares e curtos (horários por dia, quarto por monitor, base por time): no celular a tabela rola de lado, então no máximo 3 colunas e células de poucas palavras. Para qualquer outra coisa, use lista.
+- IMAGEM COM LEGENDA: <figure><img src="…" alt="…"><figcaption>legenda curta</figcaption></figure>.
 - Use <strong> para destacar o que é crítico (proibições, horários, alergias). Emojis são bem-vindos com moderação em títulos e itens de lista, pois ajudam a escanear no celular.
-- Preserve TODAS as tags <img> exatamente como estão (mesmo src, alt e posição relativa ao conteúdo), a menos que o usuário peça explicitamente para removê-las. Nunca crie novas <img>.
+- Preserve TODAS as tags <img> existentes exatamente como estão (mesmo src, alt e posição relativa ao conteúdo), a menos que o usuário peça explicitamente para removê-las. Nunca invente um src.
+
+## Criar ilustrações (você desenha pelo app)
+Você pode pedir ao app para GERAR uma imagem: escreva no documento uma tag sem src, com a descrição do desenho no atributo data-gen e um alt curto:
+<img data-gen="descrição visual detalhada do desenho, em português" alt="texto alternativo curto">
+O app renderiza a imagem, guarda no servidor e troca a tag pela imagem final; você não precisa (nem pode) fornecer o src.
+- Quando usar: o usuário pediu imagem/ilustração/capa/ícone, ou o documento é um material que a equipe lê e uma ilustração ajuda a entender (mapa simples de base, esquema de fila, capa de seção). Na dúvida, NÃO gere: cada imagem custa tempo e dados no celular.
+- No máximo 3 imagens por resposta, e só uma quando o pedido não falar de imagens.
+- A descrição em data-gen é visual e concreta (o que aparece, quantas pessoas/objetos, enquadramento). Não descreva texto dentro da imagem: o desenho nunca leva letras. Não peça fotos de pessoas reais, crianças reais identificáveis ou rostos em close.
+- Prefira colocá-la com legenda: <figure><img data-gen="…" alt="…"><figcaption>legenda curta</figcaption></figure>.
 - Preserve os links existentes (mesmo href). Não invente links.
-- Se o pedido for sobre um TRECHO selecionado, devolva apenas o HTML que substitui esse trecho, coerente com o documento ao redor (mesmo nível de título, mesmo tipo de lista).
-- Se o pedido não for uma edição possível (uma pergunta, um pedido sem relação com o texto, algo que exigiria inventar dados), devolva o documento sem alterações.`;
+- Se o pedido for sobre um TRECHO selecionado, devolva dentro dos marcadores apenas o HTML que substitui esse trecho, coerente com o documento ao redor (mesmo nível de título, mesmo tipo de lista).
+- Se a mudança pedida exigir inventar dados que você não tem, não edite: responda no chat dizendo qual informação falta.
+
+## Exemplos
+Usuário: "que horas começa o check-in?" → só conversa: "O check-in começa às 8h na igreja."
+Usuário: "esse texto está bom?" → só conversa, com o que melhoraria.
+Usuário: "resuma" → documento entre os marcadores + "Resumi mantendo horários e regras de segurança."`;
 }
 
 ai.use("*", requireAuth);
@@ -210,6 +252,95 @@ const editorGuard = createMiddleware<Env>(async (c, next) => {
 });
 ai.use("/suggest", editorGuard);
 ai.use("/transcribe", editorGuard);
+ai.use("/image", editorGuard);
+ai.use("/dedup-field", editorGuard);
+// admin / organizer / medical for kids and staff; a parent may sort the notes of their own kid ("parent" subject)
+ai.use("/camper-notes", async (c, next) => {
+  const body = (await c.req.raw.clone().json().catch(() => null)) as { subject?: unknown } | null;
+  if (body?.subject === "parent") {
+    if (c.get("activeRole") !== "parent") return c.json({ error: { code: "FORBIDDEN", message: "Sem permissão." } }, 403);
+    return next();
+  }
+  return editorGuard(c, next);
+});
+
+/**
+ * POST /api/ai/camper-notes — someone pasted free-text observations into the
+ * leftover box of a form; the model spreads them over the health / preference
+ * / emergency fields and returns what's left. `subject` says whose form:
+ *   "camper" (default) admin's kid form — every field
+ *   "parent"           parent's "Pontos de atenção" dialog — the medical block only
+ *   "staff"            admin's team member form — health fields, leftovers → healthNotes
+ * "live" mode: Opus 5 → Grok 4.5 → GPT 5.6, low reasoning (see
+ * camperNotesAi.ts). Aborts when the client disconnects (user hit save).
+ */
+ai.post("/camper-notes", async (c) => {
+  if (!config.ai.apiKey) return c.json({ error: { code: "AI_DISABLED", message: "Assistente de IA não configurado no servidor." } }, 503);
+  const body = (await c.req.json().catch(() => null)) as { notes?: unknown; current?: unknown; subject?: unknown } | null;
+  const subject: NotesSubject = body?.subject === "parent" || body?.subject === "staff" ? body.subject : "camper";
+  const notes = typeof body?.notes === "string" ? body.notes.trim() : "";
+  if (!notes) return c.json({ error: { code: "AI_MESSAGE", message: "Nada para organizar." } }, 400);
+  if (notes.length > NOTES_MAX_CHARS) return c.json({ error: { code: "AI_TOO_LONG", message: "Observações grandes demais." } }, 413);
+  const cur = (body?.current && typeof body.current === "object" ? body.current : {}) as Record<string, unknown>;
+  const strs = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+  const current: Partial<CamperNotesFields> = {
+    allergies: strs(cur.allergies),
+    drugAllergies: strs(cur.drugAllergies),
+    healthIssues: strs(cur.healthIssues),
+    neurodivergent: cur.neurodivergent === true,
+    medications: Array.isArray(cur.medications) ? (cur.medications as CamperNotesFields["medications"]).filter((m) => m && typeof m === "object" && typeof m.name === "string" && m.name.trim()) : [],
+    foodRestrictions: typeof cur.foodRestrictions === "string" ? cur.foodRestrictions : "",
+    healthNotes: typeof cur.healthNotes === "string" ? cur.healthNotes : "",
+    bedroomPreference: typeof cur.bedroomPreference === "string" ? cur.bedroomPreference : "",
+    emergencyContact: typeof cur.emergencyContact === "string" ? cur.emergencyContact : "",
+    weightKg: typeof cur.weightKg === "number" && Number.isFinite(cur.weightKg) ? cur.weightKg : null,
+    insurance: typeof cur.insurance === "string" ? cur.insurance : "",
+    insuranceCard: typeof cur.insuranceCard === "string" ? cur.insuranceCard : "",
+    cpf: typeof cur.cpf === "string" ? cur.cpf : "",
+    rg: typeof cur.rg === "string" ? cur.rg : "",
+    school: typeof cur.school === "string" ? cur.school : "",
+    schoolGrade: typeof cur.schoolGrade === "string" ? cur.schoolGrade : "",
+    church: typeof cur.church === "string" ? cur.church : "",
+    invitedBy: typeof cur.invitedBy === "string" ? cur.invitedBy : "",
+    guardianName: typeof cur.guardianName === "string" ? cur.guardianName : "",
+    guardianPhone: typeof cur.guardianPhone === "string" ? cur.guardianPhone : "",
+    guardianCpf: typeof cur.guardianCpf === "string" ? cur.guardianCpf : "",
+    guardianEmail: typeof cur.guardianEmail === "string" ? cur.guardianEmail : "",
+  };
+  const userId = c.get("userId");
+  const result = await sortCamperNotes(
+    { notes, current, subject },
+    {
+      mode: "live",
+      signal: c.req.raw.signal,
+      onAttempt: (model, r) => {
+        console.log(`AI camper-notes(${subject}) ${model} ${r.ok ? "ok" : `failed(${r.error})`} ${r.ms}ms tokens=${r.usage.promptTokens}+${r.usage.completionTokens}`);
+        const vendor = NOTES_MODES.live.models.find((m) => m.id === model)?.vendor ?? "openai";
+        if (r.error !== "cancelled") void recordAiUsage({ at: new Date(), vendor, model, kind: "camper_notes", userId, ...r.usage, ok: r.ok });
+      },
+    },
+  );
+  if (!result) return c.json({ error: { code: "AI_UPSTREAM", message: "O assistente não respondeu. Tente de novo." } }, 502);
+  return c.json({ fields: result.fields, model: result.model, vendor: result.vendor });
+});
+
+/**
+ * POST /api/ai/dedup-field { field, value } → { value, changed }
+ *
+ * Background clean-up of ONE free-text field: removes entries repeated after
+ * the observations sorter echoed a value it was told to keep. Best-effort on a
+ * cheap fast model (GLM 5.3 flash); returns the input unchanged on any failure,
+ * so the client can fire it on blur without ever blocking a save.
+ */
+ai.post("/dedup-field", async (c) => {
+  if (!config.ai.apiKey) return c.json({ error: { code: "AI_DISABLED", message: "Assistente de IA não configurado no servidor." } }, 503);
+  const body = (await c.req.json().catch(() => null)) as { field?: unknown; value?: unknown } | null;
+  if (!isDedupField(body?.field)) return c.json({ error: { code: "AI_FIELD", message: "Campo inválido." } }, 400);
+  const value = typeof body?.value === "string" ? body.value : "";
+  const r = await dedupField(body.field, value, c.req.raw.signal);
+  if (r.usage) void recordAiUsage({ at: new Date(), vendor: FIELD_DEDUP_MODEL.vendor, model: FIELD_DEDUP_MODEL.id, kind: "dedup_field", userId: c.get("userId"), ...r.usage, ok: true });
+  return c.json({ value: r.value, changed: r.changed });
+});
 
 ai.post("/edit", async (c) => {
   if (!config.ai.apiKey) return c.json({ error: { code: "AI_DISABLED", message: "Assistente de IA não configurado no servidor." } }, 503);
@@ -248,15 +379,15 @@ ai.post("/edit", async (c) => {
   const context =
     heading +
     (selection
-      ? `DOCUMENTO COMPLETO (apenas contexto, não devolva):\n${html || "<p></p>"}\n\nTRECHO SELECIONADO (devolva apenas o HTML que substitui este trecho):\n${selection}`
+      ? `DOCUMENTO COMPLETO (contexto):\n${html || "<p></p>"}\n\nTRECHO SELECIONADO (se você editar, devolva entre os marcadores apenas o HTML que substitui este trecho):\n${selection}`
       : html
-        ? `DOCUMENTO ATUAL (devolva o documento completo atualizado):\n${html}`
-        : "DOCUMENTO ATUAL: vazio. O usuário quer que você escreva o conteúdo inicial a partir do pedido, seguindo o tipo de documento descrito.");
+        ? `DOCUMENTO ATUAL (se você editar, devolva entre os marcadores o documento completo atualizado):\n${html}`
+        : "DOCUMENTO ATUAL: vazio. Se o usuário pedir o conteúdo, escreva-o entre os marcadores seguindo o tipo de documento descrito.");
 
   const convo: ChatMessage[] = [
     { role: "system", content: systemPrompt(ctx) },
     { role: "user", content: context },
-    { role: "assistant", content: "Entendido. Qual é o pedido?" },
+    { role: "assistant", content: "Entendido. O que você precisa?" },
     ...messages,
   ];
   // pictures ride along with the latest request, so the model can read/describe them
@@ -539,6 +670,33 @@ ai.post("/suggest", async (c) => {
   const title = needTitle && typeof parsed.title === "string" ? parsed.title.trim().replace(/\.$/, "").slice(0, 80) : undefined;
   const emoji = needEmoji && typeof parsed.emoji === "string" && isEmojiLike(parsed.emoji.trim()) ? parsed.emoji.trim() : undefined;
   return c.json({ ...(title ? { title } : {}), ...(emoji ? { emoji } : {}) });
+});
+
+/** longest picture description accepted (a prompt, not a document) */
+const MAX_IMAGE_PROMPT = 1_500;
+
+/**
+ * POST /api/ai/image — renders an illustration for the document. Returns the
+ * picture as a data url; the app shrinks it and uploads it to /api/files, so
+ * generated images live exactly where uploaded ones do.
+ */
+ai.post("/image", async (c) => {
+  if (!config.ai.apiKey) return c.json({ error: { code: "AI_DISABLED", message: "Assistente de IA não configurado no servidor." } }, 503);
+  const body = (await c.req.json().catch(() => null)) as { description?: unknown; shape?: unknown; model?: unknown; style?: unknown } | null;
+  const description = typeof body?.description === "string" ? body.description.trim().slice(0, MAX_IMAGE_PROMPT) : "";
+  if (!description) return c.json({ error: { code: "AI_MESSAGE", message: "Descreva a imagem que você quer." } }, 400);
+  const shape = isImageShape(body?.shape) ? body.shape : "wide";
+  const model = typeof body?.model === "string" ? body.model : undefined;
+  const img = await generateImage({ description, shape, model, style: body?.style !== false }, c.req.raw.signal);
+  if (!img) return c.json({ error: { code: "AI_UPSTREAM", message: "Não foi possível gerar a imagem agora. Tente de novo ou mude a descrição." } }, 502);
+  void recordAiUsage({ at: new Date(), vendor: img.vendor, model: img.model, kind: "image", userId: c.get("userId"), promptTokens: 0, completionTokens: 0, ok: true });
+  return c.json({ dataUrl: img.dataUrl, bytes: img.bytes, model: img.model, label: img.label, vendor: img.vendor, ms: img.ms });
+});
+
+/** GET /api/ai/image-models — which renderers the app may offer */
+ai.get("/image-models", async (c) => {
+  if (!config.ai.apiKey) return c.json({ enabled: false, models: [] });
+  return c.json({ enabled: true, models: IMAGE_MODELS.map(({ id, label, vendor }) => ({ id, label, vendor })) });
 });
 
 /** voice messages: browsers record webm/opus (Chrome, Firefox) or mp4/aac (Safari) */

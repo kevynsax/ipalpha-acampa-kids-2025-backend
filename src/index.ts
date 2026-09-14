@@ -6,6 +6,7 @@ import { config } from "./config";
 import { getDb } from "./db";
 import { ensureIndexes, listAdmins, loadAdminPhones } from "./models/users";
 import { ensureCategoryIndexes } from "./models/categories";
+import { ensureTransportIndexes } from "./models/transports";
 import { ensureBedroomIndexes } from "./models/bedrooms";
 import { ensureAdminsOnRoster, ensureStaffIndexes } from "./models/staff";
 import { ensureScheduleIndexes } from "./models/schedule";
@@ -17,10 +18,13 @@ import { ensureFileIndexes } from "./models/files";
 import { ensureTeamIndexes } from "./models/teams";
 import { ensureScoreIndexes } from "./models/scores";
 import { ensureCamperLookupIndexes } from "./models/camperLookups";
+import { ensureGalleryIndexes } from "./models/gallery";
 import teamRoutes from "./routes/teams";
 import scoreRoutes from "./routes/scores";
+import galleryRoutes from "./routes/gallery";
 import authRoutes from "./routes/auth";
 import categoryRoutes from "./routes/categories";
+import transportRoutes from "./routes/transports";
 import staffRoutes from "./routes/staff";
 import bedroomRoutes from "./routes/bedrooms";
 import scheduleRoutes from "./routes/schedule";
@@ -32,6 +36,7 @@ import instructionRoutes from "./routes/instructions";
 import occurrenceRoutes from "./routes/occurrences";
 import fileRoutes from "./routes/files";
 import aiRoutes from "./routes/ai";
+import cleanupRoutes from "./routes/cleanup";
 import { comteleEnabled } from "./services/comtele";
 import { rearmWindows, scheduleBirthdayNotices, scheduleCheckinReminder } from "./services/realtime";
 import { sendBirthdayNotices, sendCheckinReminder, syncParentWelcomes, syncWelcomes } from "./services/notify";
@@ -54,11 +59,13 @@ app.get("/health", (c) =>
 
 app.route("/api/auth", authRoutes);
 app.route("/api/categories", categoryRoutes);
+app.route("/api/transports", transportRoutes);
 app.route("/api/staff", staffRoutes);
 app.route("/api/bedrooms", bedroomRoutes);
 app.route("/api/schedule", scheduleRoutes);
 app.route("/api/campers", camperRoutes);
 app.route("/api/settings", settingsRoutes);
+app.route("/api/cleanup", cleanupRoutes);
 app.route("/api/preparation", preparationRoutes);
 app.route("/api/instructions", instructionRoutes);
 app.route("/api/occurrences", occurrenceRoutes);
@@ -67,6 +74,8 @@ app.route("/api/teams", teamRoutes);
 app.route("/api/scores", scoreRoutes);
 // images for the WYSIWYG editor (upload: admin / organizer / medical; read: public, unguessable ids)
 app.route("/api/files", fileRoutes);
+// the camp's photo album (upload / edit / publish: admin + photographers; viewing: published photos for everyone)
+app.route("/api/gallery", galleryRoutes);
 // AI helper for the WYSIWYG editor (proxies the OpenAI-compatible gateway; AI_API_KEY)
 app.route("/api/ai", aiRoutes);
 // WebSocket: full snapshot on connect + live updates after every write (see services/realtime.ts)
@@ -79,6 +88,7 @@ const db = await getDb();
 await ensureIndexes();
 await ensureCamperLookupIndexes();
 await ensureCategoryIndexes();
+await ensureTransportIndexes();
 await ensureStaffIndexes();
 await ensureBedroomIndexes();
 await ensureScheduleIndexes();
@@ -93,6 +103,7 @@ await ensureOccurrenceIndexes();
 await ensureFileIndexes();
 await ensureTeamIndexes(); // also migrates the legacy "equipe" category into teams
 await ensureScoreIndexes();
+await ensureGalleryIndexes();
 // every admin is on the team roster too (room, food restrictions, vest…); their record can't be deleted nor have the phone changed
 {
   await loadAdminPhones();

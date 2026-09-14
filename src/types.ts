@@ -77,6 +77,55 @@ export interface Category {
   updatedAt: Date;
 }
 
+// ── Transports (meios de transporte) ────────────────────────────────
+
+/** How a group reaches the camp: a chartered BUS (has a colour + number) or a CAR. */
+export const TRANSPORT_KINDS = ["bus", "car"] as const;
+export type TransportKind = (typeof TRANSPORT_KINDS)[number];
+
+/**
+ * The named bus colours. The name is a PREFIX of the bus label ("Ônibus Azul
+ * 2") and the hex tints the bus logo. Kept as an ordered list so the picker
+ * and the migration can iterate it; `hex` is what is stored on the vehicle.
+ */
+export const BUS_COLORS = [
+  { name: "Verde", hex: "#0f9a8a" },
+  { name: "Laranja", hex: "#f2843b" },
+  { name: "Amarelo", hex: "#f4c430" },
+  { name: "Vermelho", hex: "#e8503a" },
+  { name: "Azul", hex: "#3b6ff2" },
+  { name: "Roxo", hex: "#7d3bf2" },
+  { name: "Verde-escuro", hex: "#2fae60" },
+  { name: "Cinza", hex: "#444b52" },
+] as const;
+
+/** The name of a bus colour ("Azul"), or null for a custom/unknown hex. */
+export function busColorName(hex: string | null | undefined): string | null {
+  if (!hex) return null;
+  const h = hex.toLowerCase();
+  return BUS_COLORS.find((c) => c.hex === h)?.name ?? null;
+}
+
+/**
+ * A single vehicle. Lives in its OWN collection (not a category option) so a
+ * bus can carry a colour and a number, and cars stay distinct from buses.
+ * A BUS has no name — its label is derived from the number + colour (see
+ * `transportLabel`); only a CAR carries a free-text `name` ("Carro do João").
+ */
+export interface Transport {
+  _id: string;
+  kind: TransportKind;
+  /** cars only: free-text name ("Carro do João"); undefined for buses */
+  name?: string;
+  /** buses only: a hex colour ("#0f9a8a"); undefined for cars */
+  color?: string;
+  /** buses only: the vehicle number ("1", "2"…); undefined for cars */
+  number?: string;
+  order: number;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 // ── Bedrooms (quartos) ──────────────────────────────────────────────
 
 /** Which wing a bedroom belongs to — drives who can be assigned to it. */
@@ -112,7 +161,6 @@ export function bedroomCapacity(b: Pick<Bedroom, "bunkBeds" | "singleBeds">): nu
  * The staff record stores the chosen OPTION ids; labels come from the category.
  */
 export const STAFF_CATEGORY_KEYS = {
-  transportation: "transporte",
   allergies: "alergias",
   drugAllergies: "alergia-medicamentos",
   healthIssues: "condicao-cronica",
@@ -147,7 +195,7 @@ export interface Staff {
   active: boolean;
   /** id of a Team document (not a category) */
   team: string | null;
-  /** single-choice category option id */
+  /** id of a Transport document (bus / car), not a category option */
   transportation: string | null;
   /** id of a Bedroom document (not a category) */
   bedroom: string | null;
@@ -240,7 +288,6 @@ export interface ScoreEntry {
 // ── Campers (acampantes / crianças) ───────────────────────────────────
 
 export const CAMPER_CATEGORY_KEYS = {
-  transportation: "transporte",
   bed: "cama",
   allergies: "alergias",
   drugAllergies: "alergia-medicamentos",
@@ -274,7 +321,7 @@ export interface Camper {
   externalId: string;
   /** id of a Team document (not a category) */
   team: string | null;
-  /** category option ids */
+  /** id of a Transport document (bus / car), not a category option */
   transportation: string | null;
   bed: string | null;
   /** Bedroom id */
@@ -304,8 +351,10 @@ export interface Camper {
   guardianEmail: string;
   /** set when the kid arrived at the church and the parent confirmed the registration data */
   checkin: CamperCheckin | null;
-  /** set when the kid boarded the bus (the roll call done inside the vehicle) */
+  /** set when the kid boarded the bus going to the camp */
   busCheckin: CamperCheckin | null;
+  /** set when the kid boarded the bus returning to the church */
+  busReturnCheckin: CamperCheckin | null;
   /** when a PARENT last edited the "Pontos de atenção" (see CamperChangeLog) — null until they do */
   parentEditedAt: Date | null;
   createdAt: Date;
@@ -332,6 +381,8 @@ export interface CamperCheckin {
   byUserId: string;
   byName: string;
   byRole: Role;
+  /** how it happened when nobody did it by hand — e.g. the system checked the kid in when their wristband scored points */
+  note?: string;
 }
 
 // ── Occurrences (incident / situation records) ──────────────────────────
@@ -394,8 +445,8 @@ export interface CamperChangeLog {
   changes: { field: ParentEditableField; before: unknown; after: unknown }[];
 }
 
-/** The two roll calls on departure day: at the church gate, then inside the bus. */
-export const CHECKIN_KINDS = ["church", "bus"] as const;
+/** The kids' roll calls: church arrival, bus to camp, and bus back to church. */
+export const CHECKIN_KINDS = ["church", "bus", "bus_return"] as const;
 export type CheckinKind = (typeof CHECKIN_KINDS)[number];
 
 /** Permanent audit trail of every check-in and undo (survives the undo itself). */
@@ -536,6 +587,33 @@ export interface StoredFile {
   createdAt: Date;
 }
 
+// ── Gallery (photos of the camp) ────────────────────────────────────────
+
+/**
+ * One photo of the camp, uploaded by a PHOTOGRAPHER (Settings → Fotógrafos).
+ * May be tied to a programme event (`eventId`) or be general (null). The
+ * full image lives in the `files` collection (same as the WYSIWYG uploads);
+ * a small thumbnail is kept inside this document so the grid loads fast.
+ *
+ * Who may SEE the photos is not stored here: the whole album is published at
+ * once through `settings.galleryPublished`.
+ */
+export interface GalleryPhoto {
+  /** random hex id — unguessable, so GET /api/gallery/:id/thumb needs no auth */
+  _id: string;
+  /** id of the StoredFile with the full-size image */
+  fileId: string;
+  /** sort key, biggest first; seeded from the upload time, rewritten by drag & drop */
+  order: number;
+  caption: string;
+  /** id of a CampEvent this photo belongs to; null = a general camp photo */
+  eventId: string | null;
+  byUserId: string;
+  byName: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 // ── Settings (admin-managed, one document for the whole camp) ─────────────
 
 /**
@@ -581,6 +659,8 @@ export interface NotificationSettings {
   parentWelcome: boolean;
   /** a kid's birthday falls on a camp day → at 07:45 (São Paulo) that day the whole team of the kid's room is texted */
   birthdays: boolean;
+  /** photos were PUBLISHED in the album → every team member (inside their window) and every parent (inside theirs) is texted */
+  photoPublishes: boolean;
 }
 
 /** One-shot reminder to the whole team to do their check-in. */
@@ -605,7 +685,7 @@ export interface CheckinWindow {
  *                    camper (health included — they confirm it with the parents)
  *                    and every bedroom.
  *   busHelpers     — bus roll call: each entry links a person to ONE vehicle
- *                    (a transportation option). The person stands at the DOOR
+ *                    (a Transport document). The person stands at the DOOR
  *                    of that vehicle confirming the kid the parents handed over
  *                    is now with our team — they do not necessarily ride in it,
  *                    so this link is independent from `staff.transportation`.
@@ -619,7 +699,7 @@ export interface StaffList {
   staffIds: string[];
 }
 
-/** One bus helper at the door of one vehicle (a `transporte` category option id). */
+/** One bus helper at the door of one vehicle (a Transport document id). */
 export interface BusHelper {
   staffId: string;
   vehicleId: string;
@@ -643,6 +723,8 @@ export interface Settings {
   checkinLocations: CheckinLocation[];
   notifications: NotificationSettings;
   checkinWindow: CheckinWindow;
+  /** return-trip bus roll call window; separate because it happens days after departure */
+  busReturnWindow: CheckinWindow;
   checkinHelpers: StaffList;
   busHelpers: BusHelperList;
   /**
@@ -681,6 +763,12 @@ export interface Settings {
    */
   vestHelpers: StaffList;
   /**
+   * PHOTOGRAPHERS (no time window): team members who upload the camp's
+   * photos and decide when each one is published. Everyone — parents and
+   * team — sees the published photos on the Fotos tab.
+   */
+  photographers: StaffList;
+  /**
    * When ORDINARY team members (not organizers, check-in helpers, medical
    * team or parent contacts) may use the app. Both ends null = always. Outside
    * it the server sends them nothing (see services/scope.ts).
@@ -709,6 +797,13 @@ export interface Settings {
    * off, every score write is refused (SCORE_CLOSED).
    */
   scoreDraft: boolean;
+  /**
+   * The PHOTO ALBUM is visible to the camp. While false only the photographers
+   * (and the admin / organizers) see the Fotos tab's pictures; flipping it on
+   * publishes the whole album at once and texts everyone. Publishing is a
+   * property of the album, never of a single photo.
+   */
+  galleryPublished: boolean;
   /** the "do your check-in" SMS to the whole team, scheduled for one instant */
   checkinReminder: CheckinReminder;
   /**

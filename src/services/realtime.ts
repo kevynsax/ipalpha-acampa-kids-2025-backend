@@ -10,7 +10,7 @@ import { todayInSaoPaulo } from "../utils";
  * ~40 rooms, ~50 events), which keeps the client logic a simple "replace".
  */
 
-export const COLLECTIONS = ["campers", "staff", "bedrooms", "categories", "teams", "scores", "roles", "events", "preparation", "instructions", "occurrences", "settings"] as const;
+export const COLLECTIONS = ["campers", "staff", "bedrooms", "categories", "transports", "teams", "scores", "roles", "events", "preparation", "instructions", "occurrences", "gallery", "settings"] as const;
 export type Collection = (typeof COLLECTIONS)[number];
 export type Snapshot = Partial<Record<Collection, unknown>>;
 
@@ -149,14 +149,14 @@ export async function rearmWindows(): Promise<void> {
   const [{ getSettings }, { listEvents }, { parentWindowOf }] = await Promise.all([import("../models/settings"), import("../models/schedule"), import("./camp")]);
   const s = await getSettings();
   const pw = parentWindowOf(s, await listEvents());
-  scheduleCheckinWindow(s.checkinWindow, s.staffAccessWindow, pw, s.parentAccessWindow);
+  scheduleCheckinWindow(s.checkinWindow, s.staffAccessWindow, pw, s.parentAccessWindow, s.busReturnWindow);
 }
 
-export function scheduleCheckinWindow(w: CheckinWindow, staffAccess?: CheckinWindow, parents?: CheckinWindow, parentAccess?: CheckinWindow): void {
+export function scheduleCheckinWindow(w: CheckinWindow, staffAccess?: CheckinWindow, parents?: CheckinWindow, parentAccess?: CheckinWindow, busReturn?: CheckinWindow): void {
   for (const t of edgeTimers) clearTimeout(t);
   edgeTimers = [];
   const now = Date.now();
-  for (const edge of [w.from, w.until, staffAccess?.from ?? null, staffAccess?.until ?? null, parents?.from ?? null, parents?.until ?? null, parentAccess?.from ?? null, parentAccess?.until ?? null]) {
+  for (const edge of [w.from, w.until, busReturn?.from ?? null, busReturn?.until ?? null, staffAccess?.from ?? null, staffAccess?.until ?? null, parents?.from ?? null, parents?.until ?? null, parentAccess?.from ?? null, parentAccess?.until ?? null]) {
     if (!edge) continue;
     const wait = edge.getTime() - now + 500; // a hair after, so the check sees the new state
     if (wait <= 0 || wait > MAX_TIMEOUT) continue;

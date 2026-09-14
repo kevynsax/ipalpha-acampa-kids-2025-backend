@@ -23,6 +23,7 @@ import {
   type ScheduleRoleData,
 } from "../models/schedule";
 import { listStaff } from "../models/staff";
+import { onEventDeleted } from "./gallery";
 import type { CampEvent, EventAssignment, Role, ScheduleRole, SessionUser } from "../types";
 
 interface Env {
@@ -453,8 +454,9 @@ schedule.delete("/events/:id/assignments/:staffId", ORGANIZER, async (c) => {
 
 schedule.delete("/events/:id", ORGANIZER, async (c) => {
   const existing = await findEventById(c.req.param("id"));
-  const ok = existing ? await deleteEvent(existing._id) : false;
-  if (!ok) return fail(c, "EVENT_NOT_FOUND", "Evento não encontrado.", 404);
+  if (!existing || !(await deleteEvent(existing._id))) return fail(c, "EVENT_NOT_FOUND", "Evento não encontrado.", 404);
+  // photos tied to the event become general photos (never a dangling id)
+  void onEventDeleted(existing._id);
   publish("events");
   void rearmWindows(); // the parents' window ends with the last event
   void notifyEventChange(existing, null);

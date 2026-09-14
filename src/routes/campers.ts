@@ -9,9 +9,10 @@ import { CHECKIN_FIELD, deleteCamper, findCamperById, insertCamper, listCamperCh
 import { FOREIGN_LOOKUP_ALERT_AT, FOREIGN_LOOKUP_BLOCK_AT, findStaffById, findStaffByPhone, listStaff, markForeignLookupAlerted, recordForeignLookup } from "../models/staff";
 import { CAMPER_CATEGORY_KEYS, PARENT_EDITABLE_FIELDS, type Camper, type CamperChangeLog, type CheckinKind, type ParentEditableField, type Role, type SessionUser } from "../types";
 import { normalizeBrazilPhone, titleCaseName } from "../utils";
-import { bedroomFullMessage, isInvalid, parseBedroom, parseMedications, parseMulti, parseSingle, parseTeam, parseText } from "./_validate";
+import { bedroomFullMessage, isInvalid, parseBedroom, parseMedications, parseMulti, parseSingle, parseTeam, parseText, parseTransport } from "./_validate";
 import { serializeStaffList } from "./staff";
 import { camperVisibility, canParentEdit, canRunBusCheckin, canRunCheckin, resolveScope, type Scope } from "../services/scope";
+import { campInProgress, campPeriod } from "../services/camp";
 
 interface Env {
   Variables: {
@@ -73,6 +74,7 @@ export function serializeCamper(k: Camper) {
     guardianEmail: k.guardianEmail,
     checkin: k.checkin,
     busCheckin: k.busCheckin,
+    busReturnCheckin: k.busReturnCheckin,
     parentEditedAt: k.parentEditedAt,
     createdAt: k.createdAt,
     updatedAt: k.updatedAt,
@@ -101,8 +103,9 @@ const CONTACT_BLANK = {
 /**
  * Serializes `k` according to the viewer's scope, or `null` when invisible.
  * A room caretaker / helper gets a CARE record (`contactsHidden: true`):
- * everything they need to look after the kid — health, notes, preferences —
- * but no guardian / emergency / document data. A bus helper gets the kids
+ * everything they need to look after the kid — health, notes, preferences and
+ * the guardian's name + phone (to reach the parents) — but no emergency
+ * contact, documents, insurance or e-mail. A bus helper gets the kids
  * outside their room as NAME-ONLY records (`redacted: true`): what the roll
  * call needs — name, age, vehicle, room, team and the check-in stamps — and
  * nothing about health, contacts or notes.
@@ -115,7 +118,7 @@ export function serializeCamperFor(k: Camper, scope: Scope) {
   if (vis === "full" && !scope.all && scope.kidsRoomsDraft && scope.parentKids.length > 0) return { ...full, bedroom: null, bed: null, caretakerId: null };
   if (vis === "full") return full;
   // neurodivergence is a diagnosis: admin + medical team only
-  if (vis === "care") return { ...full, ...CONTACT_BLANK, neurodivergent: false, contactsHidden: true };
+  if (vis === "care") return { ...full, ...CONTACT_BLANK, guardianName: k.guardianName, guardianPhone: k.guardianPhone, neurodivergent: false, contactsHidden: true };
   return {
     ...full,
     ...CONTACT_BLANK,
@@ -175,15 +178,16 @@ async function buildPatch(
     patch.team = v;
   }
 
-  const singles: ["transportation" | "bed", string][] = [
-    ["transportation", "Transporte"],
-    ["bed", "Cama"],
-  ];
-  for (const [field, label] of singles) {
-    if (!has(field)) continue;
-    const v = await parseSingle(body[field], CAMPER_CATEGORY_KEYS[field], label);
-    if (isInvalid(v)) return { code: `${field.toUpperCase()}_INVALID`, message: v.error };
-    patch[field] = v;
+  if (has("transportation")) {
+    const v = await parseTransport(body.transportation);
+    if (isInvalid(v)) return { code: "TRANSPORTATION_INVALID", message: v.error };
+    patch.transportation = v;
+  }
+
+  if (has("bed")) {
+    const v = await parseSingle(body.bed, CAMPER_CATEGORY_KEYS.bed, "Cama");
+    if (isInvalid(v)) return { code: "BED_INVALID", message: v.error };
+    patch.bed = v;
   }
 
   if (has("bedroom")) {
@@ -293,13 +297,17 @@ campers.get("/", requireRole("admin", "staff", "health_staff", "parent"), async 
  * GET for a kid outside the realtime snapshot). Any team member / admin may
  * open a kid's badge: when the kid already belongs to their scope the CARE
  * (or FULL) record is returned with `belonged: true` and nothing is counted;
- * otherwise they get a CARE record (`contactsHidden`, no guardian data) with
+ * otherwise they get a CARE record (`contactsHidden`, no emergency / documents) with
  * `belonged: false` + a warning, the scan is logged, and the staff member's
  * out-of-scope counter ticks (distinct kids). ≥3 → SMS to every admin; ≥5 →
  * further out-of-scope lookups are blocked until Settings → Geral zeroes it.
- * Parents never use this endpoint.
+ * Parents never use this endpoint. Only WHILE THE CAMP IS HAPPENING (first
+ * programme day → end of the last event): outside it the badge means nothing
+ * and the endpoint answers 403 `CAMP_NOT_ACTIVE` (admins / organizers
+ * included — they have the regular pages).
  */
 campers.get("/lookup/:id", requireRole("admin", "staff", "health_staff"), async (c) => {
+  if (!campInProgress(await campPeriod())) return fail(c, "CAMP_NOT_ACTIVE", "A leitura de crachás só funciona durante o acampamento.", 403);
   const user = c.get("user");
   const scope = await resolveScope(user);
   const k = await findCamperById(c.req.param("id"));
@@ -395,7 +403,11 @@ campers.get("/:id/detail", requireRole("admin", "staff", "health_staff"), async 
 // ── check-in: admin, or a team member the admin listed as a CHECK-IN HELPER while
 //    the configured window is open (Settings → Ajudantes do check-in; see scope.ts) ──
 
-const KIND_LABEL: Record<CheckinKind, string> = { church: "check-in", bus: "check-in no ônibus" };
+const KIND_LABEL: Record<CheckinKind, string> = {
+  church: "check-in",
+  bus: "check-in no ônibus para o acampamento",
+  bus_return: "check-in no ônibus de volta para a igreja",
+};
 const TEAM_OR_ADMIN = requireRole("admin", "staff", "health_staff");
 
 /**
@@ -408,22 +420,30 @@ const TEAM_OR_ADMIN = requireRole("admin", "staff", "health_staff");
 async function doCheckin(c: Context<Env>, kind: CheckinKind, action: "checkin" | "undo") {
   const [existing, scope] = await Promise.all([findCamperById(c.req.param("id") ?? ""), resolveScope(c.get("user"))]);
   // unknown kid: admins / helpers get a 404, everyone else the same 403 (no probing)
-  const allowed = existing ? (kind === "bus" ? canRunBusCheckin(scope, existing) : canRunCheckin(scope)) : canRunCheckin(scope) || (!scope.all && scope.busHelperVehicle !== null);
+  const allowed = existing
+    ? kind === "church"
+      ? canRunCheckin(scope)
+      : canRunBusCheckin(scope, existing, kind)
+    : canRunCheckin(scope) || (!scope.all && scope.busHelperVehicle !== null);
   if (!allowed) return fail(c, "CHECKIN_WINDOW_CLOSED", "O check-in não está liberado para você neste momento.", 403);
   if (!existing) return fail(c, "CAMPER_NOT_FOUND", "Acampante não encontrado.", 404);
   const current = existing[CHECKIN_FIELD[kind]];
   if (action === "checkin" && current) return fail(c, "ALREADY_CHECKED_IN", `${existing.name} já fez ${KIND_LABEL[kind]}.`, 409);
   if (action === "undo" && !current) return fail(c, "NOT_CHECKED_IN", `${existing.name} ainda não fez ${KIND_LABEL[kind]}.`, 409);
-  // the bus roll call only makes sense after the parent handed the kid over at the church
+  // outbound bus: the parent must have handed the kid over at church first
   if (kind === "bus" && action === "checkin" && !existing.checkin) {
     return fail(c, "CHURCH_CHECKIN_REQUIRED", `${existing.name} ainda não fez o check-in na igreja.`, 409);
+  }
+  // return bus: only kids who actually travelled to camp can board on the way back
+  if (kind === "bus_return" && action === "checkin" && !existing.busCheckin) {
+    return fail(c, "OUTBOUND_BUS_CHECKIN_REQUIRED", `${existing.name} não fez o check-in do ônibus na ida.`, 409);
   }
   const user = c.get("user");
   const stamp = { at: new Date(), byUserId: user.id, byName: user.name, byRole: user.activeRole };
   const updated = await setCamperCheckin(existing._id, kind, action === "checkin" ? stamp : null);
   await logCheckin({ camperId: existing._id, camperName: existing.name, kind, action, ...stamp });
   publish("campers");
-  // the kid is on the bus → tell the parent (undo sends nothing)
+  // the kid left for camp → tell the parent (return and undo send nothing)
   if (kind === "bus" && action === "checkin") void notifyBusCheckin(updated!);
   // the answer is scoped too: a bus helper gets the name-only record back
   return c.json({ camper: serializeCamperFor(updated!, scope) });
@@ -433,9 +453,13 @@ async function doCheckin(c: Context<Env>, kind: CheckinKind, action: "checkin" |
 campers.post("/:id/checkin", TEAM_OR_ADMIN, (c) => doCheckin(c, "church", "checkin"));
 campers.delete("/:id/checkin", TEAM_OR_ADMIN, (c) => doCheckin(c, "church", "undo"));
 
-/** POST /api/campers/:id/checkin/bus — boarded the bus (roll call inside the vehicle). DELETE undoes. */
+/** POST /api/campers/:id/checkin/bus — boarded the bus going to camp. DELETE undoes. */
 campers.post("/:id/checkin/bus", TEAM_OR_ADMIN, (c) => doCheckin(c, "bus", "checkin"));
 campers.delete("/:id/checkin/bus", TEAM_OR_ADMIN, (c) => doCheckin(c, "bus", "undo"));
+
+/** POST /api/campers/:id/checkin/bus-return — boarded the bus returning to church. DELETE undoes. */
+campers.post("/:id/checkin/bus-return", TEAM_OR_ADMIN, (c) => doCheckin(c, "bus_return", "checkin"));
+campers.delete("/:id/checkin/bus-return", TEAM_OR_ADMIN, (c) => doCheckin(c, "bus_return", "undo"));
 
 /** GET /api/campers/checkin/log — full audit trail (admin). GET /api/campers/:id/checkin/log — one kid. */
 function serializeLog(l: Awaited<ReturnType<typeof listCheckinLog>>[number]) {

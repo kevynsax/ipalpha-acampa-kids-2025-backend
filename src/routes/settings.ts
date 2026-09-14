@@ -1,17 +1,18 @@
 import { Hono, type Context } from "hono";
 import { requireAuth } from "../middleware/auth";
 import { requireAdmin, requireManager } from "../middleware/roles";
-import { findCategoryByKey } from "../models/categories";
+import { listTransports } from "../models/transports";
 import { checkinWindowOpen, getSettings, staffAccessOpen, updateSettings } from "../models/settings";
-import { FOREIGN_LOOKUP_ALERT_AT, listForeignLookupOffenders, listStaff, resetForeignLookups, resetStaffCheckins, resetStaffVests } from "../models/staff";
+import { FOREIGN_LOOKUP_ALERT_AT, listForeignLookupOffenders, listStaff, resetForeignLookups, resetStaffCheckins, resetStaffPhotosNotice, resetStaffVests } from "../models/staff";
 import { clearCheckinLog, resetCamperCheckins } from "../models/campers";
+import { resetParentPhotosNotice } from "../models/users";
 import { comteleEnabled } from "../services/comtele";
 import { normalizeBrazilPhone } from "../utils";
 import { notifyAccessListChange, sendBirthdayNotices, syncParentWelcomes, syncWelcomes, welcomePreview } from "../services/notify";
 import { evictStaffOutsideWindow, publish, rearmWindows, scheduleCheckinReminder } from "../services/realtime";
 import { listEvents } from "../models/schedule";
 import { parentWindowOf, parentWindowOpen } from "../services/camp";
-import { CAMPER_CATEGORY_KEYS, type BusHelperList, type CheckinLocation, type CheckinWindow, type NotificationSettings, type ParentContact, type Role, type SessionUser, type Settings, type SmsRedirect, type StaffList } from "../types";
+import { type BusHelperList, type CheckinLocation, type CheckinWindow, type NotificationSettings, type ParentContact, type Role, type SessionUser, type Settings, type SmsRedirect, type StaffList } from "../types";
 
 interface Env {
   Variables: {
@@ -52,9 +53,11 @@ export async function serializeSettings(s: Settings) {
     parentWindow: serializeWindow(pw, parentWindowOpen(pw)),
     notifications: s.notifications,
     checkinWindow: serializeWindow(s.checkinWindow, s.checkinTestMode || checkinWindowOpen(s.checkinWindow)),
+    busReturnWindow: serializeWindow(s.busReturnWindow, s.checkinTestMode || checkinWindowOpen(s.busReturnWindow)),
     checkinTestMode: s.checkinTestMode,
     kidsRoomsDraft: s.kidsRoomsDraft,
     scoreDraft: s.scoreDraft,
+    galleryPublished: s.galleryPublished,
     staffAccessWindow: serializeWindow(s.staffAccessWindow, staffAccessOpen(s.staffAccessWindow)),
     parentAccessWindow: serializeWindow(s.parentAccessWindow, staffAccessOpen(s.parentAccessWindow)),
     checkinReminder: { at: s.checkinReminder.at?.toISOString() ?? null, sentAt: s.checkinReminder.sentAt?.toISOString() ?? null },
@@ -66,6 +69,7 @@ export async function serializeSettings(s: Settings) {
     scoreHelpers: { staffIds: s.scoreHelpers.staffIds },
     medicalStaff: { staffIds: s.medicalStaff.staffIds },
     vestHelpers: { staffIds: s.vestHelpers.staffIds },
+    photographers: { staffIds: s.photographers.staffIds },
     parentContacts: s.parentContacts.map((contact) => ({ ...contact })),
     /** whether SMS can actually go out (Comtele key configured) — read-only, shown on the settings page */
     smsEnabled: comteleEnabled(),
@@ -98,7 +102,7 @@ function parseNotifications(value: unknown, current: NotificationSettings): Noti
   if (!value || typeof value !== "object") return { error: "Informe as notificações." };
   const o = value as Record<string, unknown>;
   const out = { ...current };
-  for (const k of ["bedroomChanges", "roleChanges", "checkinConfirmation", "contentChanges", "parentContentChanges", "staffChanges", "enrolments", "occurrences", "checkinReminder", "parentEdits", "busCheckin", "parentWelcome", "birthdays"] as const) {
+  for (const k of ["bedroomChanges", "roleChanges", "checkinConfirmation", "contentChanges", "parentContentChanges", "staffChanges", "enrolments", "occurrences", "checkinReminder", "parentEdits", "busCheckin", "parentWelcome", "birthdays", "photoPublishes"] as const) {
     if (o[k] === undefined) continue;
     if (typeof o[k] !== "boolean") return { error: "Cada notificação deve ser ligada ou desligada." };
     out[k] = o[k] as boolean;
@@ -224,7 +228,7 @@ async function parseParentContacts(value: unknown): Promise<ParentContact[] | { 
   return contacts;
 }
 
-/** { helpers: [{ staffId, vehicleId }] } — active staff, active `transporte` option, one vehicle per person */
+/** { helpers: [{ staffId, vehicleId }] } — active staff, an existing Transport (bus / car), one vehicle per person */
 async function parseBusHelpers(value: unknown): Promise<BusHelperList | { error: string }> {
   const o = value && typeof value === "object" ? (value as Record<string, unknown>) : null;
   const raw = o ? o.helpers : undefined;
@@ -236,11 +240,11 @@ async function parseBusHelpers(value: unknown): Promise<BusHelperList | { error:
     helpers.push({ staffId: h.staffId, vehicleId: h.vehicleId });
   }
   if (new Set(helpers.map((h) => h.staffId)).size !== helpers.length) return { error: "Cada pessoa só pode ficar na porta de um veículo." };
-  const [staff, transport] = await Promise.all([listStaff({ active: true }), findCategoryByKey(CAMPER_CATEGORY_KEYS.transportation)]);
+  const [staff, transports] = await Promise.all([listStaff({ active: true }), listTransports()]);
   const active = new Set(staff.map((s) => s._id));
   if (helpers.some((h) => !active.has(h.staffId))) return { error: "Alguma pessoa não existe ou está inativa na equipe." };
-  const vehicles = new Set((transport?.options ?? []).filter((v) => v.active).map((v) => v.id));
-  if (helpers.some((h) => !vehicles.has(h.vehicleId))) return { error: "Algum veículo não existe ou está inativo." };
+  const vehicles = new Set(transports.map((v) => v._id));
+  if (helpers.some((h) => !vehicles.has(h.vehicleId))) return { error: "Algum veículo não existe." };
   return { helpers };
 }
 
@@ -274,8 +278,8 @@ settings.put("/", requireManager, async (c) => {
     patch.notifications = n;
   }
   let windowChanged = false;
-  const LIST_ERROR = { checkinHelpers: "HELPERS_INVALID", organizers: "ORGANIZERS_INVALID", gameOrganizers: "GAME_ORGANIZERS_INVALID", scoreHelpers: "SCORE_HELPERS_INVALID", medicalStaff: "MEDICAL_INVALID", vestHelpers: "VEST_HELPERS_INVALID" } as const;
-  for (const key of ["checkinHelpers", "organizers", "gameOrganizers", "scoreHelpers", "medicalStaff", "vestHelpers"] as const) {
+  const LIST_ERROR = { checkinHelpers: "HELPERS_INVALID", organizers: "ORGANIZERS_INVALID", gameOrganizers: "GAME_ORGANIZERS_INVALID", scoreHelpers: "SCORE_HELPERS_INVALID", medicalStaff: "MEDICAL_INVALID", vestHelpers: "VEST_HELPERS_INVALID", photographers: "PHOTOGRAPHERS_INVALID" } as const;
+  for (const key of ["checkinHelpers", "organizers", "gameOrganizers", "scoreHelpers", "medicalStaff", "vestHelpers", "photographers"] as const) {
     if (body[key] === undefined) continue;
     const l = await parseStaffList(body[key]);
     if ("error" in l) return fail(c, LIST_ERROR[key], l.error);
@@ -295,6 +299,12 @@ settings.put("/", requireManager, async (c) => {
     const w = parseWindow(body.checkinWindow);
     if ("error" in w) return fail(c, "WINDOW_INVALID", w.error);
     patch.checkinWindow = w;
+    windowChanged = true;
+  }
+  if (body.busReturnWindow !== undefined) {
+    const w = parseWindow(body.busReturnWindow);
+    if ("error" in w) return fail(c, "WINDOW_INVALID", w.error);
+    patch.busReturnWindow = w;
     windowChanged = true;
   }
   if (body.staffAccessWindow !== undefined) {
@@ -330,6 +340,11 @@ settings.put("/", requireManager, async (c) => {
     patch.kidsRoomsDraft = body.kidsRoomsDraft;
     draftChanged = true;
   }
+  if (body.galleryPublished !== undefined) {
+    if (typeof body.galleryPublished !== "boolean") return fail(c, "PUBLISHED_INVALID", "A publicação das fotos deve ser ligada ou desligada.");
+    patch.galleryPublished = body.galleryPublished;
+  }
+
   if (body.scoreDraft !== undefined) {
     if (typeof body.scoreDraft !== "boolean") return fail(c, "SCORE_DRAFT_INVALID", "O rascunho do placar deve ser ligado ou desligado.");
     patch.scoreDraft = body.scoreDraft;
@@ -344,11 +359,11 @@ settings.put("/", requireManager, async (c) => {
   const previous = await getSettings();
   const updated = await updateSettings(patch);
   void notifyAccessListChange(previous, updated); // fire-and-forget: the SMS never delays the write
-  const scopeChanged = patch.organizers || patch.gameOrganizers || patch.scoreHelpers || patch.checkinHelpers || patch.busHelpers || patch.medicalStaff || patch.vestHelpers || windowChanged || draftChanged;
+  const scopeChanged = patch.organizers || patch.gameOrganizers || patch.scoreHelpers || patch.checkinHelpers || patch.busHelpers || patch.medicalStaff || patch.vestHelpers || patch.photographers || windowChanged || draftChanged;
   if (scopeChanged) {
     // Any access-list change may alter which records a phone is allowed to keep.
     // Re-send every scoped collection so gains and revocations happen live.
-    publish("campers", "staff", "bedrooms", "roles", "events", "occurrences", "scores");
+    publish("campers", "staff", "bedrooms", "roles", "events", "occurrences", "scores", "gallery");
     // someone may have just left every list while the team window is closed: log them out now
     if (!windowChanged) void evictStaffOutsideWindow().catch((err) => console.error("realtime: evict failed", err));
   }
@@ -357,6 +372,11 @@ settings.put("/", requireManager, async (c) => {
   publish("settings");
   // the date or the toggle changed: re-arm (a pending past instant with the toggle now on fires at once)
   if (reminderChanged || patch.notifications) scheduleCheckinReminder(updated.checkinReminder.at);
+  // the album notice is a ONCE-PER-CAMP SMS: turning it back ON re-arms it for everybody
+  if (patch.notifications?.photoPublishes && !previous.notifications.photoPublishes) {
+    const [staff, parents] = await Promise.all([resetStaffPhotosNotice(), resetParentPhotosNotice()]);
+    if (staff + parents > 0) console.log(`🧹 album notice re-armed: ${staff} staff, ${parents} parents`);
+  }
   // a welcome toggle switched ON: whoever is inside their window and was never welcomed gets the SMS now
   if (patch.notifications?.enrolments && !previous.notifications.enrolments) void syncWelcomes();
   if (patch.notifications?.parentWelcome && !previous.notifications.parentWelcome) void syncParentWelcomes();
@@ -375,7 +395,7 @@ settings.put("/", requireManager, async (c) => {
 /** GET /api/settings/welcome-preview — admin. How many people would get the welcome SMS RIGHT NOW if the toggle were on (never welcomed, inside their window, with a phone). */
 settings.get("/welcome-preview", requireAdmin, async (c) => c.json(await welcomePreview()));
 
-/** POST /api/settings/checkin/reset — admin only. Clears EVERY check-in (kids' church + bus, team), the team vests and the audit log, so the process can be rehearsed. */
+/** POST /api/settings/checkin/reset — admin only. Clears EVERY check-in (kids' church + both bus trips, team), the team vests and the audit log, so the process can be rehearsed. */
 settings.post("/checkin/reset", requireManager, async (c) => {
   const [campers, staff, vests] = await Promise.all([resetCamperCheckins(), resetStaffCheckins(), resetStaffVests()]);
   await clearCheckinLog();

@@ -1,4 +1,6 @@
 import { listCategories } from "../models/categories";
+import { listTransports } from "../models/transports";
+import { transportLabel } from "../routes/transports";
 import { listBedrooms } from "../models/bedrooms";
 import { listEvents, listRoles } from "../models/schedule";
 import { listInstructions } from "../models/instructions";
@@ -46,10 +48,11 @@ function textOf(html: string, max = 1500): string {
 }
 
 async function labelMaps() {
-  const [cats, teams, staff] = await Promise.all([listCategories(), listTeams(), listStaff({ active: true })]);
+  const [cats, teams, transports, staff] = await Promise.all([listCategories(), listTeams(), listTransports(), listStaff({ active: true })]);
   const option = new Map<string, string>();
   for (const c of cats) for (const o of c.options) option.set(o.id, o.label);
   for (const t of teams) option.set(t._id, t.name); // teams are looked up like options (Staff.team / Camper.team)
+  for (const t of transports) option.set(t._id, transportLabel(t)); // vehicles too (Staff.transportation / busHelpers.vehicleId)
   const staffName = new Map(staff.map((s) => [s._id, s.name]));
   return { cats, staff, option, staffName };
 }
@@ -160,12 +163,13 @@ export const AI_TOOLS: AiTool[] = [
   {
     name: "get_categories",
     description:
-      "As listas fechadas do app: os TIMES (nome, cor, coringa) e as categorias com suas opções: meios de transporte (ônibus/vans), posição da cama, alergias, alergias a medicamentos, condições crônicas. Use para citar nomes corretos de times, veículos ou opções de saúde.",
+      "As listas fechadas do app: os TIMES (nome, cor, coringa), os TRANSPORTES (ônibus com cor e número, ou carros) e as categorias com suas opções: posição da cama, alergias, alergias a medicamentos, condições crônicas. Use para citar nomes corretos de times, veículos ou opções de saúde.",
     parameters: NO_ARGS,
     run: async () => {
-      const [cats, teams, { staffName }] = await Promise.all([listCategories(), listTeams(), labelMaps()]);
+      const [cats, teams, transports, { staffName }] = await Promise.all([listCategories(), listTeams(), listTransports(), labelMaps()]);
       return {
         times: teams.map((t) => ({ nome: t.name, cor: t.color, coringa: t.jokerStaffId ? (staffName.get(t.jokerStaffId) ?? undefined) : undefined })),
+        transportes: transports.map((t) => (t.kind === "bus" ? { nome: transportLabel(t), tipo: "ônibus", cor: t.color ?? undefined, numero: t.number ?? undefined } : { nome: t.name, tipo: "carro" })),
         categorias: cats.map((c) => ({ categoria: `${c.emoji} ${c.name}`.trim(), chave: c.key, aplica_a: c.appliesTo, escolha: c.selection === "single" ? "uma opção" : "várias opções", descricao: c.description || undefined, opcoes: c.options.filter((o) => o.active).map((o) => o.label) })),
       };
     },

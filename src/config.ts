@@ -5,6 +5,14 @@ export const config = {
   mongoUri: process.env.MONGODB_URI ?? "mongodb://localhost:27017",
   dbName: process.env.MONGODB_DB ?? "camping",
 
+  /**
+   * Where uploaded images live on disk (editor pictures + the photo album).
+   * Point it at a mounted volume in production — Mongo keeps only the
+   * metadata (name, type, size, uploader), the bytes are plain files named
+   * by their unguessable id.
+   */
+  filesDir: process.env.FILES_DIR ?? "data/files",
+
   jwtSecret: process.env.JWT_SECRET ?? "dev-secret-change-me",
   sessionHours: Number(process.env.SESSION_HOURS ?? 24),
 

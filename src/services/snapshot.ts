@@ -1,6 +1,7 @@
 import { listBedrooms } from "../models/bedrooms";
 import { listCampers } from "../models/campers";
 import { listCategories } from "../models/categories";
+import { listTransports } from "../models/transports";
 import { listInstructions } from "../models/instructions";
 import { listOccurrences } from "../models/occurrences";
 import { listPrepSections } from "../models/preparation";
@@ -8,21 +9,24 @@ import { listEvents, listRoles } from "../models/schedule";
 import { listStaff } from "../models/staff";
 import { listTeams } from "../models/teams";
 import { listScores } from "../models/scores";
+import { listGalleryPhotos } from "../models/gallery";
 import { serializeTeam } from "../routes/teams";
 import { serializeScore } from "../routes/scores";
 import { occupancy, serializeBedroom } from "../routes/bedrooms";
 import { serializeCamperList } from "../routes/campers";
 import { serializeCategory } from "../routes/categories";
+import { serializeTransport } from "../routes/transports";
 import { serializeInstruction } from "../routes/instructions";
 import { serializeOccurrence } from "../routes/occurrences";
 import { serializePrepSection } from "../routes/preparation";
 import { serializeEvent, serializeRole } from "../routes/schedule";
 import { serializeSettings, serializeSettingsForManager } from "../routes/settings";
+import { serializePhoto } from "../routes/gallery";
 import { serializeStaffList } from "../routes/staff";
 import { getSettings } from "../models/settings";
 import type { Role } from "../types";
 import { COLLECTIONS, type Collection, type Snapshot } from "./realtime";
-import { canSeeBedroom, canSeeDoc, canSeePrep, isParent, resolveScope, scopeEvent, scopeRoles, type Viewer } from "./scope";
+import { canManageGallery, canSeeBedroom, canSeeDoc, canSeePrep, isParent, resolveScope, scopeEvent, scopeRoles, type Viewer } from "./scope";
 import { parentEvents } from "./camp";
 
 /**
@@ -32,10 +36,10 @@ import { parentEvents } from "./camp";
  */
 const READABLE: Record<Role, readonly Collection[]> = {
   admin: COLLECTIONS,
-  staff: ["campers", "staff", "bedrooms", "categories", "teams", "scores", "roles", "events", "preparation", "instructions", "occurrences", "settings"],
-  health_staff: ["campers", "staff", "bedrooms", "categories", "teams", "scores", "roles", "events", "preparation", "instructions", "occurrences", "settings"],
-  // parents: their own kids + rooms, the team of those rooms / important contacts (inside the window), the programme
-  parent: ["campers", "staff", "bedrooms", "categories", "teams", "roles", "events", "preparation", "settings"],
+  staff: ["campers", "staff", "bedrooms", "categories", "transports", "teams", "scores", "roles", "events", "preparation", "instructions", "occurrences", "gallery", "settings"],
+  health_staff: ["campers", "staff", "bedrooms", "categories", "transports", "teams", "scores", "roles", "events", "preparation", "instructions", "occurrences", "gallery", "settings"],
+  // parents: their own kids + rooms, the team of those rooms / important contacts (inside the window), the programme — and the PUBLISHED photos
+  parent: ["campers", "staff", "bedrooms", "categories", "transports", "teams", "roles", "events", "preparation", "gallery", "settings"],
 };
 
 /**
@@ -96,6 +100,9 @@ export async function loadCollections(viewer: Viewer, names: readonly Collection
           });
           break;
         }
+        case "transports":
+          out.transports = (await listTransports()).map(serializeTransport);
+          break;
         case "teams":
           out.teams = (await listTeams()).map(serializeTeam);
           break;
@@ -117,6 +124,10 @@ export async function loadCollections(viewer: Viewer, names: readonly Collection
         case "occurrences":
           if (scope.all) out.occurrences = (await listOccurrences()).map(serializeOccurrence);
           else if (scope.medical) out.occurrences = (await listOccurrences()).filter((occurrence) => occurrence.campers.length > 0).map(serializeOccurrence);
+          break;
+        case "gallery":
+          // the album is published as a whole; before that only the admin and the photographers see it
+          out.gallery = canManageGallery(scope) || (await getSettings()).galleryPublished ? (await listGalleryPhotos()).map(serializePhoto) : [];
           break;
         case "settings":
           // offenders list (out-of-scope emergency QR) is manager-only

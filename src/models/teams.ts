@@ -8,8 +8,24 @@ const COLLECTION = "teams";
 /** the category key the teams used to live under (before they got their own collection) */
 const LEGACY_CATEGORY_KEY = "equipe";
 
-/** a pleasant default palette for the migrated / new teams */
-export const TEAM_PALETTE = ["#e63946", "#f4a261", "#e9c46a", "#2a9d8f", "#264653", "#8e44ad", "#3498db", "#27ae60", "#d35400", "#7f8c8d"];
+/**
+ * Default palette for migrated / new teams.
+ * High-saturation, kid-nameable colours that stay distinct outdoors
+ * (vermelho / laranja / amarelo / verde / ciano / azul / roxo / rosa / marrom / preto / lima).
+ */
+export const TEAM_PALETTE = [
+  "#e30613", // vermelho
+  "#ff6600", // laranja
+  "#ffcc00", // amarelo
+  "#a8e10c", // lima
+  "#00a651", // verde
+  "#00c2e0", // ciano
+  "#0057b8", // azul
+  "#6b2d8b", // roxo
+  "#ff1493", // rosa
+  "#8b4513", // marrom
+  "#1a1a1a", // preto
+];
 
 function toTeam(doc: Record<string, unknown> | null): Team | null {
   if (!doc) return null;

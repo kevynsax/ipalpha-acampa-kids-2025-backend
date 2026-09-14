@@ -3,6 +3,7 @@ import { countStaffPerBedroom, findBedroomById } from "../models/bedrooms";
 import { countCampersPerBedroom } from "../models/campers";
 import { findCategoryByKey } from "../models/categories";
 import { findTeamById } from "../models/teams";
+import { findTransportById } from "../models/transports";
 import { bedroomCapacity, MEDICATION_TIMES_MAX, MEDICATIONS_MAX, type Medication } from "../types";
 
 export type Invalid = { error: string };
@@ -65,6 +66,14 @@ export function parseMedications(value: unknown): Medication[] | Invalid {
     out.push({ name, dose, times, asNeeded: m.asNeeded === true, notes });
   }
   return out;
+}
+
+/** Transport (bus / car) id or null; { error } when the id is unknown. */
+export async function parseTransport(value: unknown): Promise<string | null | Invalid> {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string") return { error: "Transporte inválido." };
+  if (!(await findTransportById(value))) return { error: "Transporte não encontrado." };
+  return value;
 }
 
 /** Team id or null; { error } when the id is unknown. */

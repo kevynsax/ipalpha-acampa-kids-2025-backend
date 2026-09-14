@@ -26,11 +26,12 @@ The API listens on `http://localhost:3000` by default.
 
 ## Environment
 
-Copy `.env` and adjust. Key variables:
+Copy `.env.example` to `.env` for local development. Production configuration and the full variable inventory are documented in [`DEPLOYMENT.md`](./DEPLOYMENT.md). Key variables:
 
 | Variable | Description |
 |---|---|
-| `MONGODB_URI` / `MONGODB_DB` | MongoDB connection. Default points to the `camping-mongo` container from `docker-compose.yml` (user `camping`, host port `27019`) |
+| `MONGODB_URI` / `MONGODB_DB` | MongoDB connection. Code defaults to `mongodb://localhost:27017` / `camping`; the local compose container uses host port `27019` |
+| `FILES_DIR` | folder holding the uploaded image bytes (editor pictures + the photo album's photos and thumbnails; Mongo keeps only the metadata). Default `data/files`. **Mount a volume here in production** — images stored inside Mongo by older versions are migrated to disk on first read |
 | `COMTELE_API_KEY` | Comtele API key (get it at https://sms.comtele.com.br). **Empty = mock mode**: OTP codes are printed to the server console instead of being sent by SMS |
 | `OTP_EXPIRE_MINUTES` | OTP lifetime (default `5`) |
 | `OTP_MAX_ATTEMPTS` | wrong attempts before freezing the account (default `3`) |
@@ -215,8 +216,11 @@ orphans.
 their care any time; the other kids of their room — and every kid for a
 helper — only WHILE THE CAMP IS HAPPENING (first → last programme day, São
 Paulo). Those come as **care** records (`contactsHidden: true`): health,
-notes, preferences, room / team / bus — no guardian, emergency, insurance or
-document data. Admin, medical team and check-in helpers keep the full record.
+notes, preferences, room / team / bus and the guardian's **name + phone** (to
+reach the parents) — no emergency contact, insurance, e-mail or document
+data. Admin, medical team and check-in helpers keep the full record.
+Colleagues in the same room reach a team member as **name + phone + room
+role + team** (`redacted: true`: no transport, health or check-in).
 
 **Medication (`medications`)** — a list, one entry per medicine:
 `{ name, dose, times: ["HH:MM"], asNeeded, notes }`. `times` are the fixed
@@ -229,6 +233,7 @@ each, `MEDICATIONS_INVALID` otherwise. Staff use the same `medications` shape.
 | GET | `/api/campers?bedroom=<id>` | admin, staff, health_staff | — |
 | GET | `/api/campers/:id` | admin, staff, health_staff | — |
 | GET | `/api/campers/:id/detail` | admin, staff, health_staff | `{ camper, bedroom, caretakers (staff in the room), roommates }` |
+| GET | `/api/campers/lookup/:id` | admin, staff, health_staff — **only while the camp is on** (403 `CAMP_NOT_ACTIVE` otherwise) | emergency badge scan ("Ler crachá") → `{ camper, belonged, foreignLookupCount, foreignLookupBlocked, bedroom?, caretaker? }`; out-of-scope kids come as CARE records, are logged and count towards the alert / block thresholds |
 | POST | `/api/campers` | admin | all camper fields (`bedroom` must have a free bed → 409 `BEDROOM_FULL`) |
 | PUT | `/api/campers/:id` | admin | partial |
 | DELETE | `/api/campers/:id` | admin | — |
@@ -325,11 +330,12 @@ window is open (checked at send time, coalesced like the team's SMS).
 | POST | `/api/files` | admin | multipart `file` (jpeg/png/webp/gif, ≤ 2 MB — the frontend shrinks to ≤ 1280 px first) → `{ file: { id, url: "/api/files/<id>", name, type, size } }` |
 | GET | `/api/files/:id` | **public** | the image, `cache-control: immutable` |
 
-Files live in MongoDB (`files` collection, `data` as Binary) so a single
-container needs no volume. Ids are 24 random bytes (hex) — unguessable —
-which is what allows the GET to be unauthenticated: an `<img>` tag cannot
-send a bearer token. The editor stores the *relative* url in the HTML; the
-frontend resolves it against `VITE_API_URL` when rendering.
+File bytes live under `FILES_DIR` on a persistent volume; MongoDB's `files`
+collection holds metadata. Legacy MongoDB Binary data is migrated to disk on
+first read, then removed from the document. Back up **both MongoDB and the
+pictures directory**. Ids are 24 random bytes (hex) — unguessable — which
+allows the GET to be unauthenticated. The editor stores relative URLs; the
+frontend resolves them against `VITE_API_URL`, or its current origin in production.
 
 ## Instructions (general documents) 📖
 
@@ -438,14 +444,12 @@ only the welcome and the bus check-in.
 
 ### Check-in helpers (team members running the kids' roll calls) 🙋🚌
 
-`checkinWindow: { from: ISO | null, until: ISO | null }` — ONE time window
-(`from < until`; the response adds `open`, read-only) shared by both helper
-lists, each a plain `{ staffIds: string[] }` of active staff:
+`checkinWindow: { from: ISO | null, until: ISO | null }` opens the church and outbound-bus roll calls. `busReturnWindow` separately opens the return-bus roll call days later. Each response adds `open` (read-only).
 
 | List | Roll call | What a listed person receives while the window is open |
 |---|---|---|
 | `checkinHelpers` | church check-in (`POST/DELETE /api/campers/:id/checkin`) | **every camper, full record** (health included — they confirm it with the parents) and every bedroom |
-| `busHelpers` | bus boarding (`POST/DELETE /api/campers/:id/checkin/bus`) | `{ helpers: [{ staffId, vehicleId }] }` — each person is **linked to one vehicle** (an active `transporte` option; independent from `staff.transportation`, they work the *door*, they need not ride in it) and receives **only the campers of that vehicle** as **name-only records** (`redacted: true`: name, age, room, team, check-in stamps — health, contacts, notes and weight blanked) and every bedroom |
+| `busHelpers` | bus boarding on the outbound and return trips (`POST/DELETE /api/campers/:id/checkin/bus` and `/bus-return`) | `{ helpers: [{ staffId, vehicleId }] }` — each person is **linked to one vehicle** (an active `transporte` option; independent from `staff.transportation`, they work the *door*, they need not ride in it) and receives **only the campers of that vehicle** as **name-only records** (`redacted: true`: name, age, room, team, check-in stamps — health, contacts, notes and weight blanked) and every bedroom |
 
 `services/scope.ts` evaluates `checkinHelper` / `busHelper` on every
 request and on every realtime push; `camperVisibility()` decides `full` /

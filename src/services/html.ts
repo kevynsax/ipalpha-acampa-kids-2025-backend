@@ -9,17 +9,26 @@ import sanitizeHtml from "sanitize-html";
  *   blockquote           soft callout box (✅ 🔓 ⚠️ as first char pick the colour)
  *   mark                 small pill / tag ("PROMESSA", "📖 Gênesis 15:5")
  *   details > summary + div[data-type=detailsContent]   collapsible section
+ *   figure > img + figcaption                           picture with a caption
+ *   table > thead/tbody > tr > th/td                    small data table
  *
  * Images: only the ones uploaded through POST /api/files (relative
  * `/api/files/<id>` URLs) or plain http(s) links — never `data:` blobs, which
- * would bloat the documents pushed to every phone.
+ * would bloat the documents pushed to every phone. An <img data-gen="…"> (a
+ * picture the assistant asked the app to draw) is dropped too: by the time a
+ * document is saved every generated picture must already be uploaded.
  */
 const HTML_POLICY: sanitizeHtml.IOptions = {
-  allowedTags: ["p", "br", "strong", "b", "em", "i", "u", "s", "ul", "ol", "li", "h2", "h3", "blockquote", "a", "hr", "img", "mark", "details", "summary", "div"],
+  allowedTags: [
+    "p", "br", "strong", "b", "em", "i", "u", "s", "ul", "ol", "li", "h2", "h3", "blockquote", "a", "hr", "img", "mark",
+    "details", "summary", "div", "figure", "figcaption", "table", "thead", "tbody", "tr", "th", "td",
+  ],
   allowedAttributes: {
     a: ["href", "target", "rel"],
     img: ["src", "alt", "title", "width", "height", "loading"],
     details: ["open"],
+    th: ["colspan", "rowspan"],
+    td: ["colspan", "rowspan"],
     // only the editor's content wrapper; any other div keeps its children but loses the attributes
     div: [{ name: "data-type", values: ["detailsContent"] }],
   },
@@ -49,7 +58,7 @@ export function cleanHtml(value: unknown, max: number): string | null {
   if (typeof value !== "string") return null;
   if (value.length > max) return null;
   const html = sanitizeHtml(value, HTML_POLICY);
-  const html2 = unwrapStrayDivs(html).trim();
+  const html2 = tidyTables(dropEmptyFigures(unwrapStrayDivs(html))).trim();
   const text = sanitizeHtml(html2, { allowedTags: [], allowedAttributes: {} }).replace(/\s|&nbsp;/g, "");
   return text || /<img\s/i.test(html2) ? html2 : "";
 }
@@ -69,6 +78,27 @@ function unwrapStrayDivs(html: string): string {
     keep.push(ok);
     return ok ? m : "";
   });
+}
+
+/**
+ * The editor writes `colspan="1" rowspan="1"` on every cell and wraps the cell
+ * text in a `<p>`; both are noise in a stored document (and in the HTML source
+ * view). Only spans bigger than 1 carry meaning.
+ */
+function tidyTables(html: string): string {
+  if (!html.includes("<t")) return html;
+  return html
+    .replace(/\s(?:colspan|rowspan)="1"/g, "")
+    .replace(/<(th|td)([^>]*)><p>([\s\S]*?)<\/p><\/\1>/g, (m, tag: string, attrs: string, inner: string) => (inner.includes("<p>") ? m : `<${tag}${attrs}>${inner}</${tag}>`));
+}
+
+/**
+ * A <figure> whose <img> was dropped (bad src, or a generated picture that never
+ * got uploaded) would leave a caption floating alone: remove the whole figure.
+ */
+function dropEmptyFigures(html: string): string {
+  if (!html.includes("<figure")) return html;
+  return html.replace(/<figure>([\s\S]*?)<\/figure>/g, (m, inner: string) => (/<img\s/i.test(inner) ? m : ""));
 }
 
 /** `/api/files/<id>` ids referenced by a piece of HTML (to know which uploads are still in use). */

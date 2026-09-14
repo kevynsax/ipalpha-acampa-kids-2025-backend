@@ -1,13 +1,14 @@
 import { config } from "../config";
 import { findBedroomById } from "../models/bedrooms";
 import { claimBirthdayNotice, countCampersPerBedroom, listCampers } from "../models/campers";
-import { findCategoryByKey } from "../models/categories";
+import { findTransportById } from "../models/transports";
+import { transportLabel as transportLabelOf } from "../routes/transports";
 import { listRoles } from "../models/schedule";
 import { claimCheckinReminder, getSettings, staffAccessOpen } from "../models/settings";
-import { claimStaffWelcome, findStaffById, listStaff } from "../models/staff";
+import { claimStaffPhotosNotice, claimStaffWelcome, findStaffById, listStaff } from "../models/staff";
 import { findTeamById } from "../models/teams";
-import { claimParentWelcome, listAdmins, listParents } from "../models/users";
-import { PARENT_FIELD_LABEL, PREP_AUDIENCES, STAFF_CATEGORY_KEYS } from "../types";
+import { claimParentPhotosNotice, claimParentWelcome, listAdmins, listParents } from "../models/users";
+import { PARENT_FIELD_LABEL, PREP_AUDIENCES } from "../types";
 import type { CampEvent, Camper, CamperChangeLog, DocAudience, InstructionDoc, Occurrence, PrepAudience, PrepSection, ScheduleRole, Settings, Staff } from "../types";
 import { formatBrazilPhone, saoPauloWallClock, saoPauloWallClockToIso, todayInSaoPaulo } from "../utils";
 import { birthdayDuringCamp, campPeriod } from "./camp";
@@ -45,7 +46,7 @@ import { staffHasAccess } from "./scope";
  * blocks the write.
  */
 
-export type NotifyKind = "bedroom" | "role" | "instructions" | "preparation" | "myRoom" | "myRoomRole" | "myTeam" | "myBus";
+export type NotifyKind = "bedroom" | "role" | "instructions" | "preparation" | "myRoom" | "myRoomRole" | "myTeam" | "myBus" | "photos";
 
 interface Item {
   kind: NotifyKind;
@@ -103,7 +104,7 @@ function first(name: string): string {
 
 // ── text helpers ─────────────────────────────────────────────────────────────
 
-/** "2026-09-12" → "sáb 12/09" */
+/** "2026-09-12" → "sáb 12/09" — same voice as frontend speakDaySlash */
 export function shortDate(iso: string): string {
   const [y, m, d] = iso.split("-").map(Number);
   if (!y || !m || !d) return iso;
@@ -138,10 +139,10 @@ async function bedroomName(id: string | null): Promise<string | null> {
   return (await findBedroomById(id))?.name ?? null;
 }
 
-async function optionLabel(key: string, id: string | null): Promise<string | null> {
+async function transportLabel(id: string | null): Promise<string | null> {
   if (!id) return null;
-  const cat = await findCategoryByKey(key);
-  return cat?.options.find((o) => o.id === id)?.label ?? null;
+  const t = await findTransportById(id);
+  return t ? transportLabelOf(t) : null;
 }
 
 /**
@@ -236,7 +237,7 @@ export async function notifyCheckin(staff: Staff): Promise<void> {
     if (!staffHasAccess(staff._id, settings)) return;
     const [room, bus, counts] = await Promise.all([
       settings.kidsRoomsDraft ? null : bedroomName(staff.bedroom),
-      optionLabel(STAFF_CATEGORY_KEYS.transportation, staff.transportation),
+      transportLabel(staff.transportation),
       staff.bedroom && !settings.kidsRoomsDraft ? countCampersPerBedroom() : null,
     ]);
     const kids = counts && staff.bedroom ? (counts.get(staff.bedroom) ?? 0) : undefined;
@@ -522,7 +523,7 @@ export async function notifyStaffChange(before: Staff, after: Staff): Promise<vo
       enqueue(after, "myTeam", team ? `seu time agora é ${team}` : "você saiu do seu time", settings);
     }
     if (before.transportation !== after.transportation) {
-      const bus = await optionLabel(STAFF_CATEGORY_KEYS.transportation, after.transportation);
+      const bus = await transportLabel(after.transportation);
       enqueue(after, "myBus", bus ? `seu transporte agora é ${bus}` : "você ficou sem transporte definido", settings);
     }
   } catch (err) {
@@ -664,6 +665,34 @@ export async function notifyPreparationChange(before: PrepSection | null, after:
     }
   } catch (err) {
     console.error("notify: preparation change failed", err);
+  }
+}
+
+/**
+ * The photographer published photos in the album (Fotos tab). Everyone is
+ * nudged ONCE for the whole camp: the whole active TEAM (each inside their
+ * access window) and every PARENT with a phone (inside the parents' window).
+ * The stamp lives on the person (`photosSmsSentAt`), so publishing more
+ * batches later — or hiding and publishing again — never texts them twice;
+ * whoever was outside their window at the time is still eligible later.
+ * Nothing goes out when the photos are hidden.
+ */
+export async function notifyPhotosPublished(count: number): Promise<void> {
+  try {
+    if (count <= 0) return;
+    const settings = await getSettings();
+    if (!settings.notifications.photoPublishes) return;
+    const text = "as fotos do acampamento j\u00e1 est\u00e3o no app \u{1F4F7}";
+    for (const s of await listStaff({ active: true })) {
+      if (!s.phone || !staffHasAccess(s._id, settings)) continue; // claim only for someone who will really be texted
+      if (await claimStaffPhotosNotice(s._id)) enqueue(s, "photos", text, settings);
+    }
+    for (const p of await listParents()) {
+      if (!p.phone || !staffAccessOpen(settings.parentAccessWindow)) continue;
+      if (await claimParentPhotosNotice(p._id)) enqueueParent(p, "photos", text, settings);
+    }
+  } catch (err) {
+    console.error("notify: photos published failed", err);
   }
 }
 
@@ -822,11 +851,12 @@ async function listRolesOf(id: string, s: Settings): Promise<string[]> {
   if (s.checkinHelpers.staffIds.includes(id)) out.push("ajudante do check-in");
   const bus = s.busHelpers.helpers.find((h) => h.staffId === id);
   if (bus) {
-    const v = await optionLabel(STAFF_CATEGORY_KEYS.transportation, bus.vehicleId);
+    const v = await transportLabel(bus.vehicleId);
     out.push(v ? `ajudante do ${v}` : "ajudante do ônibus");
   }
   if (s.medicalStaff.staffIds.includes(id)) out.push("equipe médica");
   if (s.vestHelpers.staffIds.includes(id)) out.push("responsável pelos coletes (entrega e devolução)");
+  if (s.photographers.staffIds.includes(id)) out.push("fotógrafo do acampamento (envia as fotos)");
   for (const p of s.parentContacts) if (p.staffId === id) out.push(`contato dos pais (${p.title})`);
   return out;
 }
@@ -844,7 +874,7 @@ export async function notifyAccessListChange(before: Settings, after: Settings):
     if (!after.notifications.enrolments) return;
     const ids = new Set<string>();
     for (const s of [before, after]) {
-      for (const id of [...s.organizers.staffIds, ...s.gameOrganizers.staffIds, ...s.scoreHelpers.staffIds, ...s.checkinHelpers.staffIds, ...s.medicalStaff.staffIds, ...s.vestHelpers.staffIds]) ids.add(id);
+      for (const id of [...s.organizers.staffIds, ...s.gameOrganizers.staffIds, ...s.scoreHelpers.staffIds, ...s.checkinHelpers.staffIds, ...s.medicalStaff.staffIds, ...s.vestHelpers.staffIds, ...s.photographers.staffIds]) ids.add(id);
       for (const h of s.busHelpers.helpers) ids.add(h.staffId);
       for (const p of s.parentContacts) ids.add(p.staffId);
     }

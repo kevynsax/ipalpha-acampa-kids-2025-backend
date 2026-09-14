@@ -31,6 +31,26 @@ export async function claimParentWelcome(id: string): Promise<boolean> {
   return res.modifiedCount === 1;
 }
 
+/**
+ * Marks the "there are photos in the app" SMS as sent to this parent —
+ * atomically, only if it never went out. Each responsible hears about the
+ * album ONCE per camp, however many batches the photographer publishes.
+ */
+export async function claimParentPhotosNotice(id: string): Promise<boolean> {
+  const db = await getDb();
+  const res = await db
+    .collection("users")
+    .updateOne({ _id: new ObjectId(id), $or: [{ photosSmsSentAt: null }, { photosSmsSentAt: { $exists: false } }] }, { $set: { photosSmsSentAt: new Date() } });
+  return res.modifiedCount === 1;
+}
+
+/** Clears the album notice stamp on every parent (a new camp starts). */
+export async function resetParentPhotosNotice(): Promise<number> {
+  const db = await getDb();
+  const res = await db.collection("users").updateMany({ photosSmsSentAt: { $ne: null } }, { $set: { photosSmsSentAt: null } });
+  return res.modifiedCount;
+}
+
 /** A person is unique by phone — they may hold several roles at once. */
 export async function findByPhone(phone: string): Promise<User | null> {
   const db = await getDb();

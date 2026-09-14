@@ -23,8 +23,8 @@ import {
 } from "../models/staff";
 import { logCheckin } from "../models/campers";
 import { bedroomCapacity, ROOM_ROLES, STAFF_CATEGORY_KEYS, type Role, type RoomRole, type SessionUser, type Staff } from "../types";
-import { canHandleVests, hideOwnBedroom, isParent, resolveScope, staffVisibility, type Scope } from "../services/scope";
-import { bedroomFullMessage, isInvalid, parseBedroom, parseMedications, parseMulti, parseSingle, parseTeam, parseText } from "./_validate";
+import { canHandleVests, hideOwnBedroom, resolveScope, staffVisibility, type Scope } from "../services/scope";
+import { bedroomFullMessage, isInvalid, parseBedroom, parseMedications, parseMulti, parseTeam, parseText, parseTransport } from "./_validate";
 import { clearJokerEverywhere } from "../models/teams";
 import { distanceMeters, normalizeBrazilPhone, titleCaseName, nowInSaoPauloWallClock, saoPauloWallClock, saoPauloWallClockToIso, todayInSaoPaulo } from "../utils";
 import { getSettings } from "../models/settings";
@@ -57,10 +57,10 @@ export function serializeStaff(s: Staff) {
 /**
  * Serializes `s` according to the viewer's scope, or returns `null` when the
  * viewer may not see this person at all. A colleague in the same room comes
- * back as a NAME-ONLY record (`redacted: true`): no phone, no health data,
- * no team/transport — just what is needed to know who shares the room. The
- * VEST helper gets everyone as name + phone + vest status (`redacted: true`
- * too: nothing else leaves the server). A PARENT (inside the parents'
+ * back as a CONTACT record (`redacted: true`): name, phone, room role and
+ * team — no health data, no transport/check-in. The VEST helper gets everyone as
+ * name + phone + vest status (`redacted: true` too: nothing else leaves the
+ * server). A PARENT (inside the parents'
  * window) gets the team of their kid's room and the important contacts as
  * name + phone (+ the room and room role, so the app can tell the caretaker
  * from the rest) — never the vest, health or check-in.
@@ -77,8 +77,9 @@ export function serializeStaffFor(s: Staff, scope: Scope) {
   return {
     ...full,
     redacted: true,
-    phone: vis === "contact" ? s.phone : null,
-    team: null,
+    phone: s.phone,
+    // a roommate's team is public inside the room (the games are played together); parents / vest helpers don't get it
+    team: roommate ? s.team : null,
     bedroom: roommate || parentRoom ? s.bedroom : null,
     transportation: null,
     allergies: [],
@@ -88,7 +89,8 @@ export function serializeStaffFor(s: Staff, scope: Scope) {
     medications: [],
     healthNotes: "",
     checkin: null,
-    vest: vis === "contact" && !isParent(scope) ? s.vest : NO_VEST,
+    // the vest status is the vest helper's business only
+    vest: !scope.all && scope.vestHelper ? s.vest : NO_VEST,
     prepDone: [],
     // never leak another person's out-of-scope scan history to roommates / vest helpers / parents
     foreignLookupCount: 0,
@@ -174,7 +176,7 @@ async function buildPatch(
   }
 
   if (has("transportation")) {
-    const v = await parseSingle(body.transportation, STAFF_CATEGORY_KEYS.transportation, "Transporte");
+    const v = await parseTransport(body.transportation);
     if (isInvalid(v)) return { code: "TRANSPORTATION_INVALID", message: v.error };
     patch.transportation = v;
   }

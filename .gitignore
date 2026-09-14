@@ -1,3 +1,7 @@
 node_modules/
 .env
 *.log
+.env.*
+!.env.example
+# Uploaded pictures and thumbnails are runtime data, never source code.
+data/
