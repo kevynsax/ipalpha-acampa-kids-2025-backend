@@ -54,7 +54,7 @@ function toCamper(doc: Record<string, unknown> | null): Camper | null {
   };
 }
 
-function toMedications(v: unknown): Medication[] {
+export function toMedications(v: unknown): Medication[] {
   if (!Array.isArray(v)) return [];
   return v
     .filter((m): m is Record<string, unknown> => !!m && typeof m === "object")

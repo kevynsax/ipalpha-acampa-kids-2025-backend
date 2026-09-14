@@ -118,6 +118,26 @@ export const STAFF_CATEGORY_KEYS = {
   healthIssues: "condicao-cronica",
 } as const;
 
+/**
+ * One medicine a person (kid or team member) takes during the camp. `times` are the fixed "HH:MM"
+ * moments of the day it is given (the medical checklist ticks each one);
+ * `asNeeded` = no fixed time ("quando necessário"). Both empty = schedule
+ * not informed yet — the medical team should confirm with the parents.
+ */
+export interface Medication {
+  /** "Ritalina", "Colírio Hyabak" */
+  name: string;
+  /** "10mg", "1 comprimido", "1 gota em cada olho" */
+  dose: string;
+  /** "HH:MM", sorted, unique */
+  times: string[];
+  asNeeded: boolean;
+  /** "junto com o café", "quando o olho estiver seco" */
+  notes: string;
+}
+export const MEDICATIONS_MAX = 20;
+export const MEDICATION_TIMES_MAX = 12;
+
 export interface Staff {
   _id: string;
   name: string;
@@ -143,7 +163,8 @@ export interface Staff {
   drugAllergies: string[];
   foodRestrictions: string;
   healthIssues: string[];
-  medicines: string;
+  /** medicines the person takes, each with its schedule */
+  medications: Medication[];
   /** free-text health/allergy remarks (e.g. from the registration form) */
   healthNotes: string;
   /** set when the person arrived on departure day */
@@ -225,26 +246,6 @@ export const CAMPER_CATEGORY_KEYS = {
   drugAllergies: "alergia-medicamentos",
   healthIssues: "condicao-cronica",
 } as const;
-
-/**
- * One medicine a kid takes during the camp. `times` are the fixed "HH:MM"
- * moments of the day it is given (the medical checklist ticks each one);
- * `asNeeded` = no fixed time ("quando necessário"). Both empty = schedule
- * not informed yet — the medical team should confirm with the parents.
- */
-export interface Medication {
-  /** "Ritalina", "Colírio Hyabak" */
-  name: string;
-  /** "10mg", "1 comprimido", "1 gota em cada olho" */
-  dose: string;
-  /** "HH:MM", sorted, unique */
-  times: string[];
-  asNeeded: boolean;
-  /** "junto com o café", "quando o olho estiver seco" */
-  notes: string;
-}
-export const MEDICATIONS_MAX = 20;
-export const MEDICATION_TIMES_MAX = 12;
 
 export interface Camper {
   _id: string;

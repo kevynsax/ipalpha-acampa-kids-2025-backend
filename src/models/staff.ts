@@ -2,7 +2,7 @@ import { ObjectId } from "mongodb";
 import { getDb } from "../db";
 import type { CamperCheckin, Staff, VestStatus } from "../types";
 import { ROOM_ROLES } from "../types";
-import { toCheckin } from "./campers";
+import { toCheckin, toMedications } from "./campers";
 
 const COLLECTION = "staff";
 
@@ -21,7 +21,7 @@ function toStaff(doc: Record<string, unknown> | null): Staff | null {
     drugAllergies: (doc.drugAllergies as string[]) ?? [],
     foodRestrictions: (doc.foodRestrictions as string) ?? "",
     healthIssues: (doc.healthIssues as string[]) ?? [],
-    medicines: (doc.medicines as string) ?? "",
+    medications: toMedications(doc.medications),
     healthNotes: (doc.healthNotes as string) ?? "",
     checkin: toCheckin(doc.checkin),
     vest: toVest(doc.vest),
@@ -236,7 +236,7 @@ export async function ensureAdminsOnRoster(admins: { name: string; phone: string
   let created = 0;
   for (const a of admins) {
     if (await findStaffByPhone(a.phone)) continue;
-    await insertStaff({ name: a.name, phone: a.phone, active: true, team: null, bedroom: null, roomRole: "helper", transportation: null, allergies: [], drugAllergies: [], foodRestrictions: "", healthIssues: [], medicines: "", healthNotes: "" });
+    await insertStaff({ name: a.name, phone: a.phone, active: true, team: null, bedroom: null, roomRole: "helper", transportation: null, allergies: [], drugAllergies: [], foodRestrictions: "", healthIssues: [], medications: [], healthNotes: "" });
     created++;
   }
   return created;

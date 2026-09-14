@@ -24,7 +24,7 @@ import {
 import { logCheckin } from "../models/campers";
 import { bedroomCapacity, ROOM_ROLES, STAFF_CATEGORY_KEYS, type Role, type RoomRole, type SessionUser, type Staff } from "../types";
 import { canHandleVests, hideOwnBedroom, isParent, resolveScope, staffVisibility, type Scope } from "../services/scope";
-import { bedroomFullMessage, isInvalid, parseBedroom, parseMulti, parseSingle, parseTeam, parseText } from "./_validate";
+import { bedroomFullMessage, isInvalid, parseBedroom, parseMedications, parseMulti, parseSingle, parseTeam, parseText } from "./_validate";
 import { clearJokerEverywhere } from "../models/teams";
 import { distanceMeters, normalizeBrazilPhone, titleCaseName, nowInSaoPauloWallClock, saoPauloWallClock, saoPauloWallClockToIso, todayInSaoPaulo } from "../utils";
 import { getSettings } from "../models/settings";
@@ -85,7 +85,7 @@ export function serializeStaffFor(s: Staff, scope: Scope) {
     drugAllergies: [],
     foodRestrictions: "",
     healthIssues: [],
-    medicines: "",
+    medications: [],
     healthNotes: "",
     checkin: null,
     vest: vis === "contact" && !isParent(scope) ? s.vest : NO_VEST,
@@ -117,7 +117,7 @@ function serialize(s: Staff) {
     drugAllergies: s.drugAllergies,
     foodRestrictions: s.foodRestrictions,
     healthIssues: s.healthIssues,
-    medicines: s.medicines,
+    medications: s.medications,
     healthNotes: s.healthNotes,
     checkin: s.checkin,
     vest: s.vest,
@@ -203,7 +203,13 @@ async function buildPatch(
     patch[field] = v;
   }
 
-  for (const field of ["foodRestrictions", "medicines", "healthNotes"] as const) {
+  if (has("medications")) {
+    const v = parseMedications(body.medications);
+    if (isInvalid(v)) return { code: "MEDICATIONS_INVALID", message: v.error };
+    patch.medications = v;
+  }
+
+  for (const field of ["foodRestrictions", "healthNotes"] as const) {
     if (!has(field)) continue;
     const v = parseText(body[field], TEXT_MAX);
     if (isInvalid(v)) return { code: `${field.toUpperCase()}_INVALID`, message: v.error };
@@ -482,7 +488,7 @@ staff.use("/*", requireManager);
 
 /**
  * POST /api/staff
- * { name, phone, active?, team?, bedroom?, transportation?, allergies?, foodRestrictions?, healthIssues?, medicines? }
+ * { name, phone, active?, team?, bedroom?, transportation?, allergies?, foodRestrictions?, healthIssues?, medications? }
  */
 staff.post("/", async (c) => {
   const body = await c.req.json<Record<string, unknown>>().catch(() => null);

@@ -222,7 +222,7 @@ document data. Admin, medical team and check-in helpers keep the full record.
 `{ name, dose, times: ["HH:MM"], asNeeded, notes }`. `times` are the fixed
 moments of the day it is given (the medical checklist ticks each one); `asNeeded`
 = no fixed time. Neither = schedule not confirmed yet. ≤ 20 medicines, ≤ 12 times
-each, `MEDICATIONS_INVALID` otherwise. Staff keep a free-text `medicines`.
+each, `MEDICATIONS_INVALID` otherwise. Staff use the same `medications` shape.
 
 | Method | Path | Who | Body |
 |---|---|---|---|
@@ -250,7 +250,7 @@ fields store category **option ids** and are validated against these category
 keys: `team → equipe`, `transportation → transporte`, `allergies → alergias`,
 `healthIssues → condicao-cronica`. `bedroom` is a **Bedroom id** — assigning
 someone to a full room fails with 409 `BEDROOM_FULL`.
-`foodRestrictions` and `medicines` are free text (≤ 500 chars).
+`foodRestrictions` and `healthNotes` are free text (≤ 500 chars); `medications` is the same list as on campers.
 `roomRole` is `"caretaker"` (responsável: looks after specific kids) or
 `"helper"` (auxiliar, the default).
 
@@ -258,7 +258,7 @@ someone to a full room fails with 409 `BEDROOM_FULL`.
 |---|---|---|---|
 | GET | `/api/staff?active=true\|false` | admin, staff, health_staff | — |
 | GET | `/api/staff/:id` | admin, staff, health_staff | — |
-| POST | `/api/staff` | admin | `{ name, phone, active?, team?, bedroom?, transportation?, allergies?, foodRestrictions?, healthIssues?, medicines? }` |
+| POST | `/api/staff` | admin | `{ name, phone, active?, team?, bedroom?, transportation?, allergies?, foodRestrictions?, healthIssues?, medications? }` |
 | PUT | `/api/staff/:id` | admin | partial (same fields + `roomRole`) |
 | POST | `/api/staff/:id/move` | admin | `{ bedroom, kids: "orphan" \| "bring" \| "assign" \| "swap", assignTo?, swapWith? }` — moves a caretaker and decides what happens to their kids: stay orphans, come along (room + bed cleared), go to `assignTo` (same room; a helper is promoted) or swap with `swapWith` (target room: both people switch rooms, each takes the other's kids) |
 | DELETE | `/api/staff/:id` | admin | — (their kids become orphans) |
