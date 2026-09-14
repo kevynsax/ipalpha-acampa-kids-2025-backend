@@ -4,18 +4,19 @@ import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { config } from "./config";
 import { getDb } from "./db";
-import { ensureIndexes } from "./models/users";
+import { ensureIndexes, listAdmins, loadAdminPhones } from "./models/users";
 import { ensureCategoryIndexes } from "./models/categories";
 import { ensureBedroomIndexes } from "./models/bedrooms";
-import { ensureStaffIndexes } from "./models/staff";
+import { ensureAdminsOnRoster, ensureStaffIndexes } from "./models/staff";
 import { ensureScheduleIndexes } from "./models/schedule";
-import { ensureCamperIndexes } from "./models/campers";
+import { backfillParentEditedAt, ensureCamperIndexes } from "./models/campers";
 import { ensurePrepIndexes } from "./models/preparation";
 import { ensureInstructionIndexes } from "./models/instructions";
 import { ensureOccurrenceIndexes } from "./models/occurrences";
 import { ensureFileIndexes } from "./models/files";
 import { ensureTeamIndexes } from "./models/teams";
 import { ensureScoreIndexes } from "./models/scores";
+import { ensureCamperLookupIndexes } from "./models/camperLookups";
 import teamRoutes from "./routes/teams";
 import scoreRoutes from "./routes/scores";
 import authRoutes from "./routes/auth";
@@ -32,8 +33,8 @@ import occurrenceRoutes from "./routes/occurrences";
 import fileRoutes from "./routes/files";
 import aiRoutes from "./routes/ai";
 import { comteleEnabled } from "./services/comtele";
-import { rearmWindows, scheduleCheckinReminder } from "./services/realtime";
-import { sendCheckinReminder, syncParentWelcomes, syncWelcomes } from "./services/notify";
+import { rearmWindows, scheduleBirthdayNotices, scheduleCheckinReminder } from "./services/realtime";
+import { sendBirthdayNotices, sendCheckinReminder, syncParentWelcomes, syncWelcomes } from "./services/notify";
 import { getSettings } from "./models/settings";
 
 const app = new Hono();
@@ -76,17 +77,28 @@ const { port } = config;
 console.log("Connecting to MongoDB…");
 const db = await getDb();
 await ensureIndexes();
+await ensureCamperLookupIndexes();
 await ensureCategoryIndexes();
 await ensureStaffIndexes();
 await ensureBedroomIndexes();
 await ensureScheduleIndexes();
 await ensureCamperIndexes();
+{
+  const n = await backfillParentEditedAt(); // one-off: older parent edits get the stamp
+  if (n > 0) console.log(`🕓 parentEditedAt backfilled on ${n} camper(s)`);
+}
 await ensurePrepIndexes();
 await ensureInstructionIndexes();
 await ensureOccurrenceIndexes();
 await ensureFileIndexes();
 await ensureTeamIndexes(); // also migrates the legacy "equipe" category into teams
 await ensureScoreIndexes();
+// every admin is on the team roster too (room, food restrictions, vest…); their record can't be deleted nor have the phone changed
+{
+  await loadAdminPhones();
+  const created = await ensureAdminsOnRoster((await listAdmins()).map((a) => ({ name: a.name, phone: a.phone })));
+  if (created > 0) console.log(`👤 ${created} admin(s) added to the team roster`);
+}
 console.log(`MongoDB connected → ${config.dbName}`);
 // re-arm the check-in window timers (they live in memory)
 {
@@ -96,6 +108,8 @@ console.log(`MongoDB connected → ${config.dbName}`);
   void syncWelcomes(); // the team window may have opened while the server was down
   void syncParentWelcomes();
   void sendCheckinReminder(); // the reminder instant may have passed while the server was down
+  scheduleBirthdayNotices(); // daily 07:45 timer
+  void sendBirthdayNotices(); // 07:45 may have passed while the server was down
 }
 
 console.log(

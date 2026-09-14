@@ -3,7 +3,7 @@ import { countStaffPerBedroom, findBedroomById } from "../models/bedrooms";
 import { countCampersPerBedroom } from "../models/campers";
 import { findCategoryByKey } from "../models/categories";
 import { findTeamById } from "../models/teams";
-import { bedroomCapacity } from "../types";
+import { bedroomCapacity, MEDICATION_TIMES_MAX, MEDICATIONS_MAX, type Medication } from "../types";
 
 export type Invalid = { error: string };
 
@@ -36,6 +36,35 @@ export function parseText(value: unknown, max = 500): string | Invalid {
   if (value === undefined || value === null) return "";
   if (typeof value !== "string") return { error: "Texto inválido." };
   return value.trim().slice(0, max);
+}
+
+const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+/**
+ * Validates the medication list: each entry needs a name; times are "HH:MM"
+ * (deduped, sorted); `asNeeded` is a boolean. Empty / missing = no medicines.
+ */
+export function parseMedications(value: unknown): Medication[] | Invalid {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) return { error: "Medicação inválida." };
+  if (value.length > MEDICATIONS_MAX) return { error: `No máximo ${MEDICATIONS_MAX} medicamentos.` };
+  const out: Medication[] = [];
+  for (const raw of value) {
+    if (!raw || typeof raw !== "object") return { error: "Medicação inválida." };
+    const m = raw as Record<string, unknown>;
+    const name = parseText(m.name, 120);
+    const dose = parseText(m.dose, 120);
+    const notes = parseText(m.notes, 300);
+    if (isInvalid(name) || isInvalid(dose) || isInvalid(notes)) return { error: "Medicação inválida." };
+    if (!name) continue; // a blank row from the form
+    const timesRaw = m.times === undefined || m.times === null ? [] : m.times;
+    if (!Array.isArray(timesRaw) || !timesRaw.every((t) => typeof t === "string" && TIME_RE.test(t))) return { error: `${name}: horário inválido (use HH:MM).` };
+    const times = [...new Set(timesRaw as string[])].sort();
+    if (times.length > MEDICATION_TIMES_MAX) return { error: `${name}: no máximo ${MEDICATION_TIMES_MAX} horários.` };
+    if (m.asNeeded !== undefined && typeof m.asNeeded !== "boolean") return { error: "Medicação inválida." };
+    out.push({ name, dose, times, asNeeded: m.asNeeded === true, notes });
+  }
+  return out;
 }
 
 /** Team id or null; { error } when the id is unknown. */

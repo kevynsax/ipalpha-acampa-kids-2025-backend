@@ -1,30 +1,17 @@
 {
   "name": "camping-backend",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "bun run --watch src/index.ts",
-    "start": "bun run src/index.ts",
-    "seed": "bun run src/scripts/seed.ts",
-    "seed:categories": "bun run src/scripts/seedCategories.ts",
-    "seed:bedrooms": "bun run src/scripts/seedBedrooms.ts",
-    "seed:schedule": "bun run src/scripts/seedSchedule.ts",
-    "seed:staff": "bun run src/scripts/seedStaff.ts",
-    "seed:notifications": "bun run src/scripts/seedNotifications.ts",
-    "seed:parents": "bun run src/scripts/seedParents.ts",
-    "seed:welcomed": "bun run src/scripts/markWelcomed.ts",
-    "seed:teams": "bun run src/scripts/seedTeams.ts",
-    "import:supabase": "bun run src/scripts/importSupabase.ts",
-    "seed:campers": "bun run src/scripts/seedCampers.ts && bun run src/scripts/dedupEmergencyContacts.ts && bun run src/scripts/cleanHealthNotes.ts && bun run src/scripts/splitCamperNotes.ts && bun run src/scripts/migrateHealthOptions.ts && bun run src/scripts/dedupHealthNotes.ts",
-    "seed:all": "bun run seed && bun run seed:categories && bun run seed:teams && bun run seed:bedrooms && bun run seed:schedule && bun run seed:staff && bun run seed:campers && bun run seed:parents && bun run seed:notifications"
+    "start": "bun run src/index.ts"
   },
   "dependencies": {
     "hono": "^4.6.14",
     "jose": "^5.9.6",
     "mongodb": "^6.12.0",
-    "sanitize-html": "^2.17.7",
-    "xlsx": "^0.18.5"
+    "sanitize-html": "^2.17.7"
   },
   "devDependencies": {
     "@types/sanitize-html": "^2.16.1",

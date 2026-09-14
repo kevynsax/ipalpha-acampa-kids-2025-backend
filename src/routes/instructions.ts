@@ -1,6 +1,6 @@
 import { Hono, type Context } from "hono";
 import { requireAuth } from "../middleware/auth";
-import { requireAdmin, requireRole } from "../middleware/roles";
+import { requireManager, requireRole } from "../middleware/roles";
 import {
   deleteInstruction,
   findInstructionById,
@@ -94,7 +94,7 @@ instructions.get("/", requireRole("admin", "staff", "health_staff"), async (c) =
   return c.json({ instructions: list.filter((d) => canSeeDoc(scope, d)).map(serializeInstruction) });
 });
 
-instructions.post("/", requireAdmin, async (c) => {
+instructions.post("/", requireManager, async (c) => {
   const body = await c.req.json<Record<string, unknown>>().catch(() => null);
   if (!body) return fail(c, "BODY_INVALID", "Corpo da requisição inválido.");
   const result = buildPatch(body, false);
@@ -106,7 +106,7 @@ instructions.post("/", requireAdmin, async (c) => {
 });
 
 /** PUT /api/instructions/reorder  { ids: string[] } — must be declared before /:id */
-instructions.put("/reorder", requireAdmin, async (c) => {
+instructions.put("/reorder", requireManager, async (c) => {
   const body = await c.req.json<{ ids?: unknown }>().catch(() => null);
   const ids = body?.ids;
   if (!Array.isArray(ids) || ids.some((id) => typeof id !== "string")) return fail(c, "IDS_INVALID", "Envie a lista de ids.");
@@ -119,7 +119,7 @@ instructions.put("/reorder", requireAdmin, async (c) => {
   return c.json({ instructions: (await listInstructions()).map(serializeInstruction) });
 });
 
-instructions.put("/:id", requireAdmin, async (c) => {
+instructions.put("/:id", requireManager, async (c) => {
   const existing = await findInstructionById(c.req.param("id"));
   if (!existing) return fail(c, "INSTRUCTION_NOT_FOUND", "Documento não encontrado.", 404);
   const body = await c.req.json<Record<string, unknown>>().catch(() => null);
@@ -132,7 +132,7 @@ instructions.put("/:id", requireAdmin, async (c) => {
   return c.json({ instruction: serializeInstruction(updated!) });
 });
 
-instructions.delete("/:id", requireAdmin, async (c) => {
+instructions.delete("/:id", requireManager, async (c) => {
   const ok = await deleteInstruction(c.req.param("id"));
   if (!ok) return fail(c, "INSTRUCTION_NOT_FOUND", "Documento não encontrado.", 404);
   publish("instructions");

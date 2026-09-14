@@ -1,6 +1,3 @@
 node_modules/
 .env
 *.log
-
-# personal data used by the seeds (RG, phones, health) — never commit
-data/

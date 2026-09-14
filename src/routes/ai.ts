@@ -193,7 +193,7 @@ ai.use("/edit", async (c, next) => {
       return c.json({ error: { code: "FORBIDDEN", message: "Você não tem permissão para usar o assistente." } }, 403);
     }
     const scope = await resolveScope(c.get("user"));
-    if (scope.all || (!scope.organizer && !scope.medical)) {
+    if (!scope.all && !scope.organizer && !scope.medical) {
       return c.json({ error: { code: "FORBIDDEN", message: "Só a organização e a equipe médica podem usar o assistente." } }, 403);
     }
   }
@@ -204,7 +204,7 @@ const editorGuard = createMiddleware<Env>(async (c, next) => {
   if (role !== "admin") {
     if (role !== "staff" && role !== "health_staff") return c.json({ error: { code: "FORBIDDEN", message: "Sem permissão." } }, 403);
     const scope = await resolveScope(c.get("user"));
-    if (scope.all || (!scope.organizer && !scope.medical)) return c.json({ error: { code: "FORBIDDEN", message: "Sem permissão." } }, 403);
+    if (!scope.all && !scope.organizer && !scope.medical) return c.json({ error: { code: "FORBIDDEN", message: "Sem permissão." } }, 403);
   }
   await next();
 });

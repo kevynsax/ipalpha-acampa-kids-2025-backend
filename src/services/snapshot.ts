@@ -17,7 +17,7 @@ import { serializeInstruction } from "../routes/instructions";
 import { serializeOccurrence } from "../routes/occurrences";
 import { serializePrepSection } from "../routes/preparation";
 import { serializeEvent, serializeRole } from "../routes/schedule";
-import { serializeSettings } from "../routes/settings";
+import { serializeSettings, serializeSettingsForManager } from "../routes/settings";
 import { serializeStaffList } from "../routes/staff";
 import { getSettings } from "../models/settings";
 import type { Role } from "../types";
@@ -119,7 +119,10 @@ export async function loadCollections(viewer: Viewer, names: readonly Collection
           else if (scope.medical) out.occurrences = (await listOccurrences()).filter((occurrence) => occurrence.campers.length > 0).map(serializeOccurrence);
           break;
         case "settings":
-          out.settings = await serializeSettings(await getSettings());
+          // offenders list (out-of-scope emergency QR) is manager-only
+          out.settings = scope.all
+            ? await serializeSettingsForManager(await getSettings())
+            : await serializeSettings(await getSettings());
           break;
       }
     }),

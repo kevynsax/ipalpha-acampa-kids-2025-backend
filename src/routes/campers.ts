@@ -1,14 +1,15 @@
 import { Hono, type Context } from "hono";
 import { publish } from "../services/realtime";
-import { notifyBusCheckin, notifyCamperChange, notifyParentEdit } from "../services/notify";
+import { notifyBusCheckin, notifyCamperChange, notifyForeignLookupAlert, notifyParentEdit } from "../services/notify";
 import { requireAuth } from "../middleware/auth";
-import { requireAdmin, requireRole } from "../middleware/roles";
+import { requireManager, requireRole } from "../middleware/roles";
 import { findBedroomById } from "../models/bedrooms";
+import { insertCamperLookup } from "../models/camperLookups";
 import { CHECKIN_FIELD, deleteCamper, findCamperById, insertCamper, listCamperChanges, listCampers, listCheckinLog, logCamperChange, logCheckin, setCamperCheckin, updateCamper, type CamperData } from "../models/campers";
-import { findStaffById, listStaff } from "../models/staff";
+import { FOREIGN_LOOKUP_ALERT_AT, FOREIGN_LOOKUP_BLOCK_AT, findStaffById, findStaffByPhone, listStaff, markForeignLookupAlerted, recordForeignLookup } from "../models/staff";
 import { CAMPER_CATEGORY_KEYS, PARENT_EDITABLE_FIELDS, type Camper, type CamperChangeLog, type CheckinKind, type ParentEditableField, type Role, type SessionUser } from "../types";
-import { normalizeBrazilPhone } from "../utils";
-import { bedroomFullMessage, isInvalid, parseBedroom, parseMulti, parseSingle, parseTeam, parseText } from "./_validate";
+import { normalizeBrazilPhone, titleCaseName } from "../utils";
+import { bedroomFullMessage, isInvalid, parseBedroom, parseMedications, parseMulti, parseSingle, parseTeam, parseText } from "./_validate";
 import { serializeStaffList } from "./staff";
 import { camperVisibility, canParentEdit, canRunBusCheckin, canRunCheckin, resolveScope, type Scope } from "../services/scope";
 
@@ -58,7 +59,7 @@ export function serializeCamper(k: Camper) {
     drugAllergies: k.drugAllergies,
     healthIssues: k.healthIssues,
     neurodivergent: k.neurodivergent,
-    medicines: k.medicines,
+    medications: k.medications,
     foodRestrictions: k.foodRestrictions,
     healthNotes: k.healthNotes,
     generalNotes: k.generalNotes,
@@ -72,6 +73,7 @@ export function serializeCamper(k: Camper) {
     guardianEmail: k.guardianEmail,
     checkin: k.checkin,
     busCheckin: k.busCheckin,
+    parentEditedAt: k.parentEditedAt,
     createdAt: k.createdAt,
     updatedAt: k.updatedAt,
   };
@@ -119,12 +121,13 @@ export function serializeCamperFor(k: Camper, scope: Scope) {
     ...CONTACT_BLANK,
     redacted: true,
     neurodivergent: false,
+    parentEditedAt: null,
     bed: null,
     weightKg: null,
     allergies: [],
     drugAllergies: [],
     healthIssues: [],
-    medicines: "",
+    medications: [],
     foodRestrictions: "",
     healthNotes: "",
     generalNotes: "",
@@ -146,7 +149,7 @@ async function buildPatch(
   const has = (k: string) => !partial || body[k] !== undefined;
 
   if (has("name")) {
-    const name = typeof body.name === "string" ? body.name.trim().replace(/\s+/g, " ") : "";
+    const name = typeof body.name === "string" ? titleCaseName(body.name) : "";
     if (!name || name.length > NAME_MAX) return { code: "NAME_INVALID", message: `Informe um nome com até ${NAME_MAX} caracteres.` };
     patch.name = name;
   }
@@ -231,9 +234,15 @@ async function buildPatch(
     if (!has(field)) continue;
     const v = parseText(body[field], SHORT_MAX);
     if (isInvalid(v)) return { code: `${field.toUpperCase()}_INVALID`, message: v.error };
-    patch[field] = v;
+    patch[field] = field === "guardianName" ? titleCaseName(v) : v;
   }
-  const longs = ["medicines", "foodRestrictions", "healthNotes", "generalNotes", "bedroomPreference"] as const;
+  if (has("medications")) {
+    const v = parseMedications(body.medications);
+    if (isInvalid(v)) return { code: "MEDICATIONS_INVALID", message: v.error };
+    patch.medications = v;
+  }
+
+  const longs = ["foodRestrictions", "healthNotes", "generalNotes", "bedroomPreference"] as const;
   for (const field of longs) {
     if (!has(field)) continue;
     const v = parseText(body[field], TEXT_MAX);
@@ -262,7 +271,7 @@ async function buildPatch(
 async function caretakerConsistent(bedroom: string | null, caretakerId: string | null): Promise<string | null> {
   if (!caretakerId) return null;
   const s = await findStaffById(caretakerId);
-  if (!s || !s.active) return "Líder não encontrado.";
+  if (!s) return "Líder não encontrado.";
   if (!bedroom || s.bedroom !== bedroom) return `${s.name.split(" ")[0]} não dorme neste quarto.`;
   if (s.roomRole !== "caretaker") return `${s.name.split(" ")[0]} é auxiliar neste quarto, não líder.`;
   return null;
@@ -277,6 +286,83 @@ campers.get("/", requireRole("admin", "staff", "health_staff", "parent"), async 
   const bedroom = c.req.query("bedroom") || undefined;
   const [list, scope] = await Promise.all([listCampers({ bedroom }), resolveScope(c.get("user"))]);
   return c.json({ campers: serializeCamperList(list, scope) });
+});
+
+/**
+ * GET /api/campers/lookup/:id — emergency QR lookup (the ONLY intentional HTTP
+ * GET for a kid outside the realtime snapshot). Any team member / admin may
+ * open a kid's badge: when the kid already belongs to their scope the CARE
+ * (or FULL) record is returned with `belonged: true` and nothing is counted;
+ * otherwise they get a CARE record (`contactsHidden`, no guardian data) with
+ * `belonged: false` + a warning, the scan is logged, and the staff member's
+ * out-of-scope counter ticks (distinct kids). ≥3 → SMS to every admin; ≥5 →
+ * further out-of-scope lookups are blocked until Settings → Geral zeroes it.
+ * Parents never use this endpoint.
+ */
+campers.get("/lookup/:id", requireRole("admin", "staff", "health_staff"), async (c) => {
+  const user = c.get("user");
+  const scope = await resolveScope(user);
+  const k = await findCamperById(c.req.param("id"));
+  if (!k) return fail(c, "CAMPER_NOT_FOUND", "Acampante não encontrado.", 404);
+
+  // "belongs to me" = I already look after this kid (full / care). Name-only
+  // visibility (score helper, bus helper) still counts as out-of-scope for the
+  // emergency lookup — those people only know the name for a roll call / scan.
+  const vis = camperVisibility(scope, k);
+  const belonged = scope.all || vis === "full" || vis === "care";
+  if (belonged) {
+    const camper = serializeCamperFor(k, scope) ?? { ...serializeCamper(k), ...CONTACT_BLANK, neurodivergent: false, contactsHidden: true };
+    return c.json({ camper, belonged: true, foreignLookupCount: 0, foreignLookupBlocked: false });
+  }
+
+  const me = scope.staffId ? await findStaffById(scope.staffId) : await findStaffByPhone(user.phone);
+  if (!me || !me.active) return fail(c, "STAFF_NOT_LINKED", "Seu celular não está vinculado a um cadastro da equipe.", 403);
+
+  if (me.foreignLookupCount >= FOREIGN_LOOKUP_BLOCK_AT) {
+    return c.json(
+      {
+        error: {
+          code: "LOOKUP_BLOCKED",
+          message: `Você já leu ${me.foreignLookupCount} crianças que não são do seu quarto. Peça à organização para liberar o acesso.`,
+          foreignLookupCount: me.foreignLookupCount,
+        },
+      },
+      403,
+    );
+  }
+
+  // CARE view for emergencies: health + notes the team needs, never guardian / documents
+  const camper = { ...serializeCamper(k), ...CONTACT_BLANK, neurodivergent: false, contactsHidden: true };
+  // room + caretaker names travel with the response — the scanner's store may not have them
+  const [bedroom, caretaker] = await Promise.all([
+    k.bedroom ? findBedroomById(k.bedroom) : null,
+    k.caretakerId ? findStaffById(k.caretakerId) : null,
+  ]);
+  await insertCamperLookup({
+    at: new Date(),
+    camperId: k._id,
+    camperName: k.name,
+    byStaffId: me._id,
+    byStaffName: me.name,
+    byUserId: user.id,
+    belonged: false,
+  });
+  const updated = (await recordForeignLookup(me._id, k._id, k.name)) ?? me;
+  if (updated.foreignLookupCount >= FOREIGN_LOOKUP_ALERT_AT && !updated.foreignLookupAlertedAt) {
+    await markForeignLookupAlerted(me._id);
+    void notifyForeignLookupAlert(updated, updated.foreignLookupCount, updated.foreignLookupNames);
+  }
+  // staff list carries the counter for the admin export; settings refreshes the Geral card once someone is at/above the threshold
+  if (updated.foreignLookupCount >= FOREIGN_LOOKUP_ALERT_AT) publish("staff", "settings");
+  else publish("staff");
+  return c.json({
+    camper,
+    bedroom: bedroom ? { id: bedroom._id, name: bedroom.name, group: bedroom.group } : null,
+    caretaker: caretaker ? { id: caretaker._id, name: caretaker.name } : null,
+    belonged: false,
+    foreignLookupCount: updated.foreignLookupCount,
+    foreignLookupBlocked: updated.foreignLookupCount >= FOREIGN_LOOKUP_BLOCK_AT,
+  });
 });
 
 campers.get("/:id", requireRole("admin", "staff", "health_staff", "parent"), async (c) => {
@@ -353,10 +439,10 @@ campers.delete("/:id/checkin/bus", TEAM_OR_ADMIN, (c) => doCheckin(c, "bus", "un
 
 /** GET /api/campers/checkin/log — full audit trail (admin). GET /api/campers/:id/checkin/log — one kid. */
 function serializeLog(l: Awaited<ReturnType<typeof listCheckinLog>>[number]) {
-  return { id: l._id, camperId: l.camperId, camperName: l.camperName, kind: l.kind ?? "church", action: l.action, at: l.at, byUserId: l.byUserId, byName: l.byName, byRole: l.byRole };
+  return { id: l._id, camperId: l.camperId, camperName: l.camperName, kind: l.kind ?? "church", action: l.action, at: l.at, byUserId: l.byUserId, byName: l.byName, byRole: l.byRole, note: l.note ?? null };
 }
-campers.get("/checkin/log", requireAdmin, async (c) => c.json({ log: (await listCheckinLog()).map(serializeLog) }));
-campers.get("/:id/checkin/log", requireAdmin, async (c) => {
+campers.get("/checkin/log", requireManager, async (c) => c.json({ log: (await listCheckinLog()).map(serializeLog) }));
+campers.get("/:id/checkin/log", requireManager, async (c) => {
   const k = await findCamperById(c.req.param("id"));
   if (!k) return fail(c, "CAMPER_NOT_FOUND", "Acampante não encontrado.", 404);
   return c.json({ log: (await listCheckinLog(k._id)).map(serializeLog) });
@@ -369,7 +455,7 @@ function serializeChange(l: CamperChangeLog) {
 }
 
 /** GET /api/campers/:id/changes — every edit the parent made to this kid, newest first (admin). */
-campers.get("/:id/changes", requireAdmin, async (c) => {
+campers.get("/:id/changes", requireManager, async (c) => {
   const k = await findCamperById(c.req.param("id"));
   if (!k) return fail(c, "CAMPER_NOT_FOUND", "Acampante não encontrado.", 404);
   return c.json({ changes: (await listCamperChanges(k._id)).map(serializeChange) });
@@ -418,9 +504,9 @@ campers.put("/:id/parent", requireRole("parent"), async (c) => {
   return c.json({ camper: serializeCamperFor(updated, scope), changed: true });
 });
 
-// ── write: admin only ──────────────────────────────────────────────────────────
+// ── write: admin or organizer ──────────────────────────────────────────────────────────
 
-campers.use("/*", requireAdmin);
+campers.use("/*", requireManager);
 
 campers.post("/", async (c) => {
   const body = await c.req.json<Record<string, unknown>>().catch(() => null);

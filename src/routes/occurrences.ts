@@ -45,7 +45,9 @@ async function occurrenceAccess(c: Context<Env, string>): Promise<{ admin: boole
   if (role === "admin") return { admin: true, medical: false };
   if (role !== "staff" && role !== "health_staff") return null;
   const scope = await resolveScope(c.get("user"));
-  return !scope.all && scope.medical ? { admin: false, medical: true } : null;
+  // an organizer has the admin's scope over occurrences too
+  if (scope.all) return { admin: true, medical: false };
+  return scope.medical ? { admin: false, medical: true } : null;
 }
 
 function parseIds(value: unknown, label: string): string[] | { error: string } {

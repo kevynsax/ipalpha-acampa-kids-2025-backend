@@ -42,7 +42,7 @@ files.post("/", requireAuth, async (c) => {
       return c.json({ error: { code: "FORBIDDEN", message: "Você não tem permissão para enviar imagens." } }, 403);
     }
     const scope = await resolveScope(c.get("user"));
-    if (scope.all || (!scope.organizer && !scope.medical)) {
+    if (!scope.all && !scope.organizer && !scope.medical) {
       return c.json({ error: { code: "FORBIDDEN", message: "Só a organização e a equipe médica podem enviar imagens." } }, 403);
     }
   }

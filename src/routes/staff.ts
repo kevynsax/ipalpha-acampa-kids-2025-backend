@@ -2,7 +2,7 @@ import { Hono, type Context } from "hono";
 import { createMiddleware } from "hono/factory";
 import { publish } from "../services/realtime";
 import { requireAuth } from "../middleware/auth";
-import { requireAdmin, requireRole } from "../middleware/roles";
+import { requireManager, requireRole } from "../middleware/roles";
 import { countStaffPerBedroom, findBedroomById } from "../models/bedrooms";
 import { countCampersPerBedroom } from "../models/campers";
 import { listCampers, reassignCampers, setCaretakerOf } from "../models/campers";
@@ -26,8 +26,9 @@ import { bedroomCapacity, ROOM_ROLES, STAFF_CATEGORY_KEYS, type Role, type RoomR
 import { canHandleVests, hideOwnBedroom, isParent, resolveScope, staffVisibility, type Scope } from "../services/scope";
 import { bedroomFullMessage, isInvalid, parseBedroom, parseMulti, parseSingle, parseTeam, parseText } from "./_validate";
 import { clearJokerEverywhere } from "../models/teams";
-import { distanceMeters, normalizeBrazilPhone, nowInSaoPauloWallClock, saoPauloWallClock, saoPauloWallClockToIso, todayInSaoPaulo } from "../utils";
+import { distanceMeters, normalizeBrazilPhone, titleCaseName, nowInSaoPauloWallClock, saoPauloWallClock, saoPauloWallClockToIso, todayInSaoPaulo } from "../utils";
 import { getSettings } from "../models/settings";
+import { isAdminPhone } from "../models/users";
 import { notifyCaretakerChange, notifyCheckin, notifyStaffChange, syncWelcomes } from "../services/notify";
 
 interface Env {
@@ -89,6 +90,9 @@ export function serializeStaffFor(s: Staff, scope: Scope) {
     checkin: null,
     vest: vis === "contact" && !isParent(scope) ? s.vest : NO_VEST,
     prepDone: [],
+    // never leak another person's out-of-scope scan history to roommates / vest helpers / parents
+    foreignLookupCount: 0,
+    foreignLookupNames: [],
   };
 }
 
@@ -102,6 +106,8 @@ function serialize(s: Staff) {
     id: s._id,
     name: s.name,
     phone: s.phone,
+    /** an ADMIN's own roster record: can't be deleted, deactivated or have the phone changed */
+    admin: isAdminPhone(s.phone),
     active: s.active,
     team: s.team,
     bedroom: s.bedroom,
@@ -116,6 +122,9 @@ function serialize(s: Staff) {
     checkin: s.checkin,
     vest: s.vest,
     prepDone: s.prepDone,
+    /** out-of-scope emergency QR lookups — always on the wire so the admin export / Geral card can show them; 0 for everyone else in practice */
+    foreignLookupCount: s.foreignLookupCount,
+    foreignLookupNames: s.foreignLookupNames,
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
   };
@@ -134,7 +143,7 @@ async function buildPatch(
   const has = (k: string) => !partial || body[k] !== undefined;
 
   if (has("name")) {
-    const name = typeof body.name === "string" ? body.name.trim().replace(/\s+/g, " ") : "";
+    const name = typeof body.name === "string" ? titleCaseName(body.name) : "";
     if (!name || name.length > NAME_MAX) {
       return { code: "NAME_INVALID", message: `Informe um nome com até ${NAME_MAX} caracteres.` };
     }
@@ -288,8 +297,9 @@ staff.get("/:id/detail", requireRole("admin", "staff", "health_staff"), async (c
  * The rule, so the phone can't lie about it: it must be the departure day
  * (the day of the FIRST event of the programme), the window opens
  * `SELF_CHECKIN_OPENS_MINUTES_BEFORE` before that event starts, and the
- * device must be at the church — within `checkinLocation.radiusM` of the
- * point the admin set on the settings page. All checks run here, never
+ * device must be at ONE of the meeting points (`settings.checkinLocations`:
+ * the church, the camp site…) — within that spot's radius; the nearest spot
+ * wins and is recorded in the stamp. All checks run here, never
  * trusted from the client. Times are compared in São Paulo wall-clock.
  */
 export type SelfCheckinBlock = "NOT_LINKED" | "INACTIVE" | "NO_SCHEDULE" | "NOT_TODAY" | "NOT_YET" | "ALREADY_CHECKED_IN";
@@ -333,7 +343,7 @@ staff.get("/me/checkin", requireRole("staff", "health_staff", "admin"), async (c
     reason: gate.ok ? null : { code: gate.code, message: gate.message },
     date: gate.date,
     opensAt: gate.opensAt,
-    location: settings.checkinLocation,
+    locations: settings.checkinLocations,
     staff: gate.ok ? serialize(gate.me) : null,
   });
 });
@@ -352,23 +362,25 @@ staff.post("/me/checkin", requireRole("staff", "health_staff", "admin"), async (
   const gate = await selfCheckinGate(user);
   if (!gate.ok) return fail(c, gate.code, gate.message, gate.code === "ALREADY_CHECKED_IN" ? 409 : 400);
 
-  const { checkinLocation } = await getSettings();
-  const distance = Math.round(distanceMeters({ lat, lng }, checkinLocation));
-  // give the benefit of the GPS error margin (capped, so a 5 km "accuracy" can't be abused)
-  const tolerance = checkinLocation.radiusM + Math.min(accuracyM, 200);
-  if (distance > tolerance) {
+  const { checkinLocations } = await getSettings();
+  // the nearest meeting point; give the benefit of the GPS error margin (capped, so a 5 km "accuracy" can't be abused)
+  const slack = Math.min(accuracyM, 200);
+  const ranked = checkinLocations.map((spot) => ({ spot, distance: Math.round(distanceMeters({ lat, lng }, spot)) })).sort((a, b) => a.distance - b.distance);
+  const nearest = ranked[0];
+  const hit = ranked.find((r) => r.distance <= r.spot.radiusM + slack);
+  if (!hit) {
     return c.json(
-      { error: { code: "TOO_FAR", message: `Você está a ${fmtDistance(distance)} da igreja. Chegue mais perto para fazer o check-in.`, distanceM: distance } },
+      { error: { code: "TOO_FAR", message: `Você está a ${fmtDistance(nearest.distance)} de ${nearest.spot.name}. Chegue mais perto para fazer o check-in.`, distanceM: nearest.distance, locationId: nearest.spot.id } },
       400,
     );
   }
 
   const stamp = { at: new Date(), byUserId: user.id, byName: user.name, byRole: user.activeRole };
   const updated = await setStaffCheckin(gate.me._id, stamp);
-  await logCheckin({ who: "staff", camperId: gate.me._id, camperName: gate.me.name, kind: "church", action: "checkin", ...stamp });
+  await logCheckin({ who: "staff", camperId: gate.me._id, camperName: gate.me.name, kind: "church", action: "checkin", ...stamp, note: hit.spot.name });
   publish("staff");
   void notifyCheckin(updated!); // fire-and-forget: the SMS never delays or fails the check-in
-  return c.json({ staff: serialize(updated!), distanceM: distance });
+  return c.json({ staff: serialize(updated!), distanceM: hit.distance, location: hit.spot });
 });
 
 /**
@@ -391,9 +403,9 @@ function fmtDistance(m: number): string {
   return m >= 1000 ? `${(m / 1000).toFixed(1).replace(".", ",")} km` : `${m} m`;
 }
 
-// ── check-in: admin only (for now the roll calls are an admin feature) ─────
+// ── check-in roll call: admin or organizer ─────
 
-const canCheckin = requireAdmin;
+const canCheckin = requireManager;
 
 /** Marks or unmarks the arrival of a team member, stamping who did it and writing the audit line. */
 async function doCheckin(c: Context<Env>, action: "checkin" | "undo") {
@@ -464,9 +476,9 @@ staff.delete("/:id/vest/delivery", requireRole("admin", "staff", "health_staff")
 staff.post("/:id/vest/return", requireRole("admin", "staff", "health_staff"), requireVestHandler, (c) => doVest(c, "return"));
 staff.delete("/:id/vest/return", requireRole("admin", "staff", "health_staff"), requireVestHandler, (c) => doVest(c, "undo-return"));
 
-// ── write: admin only ──────────────────────────────────────────────────────
+// ── write: admin or organizer ──────────────────────────────────────────────────────
 
-staff.use("/*", requireAdmin);
+staff.use("/*", requireManager);
 
 /**
  * POST /api/staff
@@ -503,6 +515,12 @@ staff.put("/:id", async (c) => {
   const result = await buildPatch(body, true);
   if (!("patch" in result)) return fail(c, result.code, result.message, result.status);
 
+  // an admin's own record: the phone is their login and the record must stay on the roster
+  if (isAdminPhone(existing.phone)) {
+    if (result.patch.phone !== undefined && result.patch.phone !== existing.phone) return fail(c, "ADMIN_LOCKED", "O celular de um admin não pode ser alterado por aqui.", 409);
+    if (result.patch.active === false) return fail(c, "ADMIN_LOCKED", "Um admin não pode ser desativado.", 409);
+  }
+
   if (result.patch.phone && result.patch.phone !== existing.phone) {
     const clash = await findStaffByPhone(result.patch.phone);
     if (clash && clash._id !== existing._id) {
@@ -517,7 +535,8 @@ staff.put("/:id", async (c) => {
 
   const updated = await updateStaff(existing._id, result.patch);
   // left the room, or stopped being a caretaker there → their kids are orphans now
-  const lostKids = (updated!.bedroom !== existing.bedroom || updated!.roomRole !== "caretaker" || !updated!.active) && existing.roomRole === "caretaker";
+  // (deactivation only removes app access / notifications — the kids stay with them)
+  const lostKids = (updated!.bedroom !== existing.bedroom || updated!.roomRole !== "caretaker") && existing.roomRole === "caretaker";
   const orphaned = lostKids ? await reassignCampers(existing._id, null) : 0;
   publish("staff", "bedrooms", ...(orphaned ? ["campers" as const] : []), ...(updated!.roomRole !== existing.roomRole ? ["instructions" as const, "preparation" as const] : []));
   // fire-and-forget: the SMS never delays the write (deactivation is silent)
@@ -555,7 +574,7 @@ staff.post("/:id/move", async (c) => {
   const touched = new Set<string>();
 
   if (kids === "swap") {
-    if (!other || !other.active || !target || other.bedroom !== target) return fail(c, "SWAP_INVALID", "Escolha alguém que durma no quarto de destino para trocar.", 409);
+    if (!other || !target || other.bedroom !== target) return fail(c, "SWAP_INVALID", "Escolha alguém que durma no quarto de destino para trocar.", 409);
     const theirKids = await listCampers({ caretakerId: other._id });
     // capacities are unaffected (one person out, one in) — only the kids swap hands
     await updateStaff(me._id, { bedroom: target, roomRole: "caretaker" });
@@ -567,7 +586,7 @@ staff.post("/:id/move", async (c) => {
     void notifyCaretakerChange(myKids, me, other);
     void notifyCaretakerChange(theirKids, other, me);
   } else if (kids === "assign") {
-    if (!other || !other.active || other._id === me._id || other.bedroom !== me.bedroom) return fail(c, "ASSIGN_INVALID", "Escolha alguém do mesmo quarto para assumir as crianças.", 409);
+    if (!other || other._id === me._id || other.bedroom !== me.bedroom) return fail(c, "ASSIGN_INVALID", "Escolha alguém do mesmo quarto para assumir as crianças.", 409);
     if (target !== me.bedroom) {
       const full = await bedroomFullMessage(target, me.bedroom);
       if (full) return fail(c, "BEDROOM_FULL", full, 409);
@@ -604,6 +623,8 @@ staff.post("/:id/move", async (c) => {
 
 staff.delete("/:id", async (c) => {
   const id = c.req.param("id");
+  const existing = await findStaffById(id);
+  if (existing && isAdminPhone(existing.phone)) return fail(c, "ADMIN_LOCKED", "Um admin não pode ser excluído da equipe.", 409);
   const ok = await deleteStaff(id);
   if (!ok) return fail(c, "STAFF_NOT_FOUND", "Membro da equipe não encontrado.", 404);
   const [, , orphaned] = await Promise.all([unassignStaffEverywhere(id), clearJokerEverywhere(id), reassignCampers(id, null)]);

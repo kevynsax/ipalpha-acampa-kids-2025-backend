@@ -1,6 +1,6 @@
 import { config } from "../config";
 import { findBedroomById } from "../models/bedrooms";
-import { countCampersPerBedroom, listCampers } from "../models/campers";
+import { claimBirthdayNotice, countCampersPerBedroom, listCampers } from "../models/campers";
 import { findCategoryByKey } from "../models/categories";
 import { listRoles } from "../models/schedule";
 import { claimCheckinReminder, getSettings, staffAccessOpen } from "../models/settings";
@@ -9,8 +9,9 @@ import { findTeamById } from "../models/teams";
 import { claimParentWelcome, listAdmins, listParents } from "../models/users";
 import { PARENT_FIELD_LABEL, PREP_AUDIENCES, STAFF_CATEGORY_KEYS } from "../types";
 import type { CampEvent, Camper, CamperChangeLog, DocAudience, InstructionDoc, Occurrence, PrepAudience, PrepSection, ScheduleRole, Settings, Staff } from "../types";
-import { formatBrazilPhone } from "../utils";
-import { comteleEnabled, comteleSendSms } from "./comtele";
+import { formatBrazilPhone, saoPauloWallClock, saoPauloWallClockToIso, todayInSaoPaulo } from "../utils";
+import { birthdayDuringCamp, campPeriod } from "./camp";
+import { comteleEnabled, comteleSendSms, resolveSmsTarget, type SmsAudience } from "./comtele";
 import { staffHasAccess } from "./scope";
 
 /**
@@ -165,14 +166,24 @@ export function composeSms(p: Pick<Pending, "to" | "items">): string {
   return render([clip(texts[0], SMS_MAX - fixed)], texts.length - 1);
 }
 
-/** Actually texts one person (or prints it, without a Comtele key). */
-async function deliver(to: { name: string; phone: string | null }, text: string, label: string): Promise<void> {
-  if (!comteleEnabled()) {
-    console.log(`\n📲 [NOTIFY · DEV MOCK] ${to.name} — ${formatBrazilPhone(to.phone!)}: ${text}\n`);
+/**
+ * Actually texts one person (or prints it, without a Comtele key). While the
+ * SMS redirect (Settings → Testes) is on, the text goes to the admin's test
+ * phone for `audience` instead — or nowhere, when that phone is unset.
+ */
+async function deliver(to: { name: string; phone: string | null }, text: string, label: string, audience: SmsAudience = "staff"): Promise<void> {
+  const target = await resolveSmsTarget(to.phone!, audience);
+  if (!target) {
+    console.log(`📲 [NOTIFY · REDIRECT] ${to.name} (${label}) dropped — no test phone for ${audience}`);
     return;
   }
-  const res = await comteleSendSms(to.phone!, text);
-  if (res.ok) console.log(`📲 [NOTIFY · SMS] ${to.name} (${label})`);
+  const tag = target.redirected ? ` → redirect ${formatBrazilPhone(target.phone)}` : "";
+  if (!comteleEnabled()) {
+    console.log(`\n📲 [NOTIFY · DEV MOCK] ${to.name} — ${formatBrazilPhone(to.phone!)}${tag}: ${text}\n`);
+    return;
+  }
+  const res = await comteleSendSms(target.phone, text);
+  if (res.ok) console.log(`📲 [NOTIFY · SMS] ${to.name} (${label})${tag}`);
   else console.error(`[comtele] notify to ${to.name} failed:`, res.message);
 }
 
@@ -183,7 +194,7 @@ async function flush(): Promise<void> {
   const settings = await getSettings().catch(() => null);
   for (const p of batch) {
     if (settings && !gateOpen(p.gate, settings)) continue; // window closed while coalescing
-    await deliver(p.to, composeSms(p), [...new Set(p.items.map((i) => i.kind))].join("+"));
+    await deliver(p.to, composeSms(p), [...new Set(p.items.map((i) => i.kind))].join("+"), p.gate.kind);
   }
 }
 
@@ -267,6 +278,63 @@ export async function sendCheckinReminder(): Promise<void> {
   }
 }
 
+// ── a kid's birthday on a camp day → the whole team of the room ─────────────────────────────
+
+/** São Paulo wall-clock at which the birthday SMS goes out */
+export const BIRTHDAY_SMS_TIME = "07:45";
+
+/** "João, hoje é aniversário da Ana (8 anos), do quarto 103! 🎂 Vamos fazer o dia dela especial." */
+export function composeBirthdaySms(toName: string, kid: Pick<Camper, "name" | "sex" | "birthDate">, room: string | null, day: string): string {
+  const age = kid.birthDate ? Number(day.slice(0, 4)) - Number(kid.birthDate.slice(0, 4)) : null;
+  const of = kid.sex === "F" ? "da" : "do";
+  const pron = kid.sex === "F" ? "dela" : "dele";
+  const build = (withAge: boolean) =>
+    `${config.comtele.prefix}: ${first(toName)}, hoje é aniversário ${of} ${first(kid.name)}${withAge && age ? ` (${age} anos)` : ""}${room ? `, do quarto ${room}` : ""}! 🎂 Vamos fazer o dia ${pron} especial.`;
+  const msg = build(true);
+  return msg.length <= SMS_MAX ? msg : build(false);
+}
+
+/**
+ * The instant (real) at which today's birthday SMS is due: BIRTHDAY_SMS_TIME
+ * São Paulo on `day`.
+ */
+export function birthdaySmsDue(day: string): Date {
+  return new Date(saoPauloWallClockToIso(saoPauloWallClock(day, BIRTHDAY_SMS_TIME)));
+}
+
+/**
+ * Texts EVERY active team member sleeping in the room of a kid whose birthday
+ * is TODAY (a camp day), from 07:45 São Paulo on. Runs from the daily timer
+ * (services/realtime.ts), the hourly safety net and boot. Nothing goes out when:
+ *   - the `birthdays` toggle is off, or the rooms are still a draft,
+ *   - today is not a camp day, or it is before 07:45,
+ *   - it already went out for that kid on that day (claimed atomically).
+ * Not coalesced; the room staff is gated by the team access window like every
+ * other text.
+ */
+export async function sendBirthdayNotices(now = new Date()): Promise<void> {
+  try {
+    const settings = await getSettings();
+    if (!settings.notifications.birthdays || settings.kidsRoomsDraft) return;
+    const period = await campPeriod();
+    const today = todayInSaoPaulo(now);
+    if (!period.from || !period.until || today < period.from || today > period.until) return;
+    if (now < birthdaySmsDue(today)) return;
+    const kids = (await listCampers()).filter((k) => k.bedroom && birthdayDuringCamp(k.birthDate, period) === today);
+    if (kids.length === 0) return;
+    const staff = (await listStaff({ active: true })).filter((s) => s.phone && s.bedroom);
+    for (const kid of kids) {
+      if (!(await claimBirthdayNotice(kid._id, today))) continue;
+      const room = await bedroomName(kid.bedroom);
+      const team = staff.filter((s) => s.bedroom === kid.bedroom && staffHasAccess(s._id, settings));
+      console.log(`🎂 birthday of ${kid.name} today → texting ${team.length} team members of room ${room ?? kid.bedroom}`);
+      for (const s of team) await deliver(s, composeBirthdaySms(s.name, kid, room, today), "birthday");
+    }
+  } catch (err) {
+    console.error("notify: birthday notices failed", err);
+  }
+}
+
 // ── a parent edited their kid's "Pontos de atenção" ───────────────────────────────────
 
 /**
@@ -344,6 +412,32 @@ export async function notifyOccurrence(o: Occurrence): Promise<void> {
     }
   } catch (err) {
     console.error("notify: occurrence failed", err);
+  }
+}
+
+/**
+ * SMS when a team member has scanned ≥3 kids OUTSIDE their normal scope
+ * (emergency QR lookup). Always sent — not gated by the occurrences toggle
+ * (this is a security alert, not an occurrence). Once per streak until the
+ * admin zeroes the counter in Settings → Geral.
+ */
+export function composeForeignLookupSms(adminName: string, staffName: string, count: number, kidNames: string[]): string {
+  const kids = kidNames.slice(0, 3).map(first).join(", ");
+  const extra = kidNames.length > 3 ? ` +${kidNames.length - 3}` : "";
+  const build = (list: string) =>
+    `${config.comtele.prefix}: ${first(adminName)}, ${first(staffName)} leu ${count} criança${count === 1 ? "" : "s"} fora do escopo${list ? ` (${list}${extra})` : ""}. Veja em ${appLink()}`;
+  const msg = build(kids);
+  return msg.length <= SMS_MAX ? msg : build("");
+}
+
+export async function notifyForeignLookupAlert(staff: Pick<Staff, "_id" | "name">, count: number, kidNames: string[]): Promise<void> {
+  try {
+    for (const admin of await listAdmins()) {
+      if (!admin.phone) continue;
+      await deliver(admin, composeForeignLookupSms(admin.name, staff.name, count, kidNames), "foreign-lookup");
+    }
+  } catch (err) {
+    console.error("notify: foreign-lookup alert failed", err);
   }
 }
 
@@ -600,7 +694,7 @@ export async function notifyBusCheckin(kid: Camper): Promise<void> {
     if (!kid.guardianPhone) return;
     const settings = await getSettings();
     if (!settings.notifications.busCheckin) return;
-    await deliver({ name: kid.guardianName || `responsável de ${first(kid.name)}`, phone: kid.guardianPhone }, composeBusCheckinSms(kid), "bus-checkin");
+    await deliver({ name: kid.guardianName || `responsável de ${first(kid.name)}`, phone: kid.guardianPhone }, composeBusCheckinSms(kid), "bus-checkin", "parent");
   } catch (err) {
     console.error("notify: bus check-in failed", err);
   }
@@ -643,7 +737,7 @@ export async function syncParentWelcomes(): Promise<void> {
     if (!staffAccessOpen(settings.parentAccessWindow)) return;
     for (const p of await pendingParentWelcomes()) {
       if (!(await claimParentWelcome(p.id))) continue;
-      await deliver(p, composeParentWelcomeSms(p, p.kids), "parent-welcome");
+      await deliver(p, composeParentWelcomeSms(p, p.kids), "parent-welcome", "parent");
     }
   } catch (err) {
     console.error("notify: parent welcome sync failed", err);
@@ -722,8 +816,8 @@ export async function syncWelcomes(): Promise<void> {
 /** every admin-list membership of one person, as the person reads it */
 async function listRolesOf(id: string, s: Settings): Promise<string[]> {
   const out: string[] = [];
-  if (s.organizers.staffIds.includes(id)) out.push("organizador da programação");
-  if (s.gameOrganizers.staffIds.includes(id)) out.push("organizador dos jogos (placar)");
+  if (s.organizers.staffIds.includes(id)) out.push("organizador (acesso de administração)");
+  if (s.gameOrganizers.staffIds.includes(id)) out.push("organizador dos jogos (programação e placar)");
   if (s.scoreHelpers.staffIds.includes(id)) out.push("ajudante do placar (lança pontos)");
   if (s.checkinHelpers.staffIds.includes(id)) out.push("ajudante do check-in");
   const bus = s.busHelpers.helpers.find((h) => h.staffId === id);

@@ -108,7 +108,7 @@ export function bedroomCapacity(b: Pick<Bedroom, "bunkBeds" | "singleBeds">): nu
 // ── Staff (equipe / voluntários) ────────────────────────────────────────
 
 /**
- * Category keys (see scripts/seedCategories.ts) that feed each staff field.
+ * Category keys that feed each staff field.
  * The staff record stores the chosen OPTION ids; labels come from the category.
  */
 export const STAFF_CATEGORY_KEYS = {
@@ -158,6 +158,17 @@ export interface Staff {
   prepDone: string[];
   /** when the welcome SMS (app link) went out — null until then; it is sent ONCE, ever (see services/notify.ts syncWelcomes) */
   welcomeSentAt: Date | null;
+  /**
+   * Emergency QR lookups of kids OUTSIDE this person's normal scope
+   * (GET /api/campers/lookup/:id). Distinct kids only. ≥3 texts the admins;
+   * ≥5 blocks further out-of-scope lookups until the admin zeroes the counter
+   * (Settings → Geral). Belonging-to-me scans never increment this.
+   */
+  foreignLookupCount: number;
+  /** names of the distinct out-of-scope kids already counted (newest last; capped) */
+  foreignLookupNames: string[];
+  /** when the admins were SMS'd about the 3rd out-of-scope scan (once until reset) */
+  foreignLookupAlertedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -215,6 +226,26 @@ export const CAMPER_CATEGORY_KEYS = {
   healthIssues: "condicao-cronica",
 } as const;
 
+/**
+ * One medicine a kid takes during the camp. `times` are the fixed "HH:MM"
+ * moments of the day it is given (the medical checklist ticks each one);
+ * `asNeeded` = no fixed time ("quando necessário"). Both empty = schedule
+ * not informed yet — the medical team should confirm with the parents.
+ */
+export interface Medication {
+  /** "Ritalina", "Colírio Hyabak" */
+  name: string;
+  /** "10mg", "1 comprimido", "1 gota em cada olho" */
+  dose: string;
+  /** "HH:MM", sorted, unique */
+  times: string[];
+  asNeeded: boolean;
+  /** "junto com o café", "quando o olho estiver seco" */
+  notes: string;
+}
+export const MEDICATIONS_MAX = 20;
+export const MEDICATION_TIMES_MAX = 12;
+
 export interface Camper {
   _id: string;
   name: string;
@@ -255,7 +286,8 @@ export interface Camper {
   healthIssues: string[];
   /** neurodivergent (TEA, TDAH…) — ADMIN and MEDICAL team only; never sent to room staff */
   neurodivergent: boolean;
-  medicines: string;
+  /** medicines the kid takes, each with its schedule (drives the medical checklist) */
+  medications: Medication[];
   foodRestrictions: string;
   healthNotes: string;
   generalNotes: string;
@@ -273,6 +305,8 @@ export interface Camper {
   checkin: CamperCheckin | null;
   /** set when the kid boarded the bus (the roll call done inside the vehicle) */
   busCheckin: CamperCheckin | null;
+  /** when a PARENT last edited the "Pontos de atenção" (see CamperChangeLog) — null until they do */
+  parentEditedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -330,13 +364,13 @@ export interface Occurrence {
  * texted to the medical team, the admins and the caretaker; a change to the
  * observations alone only to the caretaker (see services/notify.ts).
  */
-export const PARENT_EDITABLE_FIELDS = ["allergies", "drugAllergies", "healthIssues", "medicines", "foodRestrictions", "healthNotes", "weightKg", "insurance", "insuranceCard", "generalNotes"] as const;
+export const PARENT_EDITABLE_FIELDS = ["allergies", "drugAllergies", "healthIssues", "medications", "foodRestrictions", "healthNotes", "weightKg", "insurance", "insuranceCard", "generalNotes"] as const;
 export type ParentEditableField = (typeof PARENT_EDITABLE_FIELDS)[number];
 export const PARENT_FIELD_LABEL: Record<ParentEditableField, string> = {
   allergies: "alergias",
   drugAllergies: "alergia a medicamentos",
   healthIssues: "condição de saúde",
-  medicines: "medicação",
+  medications: "medicação",
   foodRestrictions: "alimentação",
   healthNotes: "observações médicas",
   weightKg: "peso",
@@ -376,6 +410,8 @@ export interface CheckinLog {
   byUserId: string;
   byName: string;
   byRole: Role;
+  /** self check-in: the meeting point (Settings → Check-in) the person was at */
+  note?: string;
 }
 
 // ── Schedule (programação): events + the roles staff fulfil in them ───────
@@ -501,11 +537,18 @@ export interface StoredFile {
 
 // ── Settings (admin-managed, one document for the whole camp) ─────────────
 
-/** Where the team must be to check themselves in on departure day. */
+/**
+ * One of the spots where the team may check themselves in on departure day
+ * (the church, the camp site for whoever drives straight there…). The
+ * self check-in accepts the NEAREST spot within its radius.
+ */
 export interface CheckinLocation {
+  id: string;
+  /** shown to the team: "Igreja", "Acampamento"… */
+  name: string;
   lat: number;
   lng: number;
-  /** how far from the point (in metres) still counts as "at the church" */
+  /** how far from the point (in metres) still counts as "arrived" */
   radiusM: number;
 }
 
@@ -535,6 +578,8 @@ export interface NotificationSettings {
   busCheckin: boolean;
   /** when the PARENTS' access window opens each parent gets, ONCE ever, the "you're enrolled, here's the app" SMS */
   parentWelcome: boolean;
+  /** a kid's birthday falls on a camp day → at 07:45 (São Paulo) that day the whole team of the kid's room is texted */
+  birthdays: boolean;
 }
 
 /** One-shot reminder to the whole team to do their check-in. */
@@ -593,7 +638,8 @@ export interface ParentContact {
 }
 
 export interface Settings {
-  checkinLocation: CheckinLocation;
+  /** at least one; the team's self check-in matches the nearest one */
+  checkinLocations: CheckinLocation[];
   notifications: NotificationSettings;
   checkinWindow: CheckinWindow;
   checkinHelpers: StaffList;
@@ -664,7 +710,24 @@ export interface Settings {
   scoreDraft: boolean;
   /** the "do your check-in" SMS to the whole team, scheduled for one instant */
   checkinReminder: CheckinReminder;
+  /**
+   * SMS REDIRECT (Settings → Testes): while `enabled`, every text meant for a
+   * team member (login code + notifications) goes to `staffPhone` and every
+   * text meant for a parent / guardian goes to `parentPhone` instead of the
+   * real number — so the admin can rehearse the whole flow without texting
+   * anyone. A null phone for an audience means that audience's texts are
+   * simply dropped. MUST be switched off before the camp.
+   */
+  smsRedirect: SmsRedirect;
   updatedAt: Date | null;
+}
+
+export interface SmsRedirect {
+  enabled: boolean;
+  /** E.164 — receives everything meant for the team (OTP + notifications) */
+  staffPhone: string | null;
+  /** E.164 — receives everything meant for the parents (OTP + notifications) */
+  parentPhone: string | null;
 }
 
 export interface Session {

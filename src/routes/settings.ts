@@ -1,16 +1,17 @@
 import { Hono, type Context } from "hono";
 import { requireAuth } from "../middleware/auth";
-import { requireAdmin } from "../middleware/roles";
+import { requireAdmin, requireManager } from "../middleware/roles";
 import { findCategoryByKey } from "../models/categories";
 import { checkinWindowOpen, getSettings, staffAccessOpen, updateSettings } from "../models/settings";
-import { listStaff, resetStaffCheckins, resetStaffVests } from "../models/staff";
+import { FOREIGN_LOOKUP_ALERT_AT, listForeignLookupOffenders, listStaff, resetForeignLookups, resetStaffCheckins, resetStaffVests } from "../models/staff";
 import { clearCheckinLog, resetCamperCheckins } from "../models/campers";
 import { comteleEnabled } from "../services/comtele";
-import { notifyAccessListChange, syncParentWelcomes, syncWelcomes, welcomePreview } from "../services/notify";
+import { normalizeBrazilPhone } from "../utils";
+import { notifyAccessListChange, sendBirthdayNotices, syncParentWelcomes, syncWelcomes, welcomePreview } from "../services/notify";
 import { evictStaffOutsideWindow, publish, rearmWindows, scheduleCheckinReminder } from "../services/realtime";
 import { listEvents } from "../models/schedule";
 import { parentWindowOf, parentWindowOpen } from "../services/camp";
-import { CAMPER_CATEGORY_KEYS, type BusHelperList, type CheckinLocation, type CheckinWindow, type NotificationSettings, type ParentContact, type Role, type SessionUser, type Settings, type StaffList } from "../types";
+import { CAMPER_CATEGORY_KEYS, type BusHelperList, type CheckinLocation, type CheckinWindow, type NotificationSettings, type ParentContact, type Role, type SessionUser, type Settings, type SmsRedirect, type StaffList } from "../types";
 
 interface Env {
   Variables: {
@@ -46,7 +47,7 @@ function serializeWindow(w: CheckinWindow, open: boolean) {
 export async function serializeSettings(s: Settings) {
   const pw = parentWindowOf(s, await listEvents());
   return {
-    checkinLocation: s.checkinLocation,
+    checkinLocations: s.checkinLocations.map((l) => ({ ...l })),
     /** read-only: when parents see the team's contacts (from the check-in start to the end of the last event) */
     parentWindow: serializeWindow(pw, parentWindowOpen(pw)),
     notifications: s.notifications,
@@ -57,6 +58,7 @@ export async function serializeSettings(s: Settings) {
     staffAccessWindow: serializeWindow(s.staffAccessWindow, staffAccessOpen(s.staffAccessWindow)),
     parentAccessWindow: serializeWindow(s.parentAccessWindow, staffAccessOpen(s.parentAccessWindow)),
     checkinReminder: { at: s.checkinReminder.at?.toISOString() ?? null, sentAt: s.checkinReminder.sentAt?.toISOString() ?? null },
+    smsRedirect: { ...s.smsRedirect },
     checkinHelpers: { staffIds: s.checkinHelpers.staffIds },
     busHelpers: { helpers: s.busHelpers.helpers.map((h) => ({ staffId: h.staffId, vehicleId: h.vehicleId })) },
     organizers: { staffIds: s.organizers.staffIds },
@@ -67,7 +69,28 @@ export async function serializeSettings(s: Settings) {
     parentContacts: s.parentContacts.map((contact) => ({ ...contact })),
     /** whether SMS can actually go out (Comtele key configured) — read-only, shown on the settings page */
     smsEnabled: comteleEnabled(),
+    /**
+     * Staff who scanned ≥3 kids outside their scope (emergency QR). Always an
+     * empty list for non-managers; empty for managers too when nobody reached
+     * the threshold — the Geral card stays hidden then.
+     */
+    foreignLookupOffenders: [] as { staffId: string; name: string; count: number; names: string[]; blocked: boolean }[],
     updatedAt: s.updatedAt,
+  };
+}
+
+/** Same as serializeSettings, plus the offenders list (admin / organizer only). */
+export async function serializeSettingsForManager(s: Awaited<ReturnType<typeof getSettings>>) {
+  const base = await serializeSettings(s);
+  return {
+    ...base,
+    foreignLookupOffenders: (await listForeignLookupOffenders(FOREIGN_LOOKUP_ALERT_AT)).map((p) => ({
+      staffId: p._id,
+      name: p.name,
+      count: p.foreignLookupCount,
+      names: p.foreignLookupNames,
+      blocked: p.foreignLookupCount >= 5,
+    })),
   };
 }
 
@@ -75,7 +98,7 @@ function parseNotifications(value: unknown, current: NotificationSettings): Noti
   if (!value || typeof value !== "object") return { error: "Informe as notificações." };
   const o = value as Record<string, unknown>;
   const out = { ...current };
-  for (const k of ["bedroomChanges", "roleChanges", "checkinConfirmation", "contentChanges", "parentContentChanges", "staffChanges", "enrolments", "occurrences", "checkinReminder", "parentEdits", "busCheckin", "parentWelcome"] as const) {
+  for (const k of ["bedroomChanges", "roleChanges", "checkinConfirmation", "contentChanges", "parentContentChanges", "staffChanges", "enrolments", "occurrences", "checkinReminder", "parentEdits", "busCheckin", "parentWelcome", "birthdays"] as const) {
     if (o[k] === undefined) continue;
     if (typeof o[k] !== "boolean") return { error: "Cada notificação deve ser ligada ou desligada." };
     out[k] = o[k] as boolean;
@@ -83,18 +106,55 @@ function parseNotifications(value: unknown, current: NotificationSettings): Noti
   return out;
 }
 
-function parseLocation(value: unknown): CheckinLocation | { error: string } {
-  if (!value || typeof value !== "object") return { error: "Informe a localização do check-in." };
+/** `{ enabled?, staffPhone?, parentPhone? }` — partial; phones are normalised to E.164 (empty / null clears). */
+function parseSmsRedirect(value: unknown, current: SmsRedirect): SmsRedirect | { error: string } {
+  if (!value || typeof value !== "object") return { error: "Informe o redirecionamento de SMS." };
   const o = value as Record<string, unknown>;
-  const lat = Number(o.lat);
-  const lng = Number(o.lng);
-  const radiusM = o.radiusM === undefined ? 300 : Number(o.radiusM);
-  if (!Number.isFinite(lat) || lat < -90 || lat > 90) return { error: "Latitude inválida (entre -90 e 90)." };
-  if (!Number.isFinite(lng) || lng < -180 || lng > 180) return { error: "Longitude inválida (entre -180 e 180)." };
-  if (!Number.isFinite(radiusM) || radiusM < RADIUS_MIN || radiusM > RADIUS_MAX) {
-    return { error: `O raio precisa estar entre ${RADIUS_MIN} e ${RADIUS_MAX} metros.` };
+  const out: SmsRedirect = { ...current };
+  if (o.enabled !== undefined) {
+    if (typeof o.enabled !== "boolean") return { error: "O redirecionamento deve ser ligado ou desligado." };
+    out.enabled = o.enabled;
   }
-  return { lat, lng, radiusM: Math.round(radiusM) };
+  for (const key of ["staffPhone", "parentPhone"] as const) {
+    if (o[key] === undefined) continue;
+    const raw = o[key];
+    if (raw === null || (typeof raw === "string" && !raw.trim())) {
+      out[key] = null;
+      continue;
+    }
+    const phone = typeof raw === "string" ? normalizeBrazilPhone(raw) : null;
+    if (!phone) return { error: `Celular de ${key === "staffPhone" ? "equipe" : "pais"} inválido: informe um celular brasileiro com DDD.` };
+    out[key] = phone;
+  }
+  return out;
+}
+
+/** `[{ id, name, lat, lng, radiusM }]` — at least one spot; ids unique (the client mints them). */
+function parseLocations(value: unknown): CheckinLocation[] | { error: string } {
+  if (!Array.isArray(value)) return { error: "Informe a lista de pontos de encontro." };
+  if (value.length === 0) return { error: "Deixe pelo menos um ponto de encontro." };
+  if (value.length > 20) return { error: "Pontos de encontro demais (máx. 20)." };
+  const out: CheckinLocation[] = [];
+  const ids = new Set<string>();
+  for (const raw of value) {
+    if (!raw || typeof raw !== "object") return { error: "Ponto de encontro inválido." };
+    const o = raw as Record<string, unknown>;
+    const id = typeof o.id === "string" ? o.id.trim() : "";
+    if (!id || id.length > 80 || ids.has(id)) return { error: "Algum ponto de encontro tem um identificador inválido ou repetido." };
+    ids.add(id);
+    const name = typeof o.name === "string" ? o.name.trim().replace(/\s+/g, " ") : "";
+    if (!name || name.length > 60) return { error: "Dê um nome (até 60 caracteres) a cada ponto de encontro." };
+    const lat = Number(o.lat);
+    const lng = Number(o.lng);
+    const radiusM = o.radiusM === undefined ? 300 : Number(o.radiusM);
+    if (!Number.isFinite(lat) || lat < -90 || lat > 90) return { error: `${name}: latitude inválida (entre -90 e 90).` };
+    if (!Number.isFinite(lng) || lng < -180 || lng > 180) return { error: `${name}: longitude inválida (entre -180 e 180).` };
+    if (!Number.isFinite(radiusM) || radiusM < RADIUS_MIN || radiusM > RADIUS_MAX) {
+      return { error: `${name}: o raio precisa estar entre ${RADIUS_MIN} e ${RADIUS_MAX} metros.` };
+    }
+    out.push({ id, name, lat, lng, radiusM: Math.round(radiusM) });
+  }
+  return out;
 }
 
 /** string[] of ACTIVE staff ids (deduplicated) */
@@ -189,16 +249,24 @@ settings.use("*", requireAuth);
 /** GET /api/settings — any logged-in role (the team needs the check-in spot to know how far they are). */
 settings.get("/", async (c) => c.json({ settings: await serializeSettings(await getSettings()) }));
 
-/** PUT /api/settings — admin only. { checkinLocation?, notifications?, checkinWindow?: { from, until }, checkinReminder?: { at }, checkinHelpers?: { staffIds }, busHelpers?: { helpers: [{ staffId, vehicleId }] }, organizers?: { staffIds }, gameOrganizers?: { staffIds }, scoreHelpers?: { staffIds }, medicalStaff?: { staffIds }, vestHelpers?: { staffIds }, parentContacts?: [{ id, title, staffId }] } */
-settings.put("/", requireAdmin, async (c) => {
+/** PUT /api/settings — admin or organizer (`organizers` and `notifications` are admin-only). { checkinLocations?: [{ id, name, lat, lng, radiusM }], notifications?, checkinWindow?: { from, until }, checkinReminder?: { at }, checkinHelpers?: { staffIds }, busHelpers?: { helpers: [{ staffId, vehicleId }] }, organizers?: { staffIds }, gameOrganizers?: { staffIds }, scoreHelpers?: { staffIds }, medicalStaff?: { staffIds }, vestHelpers?: { staffIds }, parentContacts?: [{ id, title, staffId }] } */
+settings.put("/", requireManager, async (c) => {
   const body = await c.req.json<Record<string, unknown>>().catch(() => null);
   if (!body) return fail(c, "BODY_INVALID", "Corpo da requisição inválido.");
+  // an organizer never edits the organizers list nor the SMS switches (except the check-in reminder toggle, which lives on Geral)
+  if (c.get("activeRole") !== "admin") {
+    const n = body.notifications;
+    const onlyReminder = n === undefined || (typeof n === "object" && n !== null && Object.keys(n).every((k) => k === "checkinReminder"));
+    if (body.organizers !== undefined || body.smsRedirect !== undefined || !onlyReminder) {
+      return c.json({ error: { code: "FORBIDDEN", message: "Só o admin altera os organizadores, as notificações e o redirecionamento de SMS." } }, 403);
+    }
+  }
 
   const patch: Partial<Omit<Settings, "updatedAt">> = {};
-  if (body.checkinLocation !== undefined) {
-    const loc = parseLocation(body.checkinLocation);
-    if ("error" in loc) return fail(c, "LOCATION_INVALID", loc.error);
-    patch.checkinLocation = loc;
+  if (body.checkinLocations !== undefined) {
+    const locs = parseLocations(body.checkinLocations);
+    if (!Array.isArray(locs)) return fail(c, "LOCATION_INVALID", locs.error);
+    patch.checkinLocations = locs;
   }
   if (body.notifications !== undefined) {
     const n = parseNotifications(body.notifications, (await getSettings()).notifications);
@@ -266,6 +334,11 @@ settings.put("/", requireAdmin, async (c) => {
     if (typeof body.scoreDraft !== "boolean") return fail(c, "SCORE_DRAFT_INVALID", "O rascunho do placar deve ser ligado ou desligado.");
     patch.scoreDraft = body.scoreDraft;
   }
+  if (body.smsRedirect !== undefined) {
+    const r = parseSmsRedirect(body.smsRedirect, (await getSettings()).smsRedirect);
+    if ("error" in r) return fail(c, "SMS_REDIRECT_INVALID", r.error);
+    patch.smsRedirect = r;
+  }
   if (Object.keys(patch).length === 0) return fail(c, "NOTHING_TO_UPDATE", "Nada para atualizar.");
 
   const previous = await getSettings();
@@ -287,6 +360,8 @@ settings.put("/", requireAdmin, async (c) => {
   // a welcome toggle switched ON: whoever is inside their window and was never welcomed gets the SMS now
   if (patch.notifications?.enrolments && !previous.notifications.enrolments) void syncWelcomes();
   if (patch.notifications?.parentWelcome && !previous.notifications.parentWelcome) void syncParentWelcomes();
+  // birthdays switched ON after 07:45 on a camp day: today's birthday kids' rooms are texted now
+  if (patch.notifications?.birthdays && !previous.notifications.birthdays) void sendBirthdayNotices();
   if (windowChanged) {
     void rearmWindows();
     if (patch.staffAccessWindow) void syncWelcomes(); // the window may have just opened (start moved to the past)
@@ -294,19 +369,31 @@ settings.put("/", requireAdmin, async (c) => {
     // the admin may have closed the team's window right now: log those people out
     void evictStaffOutsideWindow().catch((err) => console.error("realtime: evict failed", err));
   }
-  return c.json({ settings: await serializeSettings(updated) });
+  return c.json({ settings: await serializeSettingsForManager(updated) });
 });
 
 /** GET /api/settings/welcome-preview — admin. How many people would get the welcome SMS RIGHT NOW if the toggle were on (never welcomed, inside their window, with a phone). */
 settings.get("/welcome-preview", requireAdmin, async (c) => c.json(await welcomePreview()));
 
 /** POST /api/settings/checkin/reset — admin only. Clears EVERY check-in (kids' church + bus, team), the team vests and the audit log, so the process can be rehearsed. */
-settings.post("/checkin/reset", requireAdmin, async (c) => {
+settings.post("/checkin/reset", requireManager, async (c) => {
   const [campers, staff, vests] = await Promise.all([resetCamperCheckins(), resetStaffCheckins(), resetStaffVests()]);
   await clearCheckinLog();
   console.log(`🧹 check-ins reset by ${c.get("user").name}: ${campers} campers, ${staff} staff, ${vests} vests`);
   publish("campers", "staff");
   return c.json({ campers, staff, vests });
+});
+
+/**
+ * POST /api/settings/foreign-lookups/reset — admin / organizer. Zeroes every
+ * staff member's out-of-scope emergency-QR counter (and unblocks anyone at ≥5).
+ * The scan log itself is kept for audit.
+ */
+settings.post("/foreign-lookups/reset", requireManager, async (c) => {
+  const staff = await resetForeignLookups();
+  console.log(`🧹 foreign lookups reset by ${c.get("user").name}: ${staff} staff`);
+  publish("staff", "settings");
+  return c.json({ staff, settings: await serializeSettingsForManager(await getSettings()) });
 });
 
 export default settings;

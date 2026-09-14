@@ -1,6 +1,6 @@
 import { Hono, type Context } from "hono";
 import { requireAuth } from "../middleware/auth";
-import { requireAdmin, requireRole } from "../middleware/roles";
+import { requireManager, requireRole } from "../middleware/roles";
 import {
   deletePrepSection,
   findPrepSectionById,
@@ -96,7 +96,7 @@ preparation.get("/", requireRole("admin", "staff", "health_staff", "parent"), as
   return c.json({ sections: list.map(serializePrepSection) });
 });
 
-preparation.post("/", requireAdmin, async (c) => {
+preparation.post("/", requireManager, async (c) => {
   const body = await c.req.json<Record<string, unknown>>().catch(() => null);
   if (!body) return fail(c, "BODY_INVALID", "Corpo da requisição inválido.");
   const result = buildPatch(body, false);
@@ -108,7 +108,7 @@ preparation.post("/", requireAdmin, async (c) => {
 });
 
 /** PUT /api/preparation/reorder  { ids: string[] } — must be declared before /:id */
-preparation.put("/reorder", requireAdmin, async (c) => {
+preparation.put("/reorder", requireManager, async (c) => {
   const body = await c.req.json<{ ids?: unknown }>().catch(() => null);
   const ids = body?.ids;
   if (!Array.isArray(ids) || ids.some((id) => typeof id !== "string")) return fail(c, "IDS_INVALID", "Envie a lista de ids.");
@@ -121,7 +121,7 @@ preparation.put("/reorder", requireAdmin, async (c) => {
   return c.json({ sections: (await listPrepSections()).map(serializePrepSection) });
 });
 
-preparation.put("/:id", requireAdmin, async (c) => {
+preparation.put("/:id", requireManager, async (c) => {
   const existing = await findPrepSectionById(c.req.param("id"));
   if (!existing) return fail(c, "SECTION_NOT_FOUND", "Seção não encontrada.", 404);
   const body = await c.req.json<Record<string, unknown>>().catch(() => null);
@@ -134,7 +134,7 @@ preparation.put("/:id", requireAdmin, async (c) => {
   return c.json({ section: serializePrepSection(updated!) });
 });
 
-preparation.delete("/:id", requireAdmin, async (c) => {
+preparation.delete("/:id", requireManager, async (c) => {
   const ok = await deletePrepSection(c.req.param("id"));
   if (!ok) return fail(c, "SECTION_NOT_FOUND", "Seção não encontrada.", 404);
   publish("preparation");

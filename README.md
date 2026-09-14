@@ -18,9 +18,6 @@ bun install
 # start the project's own MongoDB container (camping-mongo, host port 27019)
 docker compose up -d
 
-# seed 4 test users (one per role)
-bun run seed
-
 # start the API (watch mode)
 bun run dev
 ```
@@ -54,6 +51,12 @@ Copy `.env` and adjust. Key variables:
    - without a key → code logged to console, validated locally
 4. **3 wrong attempts freeze the account** for `ACCOUNT_FREEZE_MINUTES`.
 5. On success the backend issues a JWT bound to a MongoDB session doc, expiring **24h** later.
+
+> **"admin" in the route tables below** means `requireManager`: the admin
+> role **or** a team member listed in Settings → Organizadores (see
+> [Organizers](#organizers-admin-like-team-members-)). Only categories,
+> the organizers list, the notification switches, `/welcome-preview` and
+> `/api/ai/usage` are `requireAdmin` (the real admin role).
 
 ### Endpoints
 
@@ -112,10 +115,6 @@ options that only admins can create/edit. Categories are never free text.
 - `key` — stable slug generated from the first name; forms should reference
   categories/options by `id`/`key`, never by label
 
-```bash
-bun run seed:categories   # seeds/refreshes the 2025 defaults from the spreadsheets
-```
-
 | Method | Path | Who | Body |
 |---|---|---|---|
 | GET | `/api/categories?audience=camper\|staff` | any role (non-admins only see active options) | — |
@@ -140,11 +139,6 @@ Bedrooms are **not** categories: each has a bed layout — `bunkBeds` (beliches,
 in the `bedrooms` collection (unique by `name`), grouped by wing
 (`group: girls | boys | staff`). Responses include `occupied`/`available`
 (computed from staff assignments).
-
-```bash
-bun run seed:teams      # 8 teams (times) with a colour each
-bun run seed:bedrooms   # 39 rooms; layouts inferred from the 2025 allocation (7 / 14 / 2 places)
-```
 
 | Method | Path | Who | Body |
 |---|---|---|---|
@@ -171,24 +165,11 @@ Two collections:
   `/api/files/<id>` or `http(s)` — never `data:` —, scripts & handlers stripped).
 - **`schedule_events`** — `{ date "YYYY-MM-DD", title, emoji, startTime "HH:mm", endTime|null, notes, roles: string[] }` — `roles` are the role ids staff fulfil there.
 
-```bash
-bun run seed:schedule   # 17 roles + 50 events (official 2026 programme, 11–13 Sep) incl. the 12 with staff roles
-bun run seed:staff      # 72 volunteers + links (team/room/transport/health) + escala (PG + event assignments)
-bun run seed:all        # everything, in order
-```
-
-`seed:staff` reads **personal data** from `backend/data/` (git-ignored):
-`voluntarios-acampa-kids.xlsx` and `escala-equipe-2025.txt` (`pdftotext -layout AcampaKids.pdf`).
-People are matched by phone then name; two family members share a phone in the
-sheet, so the second one is stored without a phone (`phone: null` is allowed).
-
-**PG (pequeno grupo).** The `PG` column of the PDF (Líder / Auxiliar) assigns
+**PG (pequeno grupo).** The `PG` column of the roster (Líder / Auxiliar) assigns
 each person to BOTH `PG` events (Sat & Sun 10:45). The Líder gives the study,
 so the roles `Líder do PG — Dia 1/2` carry that day's material as instructions;
-`Auxiliar do PG` has no task. The material is versioned in `backend/assets/pg/`
-(`dia1.html`, `dia2.html` + the illustrations, uploaded to the `files`
-collection once) and is **re-imported by `seed:schedule` on every run** — edit
-the HTML there, not in the admin editor.
+`Auxiliar do PG` has no task. The material lives in `backend/assets/pg/`
+(`dia1.html`, `dia2.html` + the illustrations, stored in the `files` collection).
 
 Each event has `assignments: [{ staffId, roleId, detail }]` (one role per person
 per event, `detail` = team / base / colour / shift):
@@ -218,8 +199,7 @@ Error codes: `ROLE_NOT_FOUND`, `EVENT_NOT_FOUND`, `NAME_INVALID`, `NAME_DUPLICAT
 
 ## Campers (acampantes)
 
-Kids from the registration export (`data/acampakids_lista_geral_alfabetica.xlsx`,
-git-ignored). Full CRUD (admin). Linked to bedroom, bed (`cama`), team,
+Full CRUD (admin). Linked to bedroom, bed (`cama`), team,
 transport, allergies and chronic conditions (category option ids); guardian /
 insurance / emergency contact kept as text. `weightKg` is a number (one
 decimal, 5–200) or null — `WEIGHT_INVALID` otherwise.
@@ -238,34 +218,11 @@ Paulo). Those come as **care** records (`contactsHidden: true`): health,
 notes, preferences, room / team / bus — no guardian, emergency, insurance or
 document data. Admin, medical team and check-in helpers keep the full record.
 
-```bash
-bun run seed:campers   # 152 kids (+ dedup of emergency contacts and health notes)
-bun run seed:parents   # one parent login per guardian phone (idempotent; rerun after every import)
-bun run seed:welcomed  # rollout: marks EVERY team member + parent as already welcomed (no welcome SMS to people already in the camp)
-bun run seed:notifications  # resets settings.notifications: every SMS kind OFF, reminder date cleared
-bun run src/scripts/cleanHealthNotes.ts --dry   # preview the health-notes cleanup on existing rows
-bun run import:supabase [--dry]   # sync with the registration system (data/children.json, git-ignored)
-```
-
-`import:supabase` reads the JSON answered by the registration system
-(Supabase `children` joined with `guardians`, `teams`, `rooms`, `buses` —
-save the REST response as `data/children.json`). The registration system is
-the source of truth: kids are matched by `externalId` (Supabase id) then by
-name, missing ones are inserted, every remote field (identity, guardian,
-room / team / bed / bus, weight, notes) overwrites the local one, and kids
-that exist only locally are DELETED. Only the curated health categories
-(`allergies`, `drugAllergies`, `healthIssues`) and `healthNotes` of existing
-kids are kept. Link changes are printed (`↔️`).
-
-The form's "Observações médicas" column repeats weight, insurance, daily
-medication, chronic condition and general notes as `Key: value | …`. The seed
-(and `cleanHealthNotes` for already-inserted kids) extracts the weight into
-`weightKg`, drops the duplicated parts and puts "Prefere dividir quarto com"
-into `bedroomPreference`. `splitCamperNotes` then moves food-related general
-notes into `foodRestrictions`, `migrateHealthOptions` re-files drug allergies
-into the `alergia-medicamentos` category (`drugAllergies` on both campers and
-staff) and folds the "Rinite" condition into the "Rinite alérgica" allergy, and
-`dedupHealthNotes` strips free-text notes that only repeat the chips.
+**Medication (`medications`)** — a list, one entry per medicine:
+`{ name, dose, times: ["HH:MM"], asNeeded, notes }`. `times` are the fixed
+moments of the day it is given (the medical checklist ticks each one); `asNeeded`
+= no fixed time. Neither = schedule not confirmed yet. ≤ 20 medicines, ≤ 12 times
+each, `MEDICATIONS_INVALID` otherwise. Staff keep a free-text `medicines`.
 
 | Method | Path | Who | Body |
 |---|---|---|---|
@@ -325,7 +282,8 @@ both rules hold — checked on the server, never trusted from the client:
    Before that the status answers `NOT_YET` with the opening time; the
    response also carries `opensAt` (ISO).
 2. **The phone is at the church**: the device position sent in the body is
-   within `checkinLocation.radiusM` of the point set in **Settings** (plus the
+   within the radius of one of the meeting points in **Settings**
+   (`checkinLocations`: church, camp site… the nearest one wins; plus the
    GPS accuracy, capped at 200 m so a bogus accuracy can't be abused).
 
 The session must be linked to an active staff record by phone. Errors:
@@ -407,9 +365,9 @@ Until an admin saves it, the defaults apply.
 |---|---|---|---|
 | GET | `/api/settings` | any logged-in role | — |
 | GET | `/api/settings/welcome-preview` | admin | → `{ staff: { count, windowOpen, names }, parents: { … } }` — who would get the welcome SMS right now |
-| PUT | `/api/settings` | admin | `{ checkinLocation?: { lat, lng, radiusM }, notifications?: { bedroomChanges?, roleChanges?, checkinConfirmation?, …, checkinReminder? }, checkinWindow?: { from, until }, checkinReminder?: { at }, checkinHelpers?: { staffIds }, busHelpers?: { helpers: [{ staffId, vehicleId }] }, organizers?: { staffIds }, gameOrganizers?: { staffIds }, scoreHelpers?: { staffIds }, medicalStaff?: { staffIds }, vestHelpers?: { staffIds }, parentContacts?: [{ id, title, staffId }], parentAccessWindow?: { from, until } }` |
+| PUT | `/api/settings` | admin, organizer (`organizers` / `notifications` admin-only) | `{ checkinLocations?: [{ id, name, lat, lng, radiusM }], notifications?: { bedroomChanges?, roleChanges?, checkinConfirmation?, …, checkinReminder? }, checkinWindow?: { from, until }, checkinReminder?: { at }, checkinHelpers?: { staffIds }, busHelpers?: { helpers: [{ staffId, vehicleId }] }, organizers?: { staffIds }, gameOrganizers?: { staffIds }, scoreHelpers?: { staffIds }, medicalStaff?: { staffIds }, vestHelpers?: { staffIds }, parentContacts?: [{ id, title, staffId }], parentAccessWindow?: { from, until } }` |
 
-`checkinLocation` defaults to Igreja Presbiteriana em Alphaville
+`checkinLocations` defaults to one spot, "Igreja" = Igreja Presbiteriana em Alphaville (a legacy single `checkinLocation` document is read as that spot)
 (`-23.48053637134259, -46.83077891444747`, radius 300 m). `radiusM` must be
 between 50 and 5000. `notifications` keys are booleans (all default **`false`**);
 the patch is partial. `checkinReminder.at` is the ISO instant at which the
@@ -418,6 +376,19 @@ also carries the read-only `checkinReminder.sentAt`, reset whenever `at` changes
 whether a Comtele key is configured). Errors: `LOCATION_INVALID`,
 `NOTIFICATIONS_INVALID`, `WINDOW_INVALID`, `REMINDER_INVALID`, `HELPERS_INVALID`, `ORGANIZERS_INVALID`, `CONTACTS_INVALID`, `NOTHING_TO_UPDATE`.
 
+### SMS redirect (Settings → Testes) 📵
+
+`smsRedirect: { enabled, staffPhone, parentPhone }` — admin only in `PUT
+/api/settings`. While `enabled`, `services/comtele.ts#resolveSmsTarget`
+reroutes **every** text: the ones meant for a team member (login code +
+notifications) go to `staffPhone`, the ones meant for a parent / guardian
+(login code, welcome, bus check-in, parent content) go to `parentPhone`.
+A null phone for an audience drops that audience's texts (OTP request →
+503 `SMS_REDIRECT_UNSET`). Admin logins are never redirected. The OTP
+response reports `delivery: "redirect"` so the login screen says where
+the code went. Must be OFF before the camp — Notificações shows a red
+banner while it is on.
+
 ### Contacts shared with parents 📞
 
 `parentContacts: [{ id, title, staffId }]` is an ordered list managed by the admin. Each entry points to one active staff member and gives that person a purpose-specific title such as "Coordenação do acampamento". Parents see them (name + phone) while the parents' window is open.
@@ -425,8 +396,7 @@ whether a Comtele key is configured). Errors: `LOCATION_INVALID`,
 ## Parents 👨‍👩‍👧
 
 A parent is a `users` doc with the `parent` role whose phone matches
-`Camper.guardianPhone` (`bun run seed:parents` creates / updates one account
-per distinct guardian phone; staff who are also parents just gain the role).
+`Camper.guardianPhone` (staff who are also parents just gain the role).
 `services/scope.ts#resolveParentScope`:
 
 - **campers**: only their own kids, full record (while `kidsRoomsDraft` the
@@ -449,7 +419,7 @@ withdrawn live.
 
 | Method | Path | Who | Body |
 |---|---|---|---|
-| PUT | `/api/campers/:id/parent` | parent (own kid) | any of `allergies, drugAllergies, healthIssues, medicines, foodRestrictions, healthNotes, weightKg, insurance, insuranceCard, generalNotes` — other keys ignored → `{ camper, changed }` |
+| PUT | `/api/campers/:id/parent` | parent (own kid) | any of `allergies, drugAllergies, healthIssues, medications, foodRestrictions, healthNotes, weightKg, insurance, insuranceCard, generalNotes` — other keys ignored → `{ camper, changed }` |
 | GET | `/api/campers/:id/changes` | admin | → `{ changes: [{ id, at, byName, medical, changes: [{ field, before, after }] }] }` (newest first) |
 
 Every real change is appended to `camperChangeLog` and texted
@@ -491,17 +461,18 @@ Outside the window nothing extra is sent;
 save and on boot) so the scoped collections are re-pushed the moment the
 window opens or closes — helpers gain / lose the data without a reload.
 
-### Organizers (team members who run the programme) 📋
+### Organizers (admin-like team members) 📋
 
 `organizers: { staffIds: string[] }` — no time window. A listed person's
-scope gets `organizer: true` (`services/scope.ts`): they see **every staff
-member in full** (health included) and the **whole programme** (every role,
-every assignment), and `middleware/roles.ts#requireOrganizer` lets them
-write it — create / edit / delete events and roles, set / remove
-assignments, upload editor images, read `/roles/:id/detail`. Everything
-else stays admin-only: staff CRUD and roll call, bedrooms, campers, settings.
-Saving the list publishes `staff`, `roles`, `events` so their phones update
-at once.
+scope is the **admin's** (`{ all: true, admin: false }`, `services/scope.ts`):
+every camper, staff member, bedroom, occurrence and the whole programme, and
+`middleware/roles.ts#requireManager` lets them do the admin's writes —
+campers, staff (CRUD + roll call), bedrooms, teams, documents, check-in
+reset and `PUT /api/settings`. Four areas stay with the real admin
+(`requireAdmin`): the `organizers` list itself and the `notifications`
+switches (both 403 in `PUT /api/settings`, except `notifications.checkinReminder`),
+categories, `/welcome-preview`, `/api/ai/usage` ("Sobre"). Saving the list
+publishes every scoped collection so their phones update at once.
 
 ### Medical team (see every kid, always) 🩺
 
@@ -514,13 +485,15 @@ check-ins (those keep their own rules). Staff and programme: as any team
 member. Saving the list publishes `campers`, `bedrooms`; the frontend's
 window-close purge skips medical members.
 
-### Game organizers (placar) 🏆
+### Game organizers (Settings → Jogos) 🏆
 
-`gameOrganizers: { staffIds: string[] }` — **no time window**. Everything an
-`organizer` may do (scope `organizer: true` is derived from either list) PLUS
-`gameOrganizer: true`: writing the scoreboard (`POST /api/scores`,
-`POST /api/scores/reset/:teamId`, `DELETE /api/scores/:id`). Joining the
-list sends the enrolment SMS.
+`gameOrganizers: { staffIds: string[] }` — **no time window**. Scope
+`organizer: true` + `gameOrganizer: true`: they see **every staff member in
+full** and the **whole programme**, `requireOrganizer` lets them write the
+schedule (events, roles, assignments, editor images), and they write the
+scoreboard (`POST /api/scores`, `POST /api/scores/reset/:teamId`,
+`DELETE /api/scores/:id`). No other admin rights (campers, rooms, settings).
+Joining the list sends the enrolment SMS.
 
 ### Score helpers (ajudantes do placar) 📷
 
@@ -535,7 +508,9 @@ lines, and get no organizer rights. Joining the list sends the enrolment SMS.
 
 ### Vest helpers (coletes) 🦺
 
-`vestHelpers: { staffIds: string[] }` — **no time window**. The people who
+`vestHelpers: { staffIds: string[] }` — open before / during the camp and
+up to **7 days after** it ends (`services/camp.ts#VEST_GRACE_DAYS`: the vests
+come back in the days after); the admin / organizers are never gated. The people who
 hand out the team vests at the start of the camp and take them back at the
 end (the admin does not do it). A listed person's scope gets `vestHelper:
 true`: `staffVisibility` is `"contact"` for **every staff member** — the
@@ -559,8 +534,7 @@ Teams used to be the `equipe` category; they are now their own collection
 (`teams`: name, `color` #rrggbb, `jokerStaffId`, order). At boot
 `ensureTeamIndexes()` migrates the legacy category once: each option becomes
 a team with the **same id**, so `Staff.team` / `Camper.team` keep pointing at
-the right team, then the category is deleted. `bun run seed:teams` creates the
-2025 teams when missing.
+the right team, then the category is deleted.
 
 | Method | Path | Who | Body |
 |---|---|---|---|
@@ -630,15 +604,3 @@ is appended to the message.
 - At login the user picks which role to enter as; that role is passed on both
   `/otp/request` and `/otp/verify`, validated against `user.roles`, and stored
   as the session's active role (JWT + session doc).
-
-## Test users (after `bun run seed`)
-
-| Roles | Name | Phone |
-|---|---|---|
-| parent | Maria Silva | (11) 98123-4567 |
-| staff | João Pereira | (11) 98234-5678 |
-| health_staff + staff | Paula Costa | (11) 98345-6789 |
-| admin + parent | André Almeida | (11) 99261-7404 |
-
-André, for example, can log in as **admin** or as **parent** — the chosen role
-is sent to the backend and becomes the session's active role.

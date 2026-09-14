@@ -1,5 +1,6 @@
 import type { WSContext } from "hono/ws";
 import type { CheckinWindow, Role } from "../types";
+import { todayInSaoPaulo } from "../utils";
 
 /**
  * Realtime hub: every logged-in client keeps a WebSocket open and receives
@@ -187,8 +188,25 @@ export function scheduleCheckinReminder(at: Date | null): void {
   }, Math.max(0, wait));
 }
 
+// ── birthday SMS: one timer for the next 07:45 São Paulo (re-armed after each firing; the send itself checks whether today is a camp day)
+let birthdayTimer: ReturnType<typeof setTimeout> | null = null;
+
+export function scheduleBirthdayNotices(): void {
+  if (birthdayTimer) clearTimeout(birthdayTimer);
+  void import("./notify").then((m) => {
+    const now = new Date();
+    let due = m.birthdaySmsDue(todayInSaoPaulo(now));
+    if (due.getTime() <= now.getTime()) due = m.birthdaySmsDue(todayInSaoPaulo(new Date(now.getTime() + 24 * 3600_000)));
+    birthdayTimer = setTimeout(() => {
+      birthdayTimer = null;
+      console.log("⏰ 07:45 → birthday notices");
+      void m.sendBirthdayNotices().finally(scheduleBirthdayNotices);
+    }, Math.min(due.getTime() - now.getTime() + 500, MAX_TIMEOUT));
+  });
+}
+
 // ── safety net: an instant further than setTimeout's limit (~24 days) can't be armed, so re-check hourly
-setInterval(() => void import("./notify").then((m) => Promise.all([m.syncWelcomes(), m.syncParentWelcomes(), m.sendCheckinReminder()])), 60 * 60_000);
+setInterval(() => void import("./notify").then((m) => Promise.all([m.syncWelcomes(), m.syncParentWelcomes(), m.sendCheckinReminder(), m.sendBirthdayNotices()])), 60 * 60_000);
 
 // ── heartbeat (lets phones notice a dead connection and reconnect) ─────────
 

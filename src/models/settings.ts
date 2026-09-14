@@ -1,19 +1,23 @@
 import { getDb } from "../db";
-import type { BusHelperList, CheckinReminder, CheckinWindow, ParentContact, Settings, StaffList } from "../types";
+import type { BusHelperList, CheckinLocation, CheckinReminder, CheckinWindow, ParentContact, Settings, SmsRedirect, StaffList } from "../types";
 
 const COLLECTION = "settings";
 /** the settings live in ONE document (there is a single camp) */
 const DOC_ID = "global";
 
 /** Igreja Presbiteriana em Alphaville — where the team meets on departure day. */
+export const DEFAULT_CHECKIN_LOCATION: CheckinLocation = {
+  id: "church",
+  name: "Igreja",
+  lat: -23.48053637134259,
+  lng: -46.83077891444747,
+  radiusM: 300,
+};
+
 export const DEFAULT_SETTINGS: Settings = {
-  checkinLocation: {
-    lat: -23.48053637134259,
-    lng: -46.83077891444747,
-    radiusM: 300,
-  },
+  checkinLocations: [DEFAULT_CHECKIN_LOCATION],
   // every kind starts OFF: the admin switches on what they want texted
-  notifications: { bedroomChanges: false, roleChanges: false, checkinConfirmation: false, contentChanges: false, parentContentChanges: false, staffChanges: false, enrolments: false, occurrences: false, checkinReminder: false, parentEdits: false, busCheckin: false, parentWelcome: false },
+  notifications: { bedroomChanges: false, roleChanges: false, checkinConfirmation: false, contentChanges: false, parentContentChanges: false, staffChanges: false, enrolments: false, occurrences: false, checkinReminder: false, parentEdits: false, busCheckin: false, parentWelcome: false, birthdays: false },
   checkinWindow: { from: null, until: null },
   checkinHelpers: { staffIds: [] },
   busHelpers: { helpers: [] },
@@ -29,6 +33,7 @@ export const DEFAULT_SETTINGS: Settings = {
   kidsRoomsDraft: false,
   scoreDraft: false,
   checkinReminder: { at: null, sentAt: null },
+  smsRedirect: { enabled: false, staffPhone: null, parentPhone: null },
   updatedAt: null,
 };
 
@@ -80,6 +85,38 @@ function toReminder(raw: unknown): CheckinReminder {
   return { at: asDate(r.at), sentAt: asDate(r.sentAt) };
 }
 
+/** `checkinLocations: [{ id, name, lat, lng, radiusM }]` — older documents held ONE `checkinLocation: { lat, lng, radiusM }`: it becomes the "Igreja" spot. */
+function toCheckinLocations(doc: Record<string, unknown>): CheckinLocation[] {
+  const raw = doc.checkinLocations;
+  if (Array.isArray(raw)) {
+    const list = raw
+      .map((x) => (x && typeof x === "object" ? (x as Record<string, unknown>) : null))
+      .filter((x): x is Record<string, unknown> => !!x && typeof x.id === "string" && typeof x.lat === "number" && typeof x.lng === "number")
+      .map((x) => ({
+        id: x.id as string,
+        name: typeof x.name === "string" && x.name.trim() ? (x.name as string) : "Ponto de encontro",
+        lat: x.lat as number,
+        lng: x.lng as number,
+        radiusM: typeof x.radiusM === "number" ? (x.radiusM as number) : DEFAULT_CHECKIN_LOCATION.radiusM,
+      }));
+    if (list.length > 0) return list;
+  }
+  const legacy = (doc.checkinLocation as Partial<CheckinLocation> | undefined) ?? {};
+  return [
+    {
+      ...DEFAULT_CHECKIN_LOCATION,
+      lat: typeof legacy.lat === "number" ? legacy.lat : DEFAULT_CHECKIN_LOCATION.lat,
+      lng: typeof legacy.lng === "number" ? legacy.lng : DEFAULT_CHECKIN_LOCATION.lng,
+      radiusM: typeof legacy.radiusM === "number" ? legacy.radiusM : DEFAULT_CHECKIN_LOCATION.radiusM,
+    },
+  ];
+}
+
+function toSmsRedirect(raw: unknown): SmsRedirect {
+  const r = (raw as Partial<Record<keyof SmsRedirect, unknown>> | undefined) ?? {};
+  return { enabled: r.enabled === true, staffPhone: typeof r.staffPhone === "string" ? r.staffPhone : null, parentPhone: typeof r.parentPhone === "string" ? r.parentPhone : null };
+}
+
 function toParentContacts(raw: unknown): ParentContact[] {
   if (!Array.isArray(raw)) return [];
   return raw
@@ -93,7 +130,6 @@ function toParentContacts(raw: unknown): ParentContact[] {
 
 function toSettings(doc: Record<string, unknown> | null): Settings {
   if (!doc) return DEFAULT_SETTINGS;
-  const loc = (doc.checkinLocation as Partial<Settings["checkinLocation"]> | undefined) ?? {};
   const n = (doc.notifications as Partial<Settings["notifications"]> | undefined) ?? {};
   return {
     checkinWindow: toWindow(doc.checkinWindow),
@@ -111,6 +147,7 @@ function toSettings(doc: Record<string, unknown> | null): Settings {
     kidsRoomsDraft: doc.kidsRoomsDraft === true,
     scoreDraft: doc.scoreDraft === true,
     checkinReminder: toReminder(doc.checkinReminder),
+    smsRedirect: toSmsRedirect(doc.smsRedirect),
     notifications: {
       bedroomChanges: typeof n.bedroomChanges === "boolean" ? n.bedroomChanges : DEFAULT_SETTINGS.notifications.bedroomChanges,
       roleChanges: typeof n.roleChanges === "boolean" ? n.roleChanges : DEFAULT_SETTINGS.notifications.roleChanges,
@@ -124,12 +161,9 @@ function toSettings(doc: Record<string, unknown> | null): Settings {
       parentEdits: typeof n.parentEdits === "boolean" ? n.parentEdits : DEFAULT_SETTINGS.notifications.parentEdits,
       busCheckin: typeof n.busCheckin === "boolean" ? n.busCheckin : DEFAULT_SETTINGS.notifications.busCheckin,
       parentWelcome: typeof n.parentWelcome === "boolean" ? n.parentWelcome : DEFAULT_SETTINGS.notifications.parentWelcome,
+      birthdays: typeof n.birthdays === "boolean" ? n.birthdays : DEFAULT_SETTINGS.notifications.birthdays,
     },
-    checkinLocation: {
-      lat: typeof loc.lat === "number" ? loc.lat : DEFAULT_SETTINGS.checkinLocation.lat,
-      lng: typeof loc.lng === "number" ? loc.lng : DEFAULT_SETTINGS.checkinLocation.lng,
-      radiusM: typeof loc.radiusM === "number" ? loc.radiusM : DEFAULT_SETTINGS.checkinLocation.radiusM,
-    },
+    checkinLocations: toCheckinLocations(doc),
     updatedAt: (doc.updatedAt as Date) ?? null,
   };
 }

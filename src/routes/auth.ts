@@ -4,7 +4,7 @@ import { findByPhone, toPublicUser, updateUser } from "../models/users";
 import { findStaffByPhone } from "../models/staff";
 import { getSettings, staffAccessOpen } from "../models/settings";
 import { staffHasAccess } from "../services/scope";
-import { comteleEnabled, comteleSendSms } from "../services/comtele";
+import { comteleEnabled, comteleSendSms, resolveSmsTarget } from "../services/comtele";
 import { generateLocalCode, hashCode, verifyLocalCode } from "../services/otp";
 import { createSession, revokeSession, verifySessionToken } from "../services/session";
 import type { CheckinWindow, PublicUser, Role, SessionUser } from "../types";
@@ -152,10 +152,15 @@ auth.post("/otp/request", async (c) => {
   // locally); Comtele only delivers it by SMS when configured
   const code = generateLocalCode();
   const viaSms = comteleEnabled();
+  // SMS redirect (Settings → Testes): the team's codes go to the staff test phone, the parents' to the parent one; admins always get their own
+  const target = role === "admin" ? { phone, redirected: false } : await resolveSmsTarget(phone, role === "parent" ? "parent" : "staff");
+  if (!target) {
+    return c.json({ error: { code: "SMS_REDIRECT_UNSET", message: "O redirecionamento de SMS está ligado sem um celular de teste para este perfil. Ajuste em Configurações → Testes." } }, 503);
+  }
 
   if (viaSms) {
     const result = await comteleSendSms(
-      phone,
+      target.phone,
       `${config.comtele.prefix}: ${code} é seu código de acesso. Vale por ${config.otp.expireMinutes} min. Se não foi você, ignore.`,
     );
     if (!result.ok) {
@@ -173,7 +178,7 @@ auth.post("/otp/request", async (c) => {
   }
 
   console.log(
-    `\n📩 [OTP${viaSms ? " · SMS" : " · DEV MOCK"}] ${user.name} — ${formatBrazilPhone(phone)} (entrando como ${role}): ${code}\n`,
+    `\n📩 [OTP${viaSms ? " · SMS" : " · DEV MOCK"}] ${user.name} — ${formatBrazilPhone(phone)}${target.redirected ? ` → redirect ${formatBrazilPhone(target.phone)}` : ""} (entrando como ${role}): ${code}\n`,
   );
 
   await updateUser(user._id, {
@@ -194,7 +199,8 @@ auth.post("/otp/request", async (c) => {
     roles: user.roles,
     expiresAt: expiresAt.toISOString(),
     expireMinutes: config.otp.expireMinutes,
-    delivery: comteleEnabled() ? "sms" : "mock",
+    // "redirect": the code went to the admin's test phone (Settings → Testes), not to this number
+    delivery: target.redirected ? "redirect" : comteleEnabled() ? "sms" : "mock",
   });
 });
 

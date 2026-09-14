@@ -22,6 +22,33 @@ export function normalizeBrazilPhone(raw: string): string | null {
   return `+55${national}`;
 }
 
+// Portuguese particles only — "Di Lella", "Del Bortolo", "Van Der" are written capitalized by the families
+const NAME_PARTICLES = new Set(["de", "da", "do", "dos", "das", "e"]);
+
+/**
+ * Person names always land in the DB in the same case, whatever the source
+ * (spreadsheet, Supabase, admin form, seed): "ANNA SOPHIA DE MUNIZ" →
+ * "Anna Sophia de Muniz". Keeps particles lower-case, handles hyphens and
+ * apostrophes ("Maria-Clara", "D'Amore"), collapses whitespace.
+ */
+export function titleCaseName(raw: string): string {
+  const cap = (w: string) => (w ? w[0].toLocaleUpperCase("pt-BR") + w.slice(1).toLocaleLowerCase("pt-BR") : w);
+  return raw
+    .trim()
+    .replace(/\s+/g, " ")
+    .split(" ")
+    .filter(Boolean)
+    .map((word, i) => {
+      const lower = word.toLocaleLowerCase("pt-BR");
+      if (i > 0 && NAME_PARTICLES.has(lower)) return lower;
+      return lower
+        .split("-")
+        .map((h) => h.split("'").map(cap).join("'"))
+        .join("-");
+    })
+    .join(" ");
+}
+
 /** +5511981234567 -> (11) 98123-4567 */
 export function formatBrazilPhone(e164: string): string {
   const n = e164.replace(/\D/g, "").replace(/^55/, "");

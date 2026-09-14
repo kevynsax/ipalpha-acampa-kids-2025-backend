@@ -27,6 +27,9 @@ function toStaff(doc: Record<string, unknown> | null): Staff | null {
     vest: toVest(doc.vest),
     prepDone: (doc.prepDone as string[]) ?? [],
     welcomeSentAt: (doc.welcomeSentAt as Date) ?? null,
+    foreignLookupCount: typeof doc.foreignLookupCount === "number" ? (doc.foreignLookupCount as number) : 0,
+    foreignLookupNames: Array.isArray(doc.foreignLookupNames) ? (doc.foreignLookupNames as string[]) : [],
+    foreignLookupAlertedAt: (doc.foreignLookupAlertedAt as Date) ?? null,
     createdAt: doc.createdAt as Date,
     updatedAt: doc.updatedAt as Date,
   };
@@ -41,7 +44,7 @@ function toVest(v: unknown): VestStatus {
 
 export const NO_VEST: VestStatus = { delivered: null, returned: null };
 
-export type StaffData = Omit<Staff, "_id" | "createdAt" | "updatedAt" | "checkin" | "vest" | "prepDone" | "welcomeSentAt">;
+export type StaffData = Omit<Staff, "_id" | "createdAt" | "updatedAt" | "checkin" | "vest" | "prepDone" | "welcomeSentAt" | "foreignLookupCount" | "foreignLookupNames" | "foreignLookupAlertedAt">;
 
 export async function listStaff(filter: { active?: boolean } = {}): Promise<Staff[]> {
   const db = await getDb();
@@ -71,7 +74,7 @@ export async function insertStaff(data: StaffData): Promise<Staff> {
   const db = await getDb();
   const now = new Date();
   const { insertedId } = await db.collection(COLLECTION).insertOne({ ...data, createdAt: now, updatedAt: now });
-  return { ...data, checkin: null, vest: NO_VEST, prepDone: [], welcomeSentAt: null, _id: insertedId.toString(), createdAt: now, updatedAt: now };
+  return { ...data, checkin: null, vest: NO_VEST, prepDone: [], welcomeSentAt: null, foreignLookupCount: 0, foreignLookupNames: [], foreignLookupAlertedAt: null, _id: insertedId.toString(), createdAt: now, updatedAt: now };
 }
 
 export async function updateStaff(id: string, patch: Partial<StaffData>): Promise<Staff | null> {
@@ -131,6 +134,78 @@ export async function resetStaffCheckins(): Promise<number> {
   return res.modifiedCount;
 }
 
+/** Thresholds for out-of-scope emergency QR lookups (see routes/campers.ts lookup). */
+export const FOREIGN_LOOKUP_ALERT_AT = 3;
+export const FOREIGN_LOOKUP_BLOCK_AT = 5;
+const FOREIGN_LOOKUP_NAMES_MAX = 20;
+
+/**
+ * Records one more DISTINCT out-of-scope kid for this staff member.
+ * No-op (returns the current record) when `camperId` was already counted.
+ * Returns null when the staff id is unknown.
+ */
+export async function recordForeignLookup(staffId: string, camperId: string, camperName: string): Promise<Staff | null> {
+  if (!ObjectId.isValid(staffId)) return null;
+  const db = await getDb();
+  const current = await findStaffById(staffId);
+  if (!current) return null;
+  // kid ids live in a hidden array so re-scans of the same kid don't bump the counter
+  const doc = await db.collection(COLLECTION).findOne({ _id: new ObjectId(staffId) });
+  const seen = Array.isArray(doc?.foreignLookupCamperIds) ? (doc!.foreignLookupCamperIds as string[]) : [];
+  if (seen.includes(camperId)) return current;
+  const names = [...current.foreignLookupNames.filter((n) => n !== camperName), camperName].slice(-FOREIGN_LOOKUP_NAMES_MAX);
+  const res = await db.collection(COLLECTION).findOneAndUpdate(
+    { _id: new ObjectId(staffId) },
+    {
+      $inc: { foreignLookupCount: 1 },
+      $addToSet: { foreignLookupCamperIds: camperId },
+      $set: { foreignLookupNames: names, updatedAt: new Date() },
+    },
+    { returnDocument: "after" },
+  );
+  return toStaff(res as Record<string, unknown> | null);
+}
+
+/** Marks that the admins were already SMS'd about this person's out-of-scope scans (once until reset). */
+export async function markForeignLookupAlerted(staffId: string): Promise<void> {
+  if (!ObjectId.isValid(staffId)) return;
+  const db = await getDb();
+  await db.collection(COLLECTION).updateOne(
+    { _id: new ObjectId(staffId), foreignLookupAlertedAt: null },
+    { $set: { foreignLookupAlertedAt: new Date(), updatedAt: new Date() } },
+  );
+}
+
+/** Zeroes every staff member's out-of-scope lookup counter (Settings → Geral). Returns how many had a count. */
+export async function resetForeignLookups(): Promise<number> {
+  const db = await getDb();
+  const res = await db.collection(COLLECTION).updateMany(
+    { $or: [{ foreignLookupCount: { $gt: 0 } }, { foreignLookupCamperIds: { $exists: true, $ne: [] } }] },
+    {
+      $set: {
+        foreignLookupCount: 0,
+        foreignLookupNames: [],
+        foreignLookupCamperIds: [],
+        foreignLookupAlertedAt: null,
+        updatedAt: new Date(),
+      },
+    },
+  );
+  return res.modifiedCount;
+}
+
+/** Staff members currently at / past the alert threshold (for the admin settings card). */
+export async function listForeignLookupOffenders(minCount = FOREIGN_LOOKUP_ALERT_AT): Promise<Staff[]> {
+  const db = await getDb();
+  const docs = await db
+    .collection(COLLECTION)
+    .find({ foreignLookupCount: { $gte: minCount } })
+    .collation({ locale: "pt", strength: 1 })
+    .sort({ foreignLookupCount: -1, name: 1 })
+    .toArray();
+  return docs.map((d) => toStaff(d as Record<string, unknown>)!);
+}
+
 /** Ticks / unticks one Preparação item for the person. */
 export async function setStaffPrepDone(id: string, key: string, done: boolean): Promise<Staff | null> {
   if (!ObjectId.isValid(id)) return null;
@@ -149,6 +224,22 @@ export async function deleteStaff(id: string): Promise<boolean> {
   const db = await getDb();
   const res = await db.collection(COLLECTION).deleteOne({ _id: new ObjectId(id) });
   return res.deletedCount === 1;
+}
+
+/**
+ * Every admin account (users.roles ∋ "admin") also lives on the team roster,
+ * so they get a room, food restrictions, a vest… like everyone else. Called at
+ * boot: creates the missing records (matched by phone), never touches the
+ * existing ones. Returns the number of records created.
+ */
+export async function ensureAdminsOnRoster(admins: { name: string; phone: string }[]): Promise<number> {
+  let created = 0;
+  for (const a of admins) {
+    if (await findStaffByPhone(a.phone)) continue;
+    await insertStaff({ name: a.name, phone: a.phone, active: true, team: null, bedroom: null, roomRole: "helper", transportation: null, allergies: [], drugAllergies: [], foodRestrictions: "", healthIssues: [], medicines: "", healthNotes: "" });
+    created++;
+  }
+  return created;
 }
 
 export async function ensureStaffIndexes(): Promise<void> {

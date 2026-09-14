@@ -1,7 +1,7 @@
 import { Hono, type Context } from "hono";
 import { publish } from "../services/realtime";
 import { requireAuth } from "../middleware/auth";
-import { requireAdmin, requireRole } from "../middleware/roles";
+import { requireManager, requireRole } from "../middleware/roles";
 import {
   countStaffPerBedroom,
   deleteBedroom,
@@ -168,9 +168,9 @@ bedrooms.get("/:id/detail", requireRole("admin", "staff", "health_staff"), async
   });
 });
 
-// ── write: admin only ──────────────────────────────────────────────────────
+// ── write: admin or organizer ──────────────────────────────────────────────────────
 
-bedrooms.use("/*", requireAdmin);
+bedrooms.use("/*", requireManager);
 
 /** POST /api/bedrooms  { name, group, bunkBeds?, singleBeds?, notes? } */
 bedrooms.post("/", async (c) => {

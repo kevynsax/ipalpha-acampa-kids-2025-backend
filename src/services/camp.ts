@@ -5,24 +5,55 @@ import { nowInSaoPauloWallClock, saoPauloWallClock, saoPauloWallClockToIso, toda
 
 /**
  * "Is the camp happening right now?" — decided by the programme: from the
- * day of the FIRST event to the day of the LAST one, inclusive (São Paulo
- * calendar days). Ordinary caretakers only see the OTHER kids of their room
- * (not the ones under their own care) inside this period — see scope.ts.
+ * day of the FIRST event (São Paulo calendar day) until the END of the LAST
+ * event — its `endTime`, or its `startTime` when it has no end (e.g. "Chegada
+ * das crianças na igreja"). Ordinary caretakers only see the OTHER kids of
+ * their room (not the ones under their own care) inside this period — see
+ * scope.ts.
  */
 export interface CampPeriod {
-  /** "YYYY-MM-DD" (null when there is no programme) */
+  /** "YYYY-MM-DD" of the first event (null when there is no programme) */
   from: string | null;
+  /** "YYYY-MM-DD" of the last event */
   until: string | null;
+  /** the instant the camp is over: end (or start) of the last event */
+  endsAt: Date | null;
 }
 
 export async function campPeriod(): Promise<CampPeriod> {
   const events = await listEvents(); // sorted by (date, startTime)
-  if (events.length === 0) return { from: null, until: null };
-  return { from: events[0].date, until: events[events.length - 1].date };
+  if (events.length === 0) return { from: null, until: null, endsAt: null };
+  const last = events[events.length - 1];
+  return { from: events[0].date, until: last.date, endsAt: eventEnd(last) };
 }
 
-export function campInProgress(p: CampPeriod, today = todayInSaoPaulo()): boolean {
-  return !!p.from && !!p.until && p.from <= today && today <= p.until;
+export function campInProgress(p: CampPeriod, now = new Date()): boolean {
+  return !!p.from && !!p.endsAt && p.from <= todayInSaoPaulo(now) && now < p.endsAt;
+}
+
+/**
+ * "YYYY-MM-DD" of the kid's birthday that falls inside the camp (first → last
+ * event day, inclusive), or null. The camp may straddle a year boundary, so
+ * both years are tried.
+ */
+export function birthdayDuringCamp(birthDate: string | null, p: Pick<CampPeriod, "from" | "until">): string | null {
+  if (!birthDate || !p.from || !p.until) return null;
+  const md = birthDate.slice(5, 10);
+  if (md.length !== 5) return null;
+  for (const y of new Set([p.from.slice(0, 4), p.until.slice(0, 4)])) {
+    const day = `${y}-${md}`;
+    if (day >= p.from && day <= p.until) return day;
+  }
+  return null;
+}
+
+/** how long after the camp the VEST helpers keep their tab (people return the vests in the days after) */
+export const VEST_GRACE_DAYS = 7;
+
+/** Is the vest (colete) window open? Any time before / during the camp and up to VEST_GRACE_DAYS after its end; always when there is no programme. */
+export function vestWindowOpen(p: CampPeriod, now = new Date()): boolean {
+  if (!p.endsAt) return true;
+  return now.getTime() < p.endsAt.getTime() + VEST_GRACE_DAYS * 24 * 60 * 60 * 1000;
 }
 
 // ── parents' window ──────────────────────────────────────────────────────────

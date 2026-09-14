@@ -3,7 +3,7 @@ import { listEvents } from "../models/schedule";
 import { checkinWindowOpen, getSettings, staffAccessOpen } from "../models/settings";
 import { findStaffByPhone } from "../models/staff";
 import type { CampEvent, Camper, DocAudience, PrepAudience, Role, RoomRole, ScheduleRole, Settings, Staff } from "../types";
-import { campInProgress, campPeriod, parentWindowOf, parentWindowOpen } from "./camp";
+import { campInProgress, campPeriod, parentWindowOf, parentWindowOpen, vestWindowOpen } from "./camp";
 
 /**
  * Data scope of a session — the ONE place that decides what a non-admin may
@@ -37,13 +37,17 @@ import { campInProgress, campPeriod, parentWindowOf, parentWindowOpen } from "./
  *                  every bedroom (for the labels). Kids in their own room stay
  *                  full (they look after them).
  *   organizer    → a staff member the admin listed as an ORGANIZER (no time
- *                  window): every staff member in FULL (health included) and
- *                  the whole programme (every role, every assignment), and
- *                  may write the schedule. Campers / bedrooms: as any team
- *                  member. Never writes staff.
+ *                  window): the ADMIN'S data scope (`all: true`) — every
+ *                  camper, staff member, bedroom, occurrence and the whole
+ *                  programme — and the admin's writes, EXCEPT the four
+ *                  admin-only areas: the organizers list itself, categories,
+ *                  notifications and the "about" page (`admin: false`).
  *   game         → a staff member the admin listed as a GAME organizer (no
- *   organizer      window): everything an organizer may do, plus the
- *                  scoreboard (Placar): give / take / zero points of any team.
+ *   organizer      window): writes the programme (events, roles, assignments)
+ *                  and the scoreboard (Placar): give / take / zero points of
+ *                  any team. Sees every staff member in FULL and the whole
+ *                  programme. NOT an organizer: campers / bedrooms as any team
+ *                  member, no settings.
  *   score helper → a staff member the admin listed as a SCORE helper (no
  *                  window): ONLY the bulk QR scan tied to a programme event
  *                  (the kid's team gets the event's points). Never gives /
@@ -56,8 +60,9 @@ import { campInProgress, campPeriod, parentWindowOf, parentWindowOpen } from "./
  *                  bedroom — hence every vehicle — the whole time. Read-only:
  *                  never writes campers, rooms or check-ins. Staff / programme:
  *                  as any team member.
- *   vest helper  → a staff member the admin listed as a VEST (colete) helper
- *                  (no time window): every staff member as NAME + PHONE +
+ *   vest helper  → a staff member the admin listed as a VEST (colete) helper,
+ *                  until VEST_GRACE_DAYS after the camp ends (they collect the
+ *                  vests back in the days after): every staff member as NAME + PHONE +
  *                  vest status ("contact" visibility) — never health, room,
  *                  team or check-in — and may stamp the vest delivery /
  *                  return. Everything else: as any team member.
@@ -84,7 +89,11 @@ export interface Viewer {
 }
 
 export type Scope =
-  | { all: true }
+  | {
+      all: true;
+      /** true for the real admin session; false for an ORGANIZER (same data, minus the admin-only settings) */
+      admin: boolean;
+    }
   | {
       all: false;
       /** the viewer's own staff record id (null when the phone isn't linked to one) */
@@ -95,15 +104,15 @@ export type Scope =
       checkinHelper: boolean;
       /** the vehicle (transportation option id) the admin linked this person to as a BUS helper, while the window is open; null otherwise */
       busHelperVehicle: string | null;
-      /** true when this person is a listed programme ORGANIZER (no window) — game organizers count too */
+      /** true when this person may write the PROGRAMME (events, roles, assignments) and sees the whole team: game organizers (real organizers get `all: true` instead) */
       organizer: boolean;
-      /** true when this person is a listed GAME organizer (no window): organizer + writes the scoreboard */
+      /** true when this person is a listed GAME organizer (no window): programme + writes the scoreboard */
       gameOrganizer: boolean;
       /** true when this person is a listed SCORE helper (no window): bulk QR scan by event only — no per-team points, no zero, no organizer rights */
       scoreHelper: boolean;
       /** true when this person is on the MEDICAL team (no window): every camper + bedroom in full, read-only */
       medical: boolean;
-      /** true when this person hands out / takes back the team VESTS (no window): every staff member as name + phone */
+      /** true when this person hands out / takes back the team VESTS — listed AND before / during / up to VEST_GRACE_DAYS after the camp: every staff member as name + phone */
       vestHelper: boolean;
       /** true while the kids' room allocation is still a draft (Settings → Geral): the viewer's OWN room shows no kids */
       kidsRoomsDraft: boolean;
@@ -167,8 +176,11 @@ async function resolveParentScope(phone: string): Promise<Scope> {
   };
 }
 
+export const ADMIN: Extract<Scope, { all: true }> = { all: true, admin: true };
+export const ORGANIZER: Extract<Scope, { all: true }> = { all: true, admin: false };
+
 export async function resolveScope(viewer: Viewer): Promise<Scope> {
-  if (viewer.activeRole === "admin") return { all: true };
+  if (viewer.activeRole === "admin") return ADMIN;
   if (viewer.activeRole === "parent") return resolveParentScope(viewer.phone);
   if (viewer.activeRole !== "staff" && viewer.activeRole !== "health_staff") return NO_ACCESS;
   const me = await findStaffByPhone(viewer.phone);
@@ -177,19 +189,23 @@ export async function resolveScope(viewer: Viewer): Promise<Scope> {
   // ORDINARY team members (on no list at all) only get in during the staff access window
   if (!staffHasAccess(me._id, settings)) return NO_ACCESS;
   const { checkinWindow, checkinTestMode, checkinHelpers, busHelpers, organizers, gameOrganizers, scoreHelpers, medicalStaff, vestHelpers, kidsRoomsDraft } = settings;
+  // an ORGANIZER is an admin minus a few settings: same data scope
+  if (organizers.staffIds.includes(me._id)) return ORGANIZER;
   const gameOrganizer = gameOrganizers.staffIds.includes(me._id);
   const scoreHelper = scoreHelpers.staffIds.includes(me._id);
-  // a game organizer IS an organizer (same rights) + the scoreboard
-  const organizer = gameOrganizer || organizers.staffIds.includes(me._id);
+  // a game organizer also writes the programme (and sees the whole team for the roster)
+  const organizer = gameOrganizer;
   const medical = medicalStaff.staffIds.includes(me._id);
-  const vestHelper = vestHelpers.staffIds.includes(me._id);
+  const period = await campPeriod();
+  // the vest helper keeps the tab for a few days after the camp (vests come back then), not forever
+  const vestHelper = vestHelpers.staffIds.includes(me._id) && vestWindowOpen(period);
   const listedChurch = checkinHelpers.staffIds.includes(me._id);
   const linkedVehicle = busHelpers.helpers.find((h) => h.staffId === me._id)?.vehicleId ?? null;
   // test mode opens the kids' roll calls for the helpers regardless of the window
   const windowOpen = checkinTestMode || checkinWindowOpen(checkinWindow);
   const checkinHelper = windowOpen && listedChurch;
   const busHelperVehicle = windowOpen ? linkedVehicle : null;
-  const campActive = campInProgress(await campPeriod());
+  const campActive = campInProgress(period);
   return { ...NO_ACCESS, staffId: me._id, bedroom: me.bedroom, checkinHelper, busHelperVehicle, organizer, gameOrganizer, scoreHelper, medical, vestHelper, kidsRoomsDraft, campActive, roomRole: me.roomRole };
 }
 
@@ -215,7 +231,17 @@ export function canSeePrep(scope: Scope, s: { audiences: PrepAudience[] }): bool
   return s.audiences.includes(scope.roomRole);
 }
 
-/** May this session write the scoreboard (give / take / zero points, delete any line)? (admin or game organizer) */
+/** May this session do what the admin does (campers, staff, rooms, check-ins, documents, most settings)? (admin or organizer) */
+export function canManage(scope: Scope): boolean {
+  return scope.all;
+}
+
+/** Is this the real admin? (organizers list, categories, notifications, about) */
+export function isAdmin(scope: Scope): boolean {
+  return scope.all && scope.admin;
+}
+
+/** May this session write the scoreboard (give / take / zero points, delete any line)? (admin, organizer or game organizer) */
 export function canKeepScore(scope: Scope): boolean {
   return scope.all || scope.gameOrganizer;
 }
@@ -225,12 +251,12 @@ export function canLaunchScore(scope: Scope): boolean {
   return scope.all || scope.gameOrganizer || scope.scoreHelper;
 }
 
-/** May this session hand out / take back the team vests? (admin or vest helper) */
+/** May this session hand out / take back the team vests? (admin, organizer or vest helper) */
 export function canHandleVests(scope: Scope): boolean {
   return scope.all || scope.vestHelper;
 }
 
-/** May this session write the programme (events, roles, assignments)? (admin or organizer) */
+/** May this session write the programme (events, roles, assignments)? (admin, organizer or game organizer) */
 export function canOrganize(scope: Scope): boolean {
   return scope.all || scope.organizer;
 }

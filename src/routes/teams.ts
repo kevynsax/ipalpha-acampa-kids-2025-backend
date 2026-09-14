@@ -1,6 +1,6 @@
 import { Hono, type Context } from "hono";
 import { requireAuth } from "../middleware/auth";
-import { requireAdmin, requireRole } from "../middleware/roles";
+import { requireManager, requireRole } from "../middleware/roles";
 import { deleteScoresOfTeam } from "../models/scores";
 import { findStaffById } from "../models/staff";
 import { deleteTeam, findTeamById, insertTeam, listTeams, TEAM_PALETTE, unlinkTeamEverywhere, updateTeam, type TeamData } from "../models/teams";
@@ -66,9 +66,9 @@ teams.use("*", requireAuth);
 /** GET /api/teams — every logged-in team member / admin (names + colours are public inside the app). */
 teams.get("/", requireRole("admin", "staff", "health_staff", "parent"), async (c) => c.json({ teams: (await listTeams()).map(serializeTeam) }));
 
-// ── write: admin only ──────────────────────────────────────────────────────
+// ── write: admin or organizer ──────────────────────────────────────────────────────
 
-teams.use("/*", requireAdmin);
+teams.use("/*", requireManager);
 
 /** POST /api/teams  { name, color?, jokerStaffId? } */
 teams.post("/", async (c) => {

@@ -49,6 +49,26 @@ export async function listAdmins(): Promise<User[]> {
   return docs.map((d) => toUser(d as Record<string, unknown>)!);
 }
 
+/**
+ * The admins' phones (E.164), cached at boot (`loadAdminPhones`): the staff
+ * records carrying one of these are the admins' own — locked (no delete, no
+ * phone change, no deactivation). Roles only change through the seed scripts,
+ * so a boot-time cache is enough.
+ */
+let ADMIN_PHONES = new Set<string>();
+
+export async function loadAdminPhones(): Promise<Set<string>> {
+  const db = await getDb();
+  const docs = await db.collection("users").find({ roles: "admin" }, { projection: { phone: 1 } }).toArray();
+  ADMIN_PHONES = new Set(docs.map((d) => d.phone as string));
+  return ADMIN_PHONES;
+}
+
+/** Is this phone an admin account's? (see loadAdminPhones) */
+export function isAdminPhone(phone: string | null): boolean {
+  return phone !== null && ADMIN_PHONES.has(phone);
+}
+
 export async function updateUser(id: string, patch: Record<string, unknown>): Promise<void> {
   const db = await getDb();
   await db
