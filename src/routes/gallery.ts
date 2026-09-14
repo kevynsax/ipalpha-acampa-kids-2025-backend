@@ -1,12 +1,15 @@
 import { Hono, type Context } from "hono";
 import { requireAuth } from "../middleware/auth";
 import { deleteFile, insertFile } from "../models/files";
-import { detachGalleryFromEvent, deleteGalleryPhoto, deleteGalleryPhotos, findGalleryPhoto, findGalleryPhotoThumb, insertGalleryPhoto, listGalleryPhotos, reorderGalleryPhotos, updateGalleryPhoto, updateGalleryPhotos, validGalleryIds } from "../models/gallery";
+import { detachGalleryFromEvent, deleteGalleryPhoto, deleteGalleryPhotos, findGalleryPhoto, findGalleryPhotoThumb, insertGalleryPhoto, listGalleryFaceEmbeddings, listGalleryPhotos, listUnindexedGalleryPhotos, reorderGalleryPhotos, updateGalleryPhoto, updateGalleryPhotos, validGalleryIds } from "../models/gallery";
 import { getSettings, updateSettings } from "../models/settings";
 import { findEventById } from "../models/schedule";
 import { resolveScope } from "../services/scope";
 import { publish } from "../services/realtime";
 import { notifyPhotosPublished } from "../services/notify";
+import { config } from "../config";
+import { cosineSimilarity, extractFaceEmbeddings, faceRecognitionEnabled } from "../services/faceRecognition";
+import { indexGalleryPhotoFaces } from "../services/galleryFaces";
 import type { GalleryPhoto, Role, SessionUser } from "../types";
 
 interface Env {
@@ -42,12 +45,13 @@ const gallery = new Hono<Env>();
 
 const MAX_BYTES = 2 * 1024 * 1024;
 const MAX_THUMB_BYTES = 256 * 1024;
+const MAX_REFERENCE_BYTES = 5 * 1024 * 1024;
 const CAPTION_MAX = 140;
 /** a single bulk request never touches more photos than this */
 const BULK_MAX = 500;
 const ALLOWED = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
 
-function fail(c: Context, code: string, message: string, status: 400 | 404 | 403 | 413 | 415 = 400) {
+function fail(c: Context, code: string, message: string, status: 400 | 403 | 404 | 413 | 415 | 503 = 400) {
   return c.json({ error: { code, message } }, status);
 }
 
@@ -85,6 +89,7 @@ gallery.use("*", async (c, next) => {
  * and the team once it is published (settings.galleryPublished).
  */
 gallery.get("/", async (c) => {
+  if (c.get("activeRole") === "parent") return c.json({ photos: [] });
   if (!(await canManage(c)) && !(await getSettings()).galleryPublished) return c.json({ photos: [] });
   return c.json({ photos: (await listGalleryPhotos()).map(serializePhoto) });
 });
@@ -120,6 +125,7 @@ gallery.post("/", async (c) => {
     byUserId: c.get("userId"),
     byName: c.get("user").name,
   });
+  void indexGalleryPhotoFaces(photo._id, photo.fileId);
   publish("gallery");
   return c.json({ photo: serializePhoto(photo) }, 201);
 });
@@ -142,6 +148,49 @@ gallery.put("/publish", async (c) => {
   // only the transition off → on tells the camp, and only with something to show
   if (body.published && !was && count > 0) void notifyPhotosPublished(count);
   return c.json({ published: body.published, count });
+});
+
+/**
+ * A parent sends one temporary reference picture. Only matched photo ids are
+ * returned; the image and its embedding are never stored.
+ */
+gallery.post("/search-person", async (c) => {
+  if (c.get("activeRole") !== "parent") return fail(c, "FORBIDDEN", "A busca por rosto está disponível para os responsáveis.", 403);
+  if (!(await getSettings()).galleryPublished) return c.json({ matches: [], indexedFaces: 0, pendingPhotos: 0 });
+  if (!faceRecognitionEnabled()) return fail(c, "FACE_SEARCH_UNAVAILABLE", "A busca por rosto está indisponível no momento.", 503);
+
+  const form = await c.req.formData().catch(() => null);
+  const file = form?.get("reference");
+  if (!(file instanceof File)) return fail(c, "REFERENCE_MISSING", "Escolha uma foto de referência.");
+  if (!ALLOWED.has(file.type)) return fail(c, "FILE_TYPE", "Use uma imagem JPG, PNG, WebP ou GIF.", 415);
+  if (file.size > MAX_REFERENCE_BYTES) return fail(c, "FILE_TOO_LARGE", "A foto de referência é muito grande (máx. 5 MB).", 413);
+
+  let result;
+  try {
+    result = await extractFaceEmbeddings(new Uint8Array(await file.arrayBuffer()), file.type, file.name);
+  } catch (error) {
+    console.error("Face search failed", error);
+    return fail(c, "FACE_SEARCH_FAILED", "Não consegui analisar a foto. Tente novamente.", 503);
+  }
+  const usable = result.faces.filter((face) => face.detScore >= config.face.minDetectionScore);
+  if (usable.length === 0) return fail(c, "FACE_NOT_FOUND", "Não encontrei um rosto nítido nessa foto.");
+  if (usable.length > 1) return fail(c, "MULTIPLE_FACES", "Use uma foto com apenas uma pessoa.");
+
+  const indexed = await listGalleryFaceEmbeddings();
+  const best = new Map<string, number>();
+  for (const face of indexed) {
+    const score = cosineSimilarity(usable[0].embedding, face.embedding);
+    if (score >= config.face.matchThreshold && score > (best.get(face.photoId) ?? -1)) best.set(face.photoId, score);
+  }
+  const allPhotos = await listGalleryPhotos();
+  const allIds = new Set(allPhotos.map((photo) => photo._id));
+  const photoById = new Map(allPhotos.map((photo) => [photo._id, photo]));
+  const matches = [...best.entries()]
+    .filter(([photoId]) => allIds.has(photoId))
+    .sort((a, b) => b[1] - a[1])
+    .map(([photoId, similarity]) => ({ photo: serializePhoto(photoById.get(photoId)!), similarity: Number(similarity.toFixed(4)) }));
+  const pendingPhotos = (await listUnindexedGalleryPhotos(allPhotos.length)).length;
+  return c.json({ matches, indexedFaces: indexed.length, pendingPhotos });
 });
 
 /** Reads and validates the `ids` array shared by both bulk routes. */

@@ -9,6 +9,7 @@ import { resolveScope } from "../services/scope";
 import { isEmojiLike } from "../utils";
 import { runTool, toolSpecs } from "../services/aiTools";
 import { IMAGE_MODELS, generateImage, isImageShape } from "../services/imageAi";
+import { describeStyleTokens } from "../services/htmlStyle";
 import { NOTES_MAX_CHARS, NOTES_MODES, sortCamperNotes, type CamperNotesFields, type NotesSubject } from "../services/camperNotesAi";
 import { FIELD_DEDUP_MODEL, dedupField, isDedupField } from "../services/fieldDedupAi";
 import type { Role, SessionUser } from "../types";
@@ -174,8 +175,21 @@ Você tem ferramentas de consulta só leitura (check-in, programação, funçõe
 O tamanho segue o pedido: um aviso vira um aviso, um manual vira um manual. Se o pedido cabe em três parágrafos, escreva três parágrafos. Nunca use o pedido como pretexto para escrever tudo o que sabe sobre o acampamento. A linha de conversa é sempre curta.
 
 ## HTML do documento (dentro dos marcadores)
-- Use apenas estas tags: p, br, strong, em, s, ul, ol, li, h2, h3, blockquote, a, hr, img, mark, details, summary, figure, figcaption, table, thead, tbody, tr, th, td. Nenhuma outra (nada de h1, span, div solto, style, class, atributos de estilo). Não existe controle de espaçamento, cor, fonte ou alinhamento: o app renderiza tudo com o visual padrão. Se pedirem algo assim, use o elemento de layout mais próximo abaixo ou devolva sem alteração.
+- Use apenas estas tags: p, br, strong, em, s, ul, ol, li, h2, h3, blockquote, a, hr, img, mark, details, summary, figure, figcaption, table, thead, tbody, tr, th, td. Nenhuma outra (nada de h1, span, div solto, script, style).
 - Use h2 para seções e h3 para subseções; nunca h1.
+- NUNCA escreva style="" nem class="": o app remove. Para mudar a aparência, use os tokens de estilo abaixo.
+
+## Estilo (espaçamento, tamanho, cor, fundo, fonte)
+Você PODE mudar a aparência de um bloco com estes atributos, e só com os valores listados (qualquer outro valor é apagado):
+${describeStyleTokens()}
+Podem ir em: p, h2, h3, blockquote, ul, ol, table, figure, figcaption, img, hr, mark, strong, em. Combine à vontade: <p data-align="center" data-size="lg" data-color="forest" data-font="display">.
+Regras de bom senso (o texto é lido no celular, com pressa, por voluntários):
+- O padrão já é bonito. Estilize o que merece destaque — capa, aviso, resumo — e deixe o resto sem token nenhum. Um documento com estilo em tudo não destaca nada.
+- Nunca use data-size="sm" em instrução de segurança, nem data-tone em parágrafo longo (cansa e some no sol).
+- data-tone="forest" é fundo escuro com texto branco: use só em bloco curto (capa, senha).
+- Para alerta/proibição continue usando o blockquote com ⚠️, que já tem a cor certa; não recrie caixas com data-tone.
+- Estilo NUNCA troca a tag semântica: um título continua <h2>/<h3> (estilize o próprio h2), uma lista continua <ul>/<ol>. Jamais transforme um título em <p data-size="xl"> nem uma lista em parágrafos: o app e os leitores de tela usam a tag para navegar o documento.
+- Se o usuário pedir algo impossível (fonte Arial, 20px, azul-bebê, justificado), use o token mais próximo e diga na conversa, em uma linha, o que fez.
 
 ## Elementos de layout (o app estiliza; você só usa a tag certa)
 - CAIXA DE DESTAQUE: <blockquote><p>…</p></blockquote>. A cor vem do PRIMEIRO caractere do texto: ✅ = cartão verde escuro (senha, resposta, confirmação final); 🔓 = caixa amarela (condição para liberar / próximo passo); ⚠️ = caixa vermelha (alerta, proibição); qualquer outro início = caixa amarela neutra. Padrão: <blockquote><p><strong>✅ TÍTULO CURTO</strong><br>conteúdo</p></blockquote>. No cartão verde a segunda linha em <strong> vira o texto grande (ex.: a senha).

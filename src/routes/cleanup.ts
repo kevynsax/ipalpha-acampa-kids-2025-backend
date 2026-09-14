@@ -11,6 +11,7 @@ import {
   wipeCampers,
   wipeDocs,
   wipeGallery,
+  wipeMedications,
   wipeOccurrences,
   wipeSchedule,
   wipeScores,
@@ -53,7 +54,7 @@ const cleanup = new Hono<Env>();
 
 /** Which realtime collections each block changes (its own + the references it clears). */
 const TOUCHES: Record<CleanupGroup, Collection[]> = {
-  campers: ["campers", "staff", "bedrooms", "scores"],
+  campers: ["campers", "staff", "bedrooms", "scores", "medications"],
   staff: ["staff", "campers", "bedrooms", "teams", "events", "settings"],
   bedrooms: ["bedrooms", "campers", "staff"],
   transports: ["transports", "campers", "staff", "settings"],
@@ -61,6 +62,7 @@ const TOUCHES: Record<CleanupGroup, Collection[]> = {
   schedule: ["events", "roles", "gallery", "scores"],
   docs: ["instructions", "preparation"],
   occurrences: ["occurrences"],
+  medications: ["medications"],
   scores: ["scores"],
   gallery: ["gallery"],
   welcomes: ["staff"],
@@ -85,6 +87,8 @@ async function wipe(group: CleanupGroup, keep: StaffKeepGroup[], roles: boolean)
       return wipeDocs();
     case "occurrences":
       return wipeOccurrences();
+    case "medications":
+      return wipeMedications();
     case "scores":
       return wipeScores();
     case "welcomes":
@@ -117,7 +121,7 @@ cleanup.post("/:group", async (c) => {
 
   // order matters: the blocks that only clear references run before the ones that own them
   const groups: CleanupGroup[] = all
-    ? ["gallery", "occurrences", "scores", "schedule", "campers", "staff", "teams", "bedrooms", "transports", "welcomes", "notices"]
+    ? ["gallery", "occurrences", "medications", "scores", "schedule", "campers", "staff", "teams", "bedrooms", "transports", "welcomes", "notices"]
     : [group as CleanupGroup];
   const removed: Partial<Record<CleanupGroup, number>> = {};
   for (const g of groups) removed[g] = await wipe(g, keep, roles);

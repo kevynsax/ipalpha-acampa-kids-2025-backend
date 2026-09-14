@@ -6,14 +6,15 @@ import { transportLabel as transportLabelOf } from "../routes/transports";
 import { listRoles } from "../models/schedule";
 import { claimCheckinReminder, getSettings, staffAccessOpen } from "../models/settings";
 import { claimStaffPhotosNotice, claimStaffWelcome, findStaffById, listStaff } from "../models/staff";
-import { findTeamById } from "../models/teams";
+import { findTeamById, listTeams } from "../models/teams";
 import { claimParentPhotosNotice, claimParentWelcome, listAdmins, listParents } from "../models/users";
 import { PARENT_FIELD_LABEL, PREP_AUDIENCES } from "../types";
-import type { CampEvent, Camper, CamperChangeLog, DocAudience, InstructionDoc, Occurrence, PrepAudience, PrepSection, ScheduleRole, Settings, Staff } from "../types";
+import type { CampEvent, Camper, CamperChangeLog, DocAudience, InstructionDoc, Occurrence, PrepAudience, PrepSection, ScheduleRole, Settings, Staff, Team } from "../types";
 import { formatBrazilPhone, saoPauloWallClock, saoPauloWallClockToIso, todayInSaoPaulo } from "../utils";
 import { birthdayDuringCamp, campPeriod } from "./camp";
 import { comteleEnabled, comteleSendSms, resolveSmsTarget, type SmsAudience } from "./comtele";
 import { staffHasAccess } from "./scope";
+import { assignmentDetail, teamMap } from "./schedule";
 
 /**
  * Texts (SMS via Comtele) the team members concerned by a change, saying
@@ -538,14 +539,18 @@ interface Duty {
   detail: string;
 }
 
-/** what each staff member does in the event: explicit assignment, else the "for everyone" role (active only) */
-function dutiesOf(e: CampEvent | null, staff: Staff[], roleById: Map<string, ScheduleRole>): Map<string, Duty> {
+/**
+ * What each staff member does in the event: explicit assignment, else the
+ * "for everyone" role (active only). A role whose detail is the person's team
+ * takes its label from the staff record, so the text says the team.
+ */
+function dutiesOf(e: CampEvent | null, staff: Staff[], roleById: Map<string, ScheduleRole>, teamById: Map<string, Team>): Map<string, Duty> {
   const out = new Map<string, Duty>();
   if (!e) return out;
   const everyone = e.roles.find((id) => roleById.get(id)?.forEveryone) ?? null;
   for (const s of staff) {
     const a = e.assignments.find((x) => x.staffId === s._id);
-    if (a) out.set(s._id, { roleId: a.roleId, detail: a.detail });
+    if (a) out.set(s._id, { roleId: a.roleId, detail: assignmentDetail(roleById.get(a.roleId), a, s, teamById).detail });
     else if (everyone && s.active) out.set(s._id, { roleId: everyone, detail: "" });
   }
   return out;
@@ -562,10 +567,11 @@ export async function notifyEventChange(before: CampEvent | null, after: CampEve
     const settings = await getSettings();
     if (!settings.notifications.roleChanges) return;
 
-    const [staff, roles] = await Promise.all([listStaff(), listRoles()]);
+    const [staff, roles, teams] = await Promise.all([listStaff(), listRoles(), listTeams()]);
     const roleById = new Map(roles.map((r) => [r._id, r]));
-    const prev = dutiesOf(before, staff, roleById);
-    const next = dutiesOf(after, staff, roleById);
+    const teamById = teamMap(teams);
+    const prev = dutiesOf(before, staff, roleById, teamById);
+    const next = dutiesOf(after, staff, roleById, teamById);
     const moved = !!before && !!after && (before.date !== after.date || before.startTime !== after.startTime || before.endTime !== after.endTime);
     const duty = (d: Duty) => dutyLabel(d.roleId, d.detail, roleById);
 

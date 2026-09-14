@@ -17,6 +17,7 @@ function toRole(doc: Record<string, unknown> | null): ScheduleRole | null {
     preparation: (doc.preparation as string) ?? "",
     forEveryone: (doc.forEveryone as boolean) ?? false,
     hasDetail: (doc.hasDetail as boolean) ?? false,
+    detailFromTeam: (doc.detailFromTeam as boolean) ?? false,
     detailPlaceholder: (doc.detailPlaceholder as string) ?? "",
     createdAt: doc.createdAt as Date,
     updatedAt: doc.updatedAt as Date,
@@ -83,7 +84,8 @@ function toEvent(doc: Record<string, unknown> | null): CampEvent | null {
     notes: (doc.notes as string) ?? "",
     // legacy docs stored [{ roleId, slots }] — normalise to plain ids
     roles: ((doc.roles as unknown[]) ?? []).map((r) => (typeof r === "string" ? r : (r as { roleId: string }).roleId)),
-    assignments: (doc.assignments as EventAssignment[]) ?? [],
+    // legacy docs have no detailColor — default to "" (no tint)
+    assignments: (((doc.assignments as EventAssignment[]) ?? []).map((a) => ({ ...a, detailColor: a.detailColor ?? "" }))),
     createdAt: doc.createdAt as Date,
     updatedAt: doc.updatedAt as Date,
   };

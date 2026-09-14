@@ -25,7 +25,8 @@ import { logCheckin } from "../models/campers";
 import { bedroomCapacity, ROOM_ROLES, STAFF_CATEGORY_KEYS, type Role, type RoomRole, type SessionUser, type Staff } from "../types";
 import { canHandleVests, hideOwnBedroom, resolveScope, staffVisibility, type Scope } from "../services/scope";
 import { bedroomFullMessage, isInvalid, parseBedroom, parseMedications, parseMulti, parseTeam, parseText, parseTransport } from "./_validate";
-import { clearJokerEverywhere } from "../models/teams";
+import { listTeams } from "../models/teams";
+import { assignmentDetail, teamMap } from "../services/schedule";
 import { distanceMeters, normalizeBrazilPhone, titleCaseName, nowInSaoPauloWallClock, saoPauloWallClock, saoPauloWallClockToIso, todayInSaoPaulo } from "../utils";
 import { getSettings } from "../models/settings";
 import { isAdminPhone } from "../models/users";
@@ -254,13 +255,15 @@ staff.get("/:id/detail", requireRole("admin", "staff", "health_staff"), async (c
   // draft rooms: no bedroom, kids or roommates for the person themself
   const roomId = hideOwnBedroom(scope) ? null : s.bedroom;
 
-  const [events, roles, bedroom, allStaff] = await Promise.all([
+  const [events, roles, bedroom, allStaff, teams] = await Promise.all([
     listEvents(),
     listRoles(),
     roomId ? findBedroomById(roomId) : null,
     roomId ? listStaff() : [],
+    listTeams(),
   ]);
   const roleById = new Map(roles.map((r) => [r._id, r]));
+  const teamById = teamMap(teams);
 
   const schedule = events
     .map((e) => {
@@ -279,7 +282,7 @@ staff.get("/:id/detail", requireRole("admin", "staff", "health_staff"), async (c
         title: e.title,
         emoji: e.emoji,
         role: r ? { id: r._id, name: r.name, emoji: r.emoji, instructions: r.instructions } : null,
-        detail: a?.detail ?? "",
+        ...assignmentDetail(r, a, s, teamById),
         /** true when this comes from a "for everyone" role rather than an explicit assignment */
         implicit: !a,
         defaultRole: fallback ? { id: fallback._id, name: fallback.name, emoji: fallback.emoji } : null,
@@ -635,8 +638,8 @@ staff.delete("/:id", async (c) => {
   if (existing && isAdminPhone(existing.phone)) return fail(c, "ADMIN_LOCKED", "Um admin não pode ser excluído da equipe.", 409);
   const ok = await deleteStaff(id);
   if (!ok) return fail(c, "STAFF_NOT_FOUND", "Membro da equipe não encontrado.", 404);
-  const [, , orphaned] = await Promise.all([unassignStaffEverywhere(id), clearJokerEverywhere(id), reassignCampers(id, null)]);
-  publish("staff", "bedrooms", "events", "teams", ...(orphaned ? ["campers" as const] : []));
+  const [, orphaned] = await Promise.all([unassignStaffEverywhere(id), reassignCampers(id, null)]);
+  publish("staff", "bedrooms", "events", ...(orphaned ? ["campers" as const] : []));
   return c.json({ success: true });
 });
 

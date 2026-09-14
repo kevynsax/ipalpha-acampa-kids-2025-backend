@@ -255,8 +255,6 @@ export interface Team {
   name: string;
   /** CSS colour (#rrggbb) shown on the scoreboard and tags */
   color: string;
-  /** the team's "coringa" — a staff member (id) or null */
-  jokerStaffId: string | null;
   order: number;
   createdAt: Date;
   updatedAt: Date;
@@ -410,6 +408,42 @@ export interface Occurrence {
   createdAt: Date;
 }
 
+// ── Medication log (the medical team's checklist) ────────────────────────
+
+/**
+ * ONE dose actually given to a kid, ticked by the medical team on the
+ * Medicações tab. The prescription itself lives on the camper
+ * (`Camper.medications`); this is only the checklist of what was given, so
+ * the team never has to remember whether the 12:30 pill already went out.
+ *
+ * `slot` is the prescribed "HH:MM" of that dose, or "sos" for a medicine
+ * taken "quando necessário" (those may repeat in a day; a scheduled slot is
+ * ticked once per day and unticking deletes the record).
+ */
+export interface MedicationDose {
+  _id: string;
+  camperId: string;
+  /** name snapshot, so the history survives a rename / deletion */
+  camperName: string;
+  /** normalized medicine name — links the tick to the prescription even if the list is re-ordered */
+  medKey: string;
+  medName: string;
+  dose: string;
+  /** "YYYY-MM-DD" the dose belongs to (the camp's day, not the instant) */
+  day: string;
+  /** "HH:MM" of the prescribed moment, or "sos" */
+  slot: string;
+  /** when the tick was made */
+  givenAt: Date;
+  byUserId: string;
+  byName: string;
+  /** optional remark ("tomou meia dose", "vomitou depois") */
+  note: string;
+}
+
+/** "quando necessário" doses: no fixed time, may repeat in the same day */
+export const MEDICATION_SOS_SLOT = "sos";
+
 /**
  * Fields a PARENT may edit on their own kid (Início → Pontos de atenção).
  * Every one of them but `generalNotes` counts as MEDICAL: a change there is
@@ -495,6 +529,14 @@ export interface ScheduleRole {
   forEveryone: boolean;
   /** whether an assignment of this role carries a per-person detail (team, base number, shift…) */
   hasDetail: boolean;
+  /**
+   * The detail is NOT typed per person: it IS the person's team
+   * (`Staff.team`). Only meaningful together with `hasDetail`. When true only
+   * staff members who have a team may be scaled into the role, and the chip
+   * shown everywhere is the team (name + colour), read live from the staff
+   * record — so moving somebody between teams updates every event at once.
+   */
+  detailFromTeam: boolean;
   /** placeholder / hint for that detail, e.g. "Time Belém", "Base 3", "14h–14h45" */
   detailPlaceholder: string;
   createdAt: Date;
@@ -502,11 +544,15 @@ export interface ScheduleRole {
 }
 
 /** A staff member scaled into a role of an event. `detail` holds the specifics
- *  the generic role doesn't (team name, base/colour number, shift). */
+ *  the generic role doesn't (team name, base/colour number, shift).
+ *  Both stay EMPTY when the role's `detailFromTeam` is on: the detail is then
+ *  derived from `Staff.team` (see services/schedule.ts#assignmentDetail). */
 export interface EventAssignment {
   staffId: string;
   roleId: string;
   detail: string;
+  /** "#rrggbb" tint for that detail chip (team colour), or "" for the default */
+  detailColor: string;
 }
 
 /** A moment of the camp programme: "12/09 · 14:00 Piscina". */

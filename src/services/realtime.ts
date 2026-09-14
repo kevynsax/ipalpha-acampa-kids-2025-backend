@@ -10,7 +10,7 @@ import { todayInSaoPaulo } from "../utils";
  * ~40 rooms, ~50 events), which keeps the client logic a simple "replace".
  */
 
-export const COLLECTIONS = ["campers", "staff", "bedrooms", "categories", "transports", "teams", "scores", "roles", "events", "preparation", "instructions", "occurrences", "gallery", "settings"] as const;
+export const COLLECTIONS = ["campers", "staff", "bedrooms", "categories", "transports", "teams", "scores", "roles", "events", "preparation", "instructions", "occurrences", "medications", "gallery", "settings"] as const;
 export type Collection = (typeof COLLECTIONS)[number];
 export type Snapshot = Partial<Record<Collection, unknown>>;
 

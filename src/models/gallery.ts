@@ -25,6 +25,13 @@ export interface GalleryPhotoThumb {
   thumbType: string;
 }
 
+export interface GalleryFaceEmbedding {
+  photoId: string;
+  embedding: number[];
+  detScore: number;
+  model: string;
+}
+
 function toPhoto(doc: Record<string, unknown> | null): GalleryPhoto | null {
   if (!doc) return null;
   return {
@@ -101,6 +108,38 @@ export async function reorderGalleryPhotos(ids: string[]): Promise<number> {
   const now = new Date();
   await Promise.all(ordered.map((id, i) => db.collection(COLLECTION).updateOne({ _id: id as never }, { $set: { order: pool[i], updatedAt: now } })));
   return ordered.length;
+}
+
+export async function listGalleryFaceEmbeddings(): Promise<GalleryFaceEmbedding[]> {
+  const db = await getDb();
+  const docs = (await db.collection(COLLECTION).find(
+    { "faces.0": { $exists: true } },
+    { projection: { faces: 1, faceModel: 1 } },
+  ).toArray()) as Record<string, unknown>[];
+  const out: GalleryFaceEmbedding[] = [];
+  for (const doc of docs) {
+    const faces = Array.isArray(doc.faces) ? doc.faces as Record<string, unknown>[] : [];
+    for (const face of faces) {
+      if (!Array.isArray(face.embedding)) continue;
+      out.push({
+        photoId: doc._id as string,
+        embedding: face.embedding as number[],
+        detScore: typeof face.detScore === "number" ? face.detScore : 0,
+        model: typeof doc.faceModel === "string" ? doc.faceModel : "unknown",
+      });
+    }
+  }
+  return out;
+}
+
+export async function saveGalleryPhotoFaces(id: string, input: { embeddings: { embedding: number[]; detScore: number }[]; model: string }): Promise<boolean> {
+  if (!ID_RE.test(id)) return false;
+  const db = await getDb();
+  const res = await db.collection(COLLECTION).updateOne(
+    { _id: id as never },
+    { $set: { faces: input.embeddings, faceModel: input.model, facesIndexedAt: new Date() } },
+  );
+  return res.matchedCount === 1;
 }
 
 export async function findGalleryPhoto(id: string): Promise<GalleryPhoto | null> {
@@ -184,12 +223,22 @@ export async function detachGalleryFromEvent(eventId: string): Promise<number> {
   return res.modifiedCount;
 }
 
+export async function listUnindexedGalleryPhotos(limit = 25): Promise<GalleryPhoto[]> {
+  const db = await getDb();
+  const docs = await db.collection(COLLECTION).find(
+    { facesIndexedAt: { $exists: false } },
+    { projection: { thumb: 0 } },
+  ).sort({ createdAt: 1 }).limit(limit).toArray();
+  return docs.map((d) => toPhoto(d as Record<string, unknown>)!);
+}
+
 export async function ensureGalleryIndexes(): Promise<void> {
   await mkdir(config.filesDir, { recursive: true });
   const db = await getDb();
   await db.collection(COLLECTION).createIndex({ createdAt: -1 });
   await db.collection(COLLECTION).createIndex({ eventId: 1 }, { sparse: true });
   await db.collection(COLLECTION).createIndex({ order: -1 });
+  await db.collection(COLLECTION).createIndex({ facesIndexedAt: 1 }, { sparse: true });
   // publishing moved to settings.galleryPublished: drop the per-photo flags
   await db.collection(COLLECTION).updateMany({ $or: [{ published: { $exists: true } }, { publishedAt: { $exists: true } }] }, { $unset: { published: "", publishedAt: "" } });
   // photos from before ordering existed: seed `order` from the upload time once

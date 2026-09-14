@@ -1,4 +1,5 @@
 import sanitizeHtml from "sanitize-html";
+import { STYLEABLE_TAGS, styleAttrRules } from "./htmlStyle";
 
 /**
  * The ONE policy for rich text written in the admin WYSIWYG (role
@@ -12,6 +13,11 @@ import sanitizeHtml from "sanitize-html";
  *   figure > img + figcaption                           picture with a caption
  *   table > thead/tbody > tr > th/td                    small data table
  *
+ * Look: blocks may carry the style tokens of htmlStyle.ts (data-align, -size,
+ * -space, -color, -tone, -font) with a value from the closed list. `style=""`
+ * and `class=""` are never allowed — the reader CSS turns a token into the
+ * app's own spacing/colour, so a document can't drift from the design system.
+ *
  * Images: only the ones uploaded through POST /api/files (relative
  * `/api/files/<id>` URLs) or plain http(s) links — never `data:` blobs, which
  * would bloat the documents pushed to every phone. An <img data-gen="…"> (a
@@ -23,7 +29,7 @@ const HTML_POLICY: sanitizeHtml.IOptions = {
     "p", "br", "strong", "b", "em", "i", "u", "s", "ul", "ol", "li", "h2", "h3", "blockquote", "a", "hr", "img", "mark",
     "details", "summary", "div", "figure", "figcaption", "table", "thead", "tbody", "tr", "th", "td",
   ],
-  allowedAttributes: {
+  allowedAttributes: withStyleTokens({
     a: ["href", "target", "rel"],
     img: ["src", "alt", "title", "width", "height", "loading"],
     details: ["open"],
@@ -31,7 +37,7 @@ const HTML_POLICY: sanitizeHtml.IOptions = {
     td: ["colspan", "rowspan"],
     // only the editor's content wrapper; any other div keeps its children but loses the attributes
     div: [{ name: "data-type", values: ["detailsContent"] }],
-  },
+  }),
   allowedSchemes: ["http", "https", "mailto", "tel"],
   allowedSchemesByTag: { img: ["http", "https"] },
   transformTags: {
@@ -41,6 +47,17 @@ const HTML_POLICY: sanitizeHtml.IOptions = {
   // an <img> without an acceptable src is dropped entirely (not left as an empty tag)
   exclusiveFilter: (frame) => frame.tag === "img" && !isAllowedImageSrc(frame.attribs.src),
 };
+
+/**
+ * Adds the style tokens to every tag that may carry them, KEEPING the rules a
+ * tag already has (a spread would silently drop `img`'s src / `div`'s
+ * data-type and let bad values through).
+ */
+function withStyleTokens(base: sanitizeHtml.IOptions["allowedAttributes"]): NonNullable<sanitizeHtml.IOptions["allowedAttributes"]> {
+  const out = { ...(base ?? {}) } as Record<string, (string | { name: string; values: string[] })[]>;
+  for (const tag of STYLEABLE_TAGS) out[tag] = [...(out[tag] ?? []), ...styleAttrRules(tag)];
+  return out;
+}
 
 const FILE_URL_RE = /^\/api\/files\/[a-f0-9]{16,64}$/;
 
@@ -58,7 +75,7 @@ export function cleanHtml(value: unknown, max: number): string | null {
   if (typeof value !== "string") return null;
   if (value.length > max) return null;
   const html = sanitizeHtml(value, HTML_POLICY);
-  const html2 = tidyTables(dropEmptyFigures(unwrapStrayDivs(html))).trim();
+  const html2 = dropBareStyleAttrs(tidyTables(dropEmptyFigures(unwrapStrayDivs(html)))).trim();
   const text = sanitizeHtml(html2, { allowedTags: [], allowedAttributes: {} }).replace(/\s|&nbsp;/g, "");
   return text || /<img\s/i.test(html2) ? html2 : "";
 }
@@ -78,6 +95,15 @@ function unwrapStrayDivs(html: string): string {
     keep.push(ok);
     return ok ? m : "";
   });
+}
+
+/**
+ * A style token with a value the app doesn't know (`data-align="justify"`, or an
+ * injection attempt) is stripped of its value by sanitize-html but left as a
+ * bare attribute. Remove those so documents never carry meaningless markup.
+ */
+function dropBareStyleAttrs(html: string): string {
+  return html.replace(/ (data-(?:align|size|space|color|tone|font|density))(?=[\s/>])/g, "");
 }
 
 /**

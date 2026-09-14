@@ -37,6 +37,9 @@ committed YAML or frontend `VITE_*` variables.
 | `AI_TRANSCRIBE_URL` | `https://whisper.kevyn.com.br/v1`; empty hides voice input |
 | `AI_TRANSCRIBE_MODEL` | `whisper-large-v3-turbo` |
 | `AI_TRANSCRIBE_KEY` | Optional Secret key `ai-transcribe-key`; leave absent if the speech endpoint needs no authentication |
+| `FACE_SERVICE_URL` | `http://acampa-2025-face:8000` (cluster-internal only). Empty disables the parents' photo search |
+| `FACE_MATCH_THRESHOLD` | `0.45`; tune against real camp photos before changing |
+| `FACE_MIN_DETECTION_SCORE` | `0.55` |
 
 MongoDB uses `MONGO_INITDB_ROOT_USERNAME` / `MONGO_INITDB_ROOT_PASSWORD`
 from `mongo-credentials`, and `MONGO_INITDB_DATABASE=camping`. These initialize
@@ -46,6 +49,22 @@ The frontend needs **no production environment variables**: `/api`, uploaded
 images, and WebSocket traffic use the browser origin, routed by Traefik.
 `VITE_API_URL` is an optional **build-time** override, not an nginx runtime
 variable. `DEV_LAN` is development-only. Docker excludes local `.env` files.
+
+## Face service (parents' photo search)
+
+- Manifest: `face-service.yaml` (Deployment + ClusterIP Service + `acampa-2025-face-models-pvc`).
+- Repo: `ipalpha-acampa-kids-2025-face-service` (sibling folder `../face-service`),
+  image `registry.kevyn.com.br/ip-alpha/kids/acampa-2025-face`, published by the
+  parent folder's `./publish` like the backend and the frontend.
+- Requests one time-sliced GPU (`nvidia.com/gpu: 1`, `runtimeClassName: nvidia`).
+  It also runs on CPU: drop the GPU limit and the runtime class, expect seconds
+  per photo instead of fractions.
+- First start downloads the InsightFace `buffalo_l` pack into the PVC; the
+  startup probe allows up to ten minutes for it.
+- Never expose it through the ingress. It is the only component that sees a
+  parent's reference photo, and it stores nothing.
+- Rolling the backend re-runs the face backfill for photos without
+  `facesIndexedAt`; indexing failures are simply retried on the next boot.
 
 ## Persistent data and upgrades
 

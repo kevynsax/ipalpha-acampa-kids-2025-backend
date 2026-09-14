@@ -14,6 +14,7 @@ import { backfillParentEditedAt, ensureCamperIndexes } from "./models/campers";
 import { ensurePrepIndexes } from "./models/preparation";
 import { ensureInstructionIndexes } from "./models/instructions";
 import { ensureOccurrenceIndexes } from "./models/occurrences";
+import { ensureMedicationIndexes } from "./models/medications";
 import { ensureFileIndexes } from "./models/files";
 import { ensureTeamIndexes } from "./models/teams";
 import { ensureScoreIndexes } from "./models/scores";
@@ -34,6 +35,7 @@ import settingsRoutes from "./routes/settings";
 import preparationRoutes from "./routes/preparation";
 import instructionRoutes from "./routes/instructions";
 import occurrenceRoutes from "./routes/occurrences";
+import medicationRoutes from "./routes/medications";
 import fileRoutes from "./routes/files";
 import aiRoutes from "./routes/ai";
 import cleanupRoutes from "./routes/cleanup";
@@ -41,6 +43,7 @@ import { comteleEnabled } from "./services/comtele";
 import { rearmWindows, scheduleBirthdayNotices, scheduleCheckinReminder } from "./services/realtime";
 import { sendBirthdayNotices, sendCheckinReminder, syncParentWelcomes, syncWelcomes } from "./services/notify";
 import { getSettings } from "./models/settings";
+import { backfillGalleryFaces } from "./services/galleryFaces";
 
 const app = new Hono();
 
@@ -69,6 +72,8 @@ app.route("/api/cleanup", cleanupRoutes);
 app.route("/api/preparation", preparationRoutes);
 app.route("/api/instructions", instructionRoutes);
 app.route("/api/occurrences", occurrenceRoutes);
+// the medical team's daily medication checklist (admin / organizer / medical team)
+app.route("/api/medications", medicationRoutes);
 // camp teams (admin-managed) + the games scoreboard (admin / game organizers)
 app.route("/api/teams", teamRoutes);
 app.route("/api/scores", scoreRoutes);
@@ -100,10 +105,12 @@ await ensureCamperIndexes();
 await ensurePrepIndexes();
 await ensureInstructionIndexes();
 await ensureOccurrenceIndexes();
+await ensureMedicationIndexes();
 await ensureFileIndexes();
 await ensureTeamIndexes(); // also migrates the legacy "equipe" category into teams
 await ensureScoreIndexes();
 await ensureGalleryIndexes();
+void backfillGalleryFaces();
 // every admin is on the team roster too (room, food restrictions, vest…); their record can't be deleted nor have the phone changed
 {
   await loadAdminPhones();

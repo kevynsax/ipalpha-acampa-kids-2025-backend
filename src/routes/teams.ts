@@ -2,7 +2,6 @@ import { Hono, type Context } from "hono";
 import { requireAuth } from "../middleware/auth";
 import { requireManager, requireRole } from "../middleware/roles";
 import { deleteScoresOfTeam } from "../models/scores";
-import { findStaffById } from "../models/staff";
 import { deleteTeam, findTeamById, insertTeam, listTeams, TEAM_PALETTE, unlinkTeamEverywhere, updateTeam, type TeamData } from "../models/teams";
 import { publish } from "../services/realtime";
 import type { Role, SessionUser, Team } from "../types";
@@ -29,7 +28,6 @@ export function serializeTeam(t: Team) {
     id: t._id,
     name: t.name,
     color: t.color,
-    jokerStaffId: t.jokerStaffId,
     order: t.order,
     createdAt: t.createdAt,
     updatedAt: t.updatedAt,
@@ -52,12 +50,6 @@ async function buildPatch(body: Record<string, unknown>, partial: boolean): Prom
     if (!COLOR_RE.test(color)) return { code: "COLOR_INVALID", message: "Escolha uma cor válida (#rrggbb)." };
     patch.color = color;
   }
-  if (has("jokerStaffId")) {
-    const v = body.jokerStaffId;
-    if (v === undefined || v === null || v === "") patch.jokerStaffId = null;
-    else if (typeof v !== "string" || !(await findStaffById(v))) return { code: "JOKER_INVALID", message: "Coringa: pessoa da equipe não encontrada." };
-    else patch.jokerStaffId = v;
-  }
   return { patch };
 }
 
@@ -70,7 +62,7 @@ teams.get("/", requireRole("admin", "staff", "health_staff", "parent"), async (c
 
 teams.use("/*", requireManager);
 
-/** POST /api/teams  { name, color?, jokerStaffId? } */
+/** POST /api/teams  { name, color? } */
 teams.post("/", async (c) => {
   const body = await c.req.json<Record<string, unknown>>().catch(() => null);
   if (!body) return fail(c, "BODY_INVALID", "Corpo da requisição inválido.");
@@ -99,7 +91,7 @@ teams.put("/reorder", async (c) => {
   return c.json({ teams: (await listTeams()).map(serializeTeam) });
 });
 
-/** PUT /api/teams/:id — partial update. Becoming a team's joker is deliberately NOT texted (no access change, nothing to do in the app). */
+/** PUT /api/teams/:id — partial update. */
 teams.put("/:id", async (c) => {
   const existing = await findTeamById(c.req.param("id"));
   if (!existing) return fail(c, "TEAM_NOT_FOUND", "Time não encontrado.", 404);

@@ -4,6 +4,7 @@ import { listCategories } from "../models/categories";
 import { listTransports } from "../models/transports";
 import { listInstructions } from "../models/instructions";
 import { listOccurrences } from "../models/occurrences";
+import { listMedicationDoses } from "../models/medications";
 import { listPrepSections } from "../models/preparation";
 import { listEvents, listRoles } from "../models/schedule";
 import { listStaff } from "../models/staff";
@@ -18,6 +19,7 @@ import { serializeCategory } from "../routes/categories";
 import { serializeTransport } from "../routes/transports";
 import { serializeInstruction } from "../routes/instructions";
 import { serializeOccurrence } from "../routes/occurrences";
+import { serializeMedicationDose } from "../routes/medications";
 import { serializePrepSection } from "../routes/preparation";
 import { serializeEvent, serializeRole } from "../routes/schedule";
 import { serializeSettings, serializeSettingsForManager } from "../routes/settings";
@@ -36,8 +38,8 @@ import { parentEvents } from "./camp";
  */
 const READABLE: Record<Role, readonly Collection[]> = {
   admin: COLLECTIONS,
-  staff: ["campers", "staff", "bedrooms", "categories", "transports", "teams", "scores", "roles", "events", "preparation", "instructions", "occurrences", "gallery", "settings"],
-  health_staff: ["campers", "staff", "bedrooms", "categories", "transports", "teams", "scores", "roles", "events", "preparation", "instructions", "occurrences", "gallery", "settings"],
+  staff: ["campers", "staff", "bedrooms", "categories", "transports", "teams", "scores", "roles", "events", "preparation", "instructions", "occurrences", "medications", "gallery", "settings"],
+  health_staff: ["campers", "staff", "bedrooms", "categories", "transports", "teams", "scores", "roles", "events", "preparation", "instructions", "occurrences", "medications", "gallery", "settings"],
   // parents: their own kids + rooms, the team of those rooms / important contacts (inside the window), the programme — and the PUBLISHED photos
   parent: ["campers", "staff", "bedrooms", "categories", "transports", "teams", "roles", "events", "preparation", "gallery", "settings"],
 };
@@ -61,7 +63,9 @@ export async function loadCollections(viewer: Viewer, names: readonly Collection
   // Occurrences are reserved for admins and people explicitly listed on the
   // medical team. Ordinary staff sessions must not receive even an empty
   // collection from this read path.
-  if (!scope.all && !scope.medical) wanted = wanted.filter((name) => name !== "occurrences");
+  // The medication checklist is the same: only the admin / organizers and the
+  // medical team receive it (it is health data of every kid).
+  if (!scope.all && !scope.medical) wanted = wanted.filter((name) => name !== "occurrences" && name !== "medications");
 
   // roles and events are scoped together: a non-admin only learns about the
   // roles that survive in their events, so a change to either re-sends both
@@ -125,9 +129,14 @@ export async function loadCollections(viewer: Viewer, names: readonly Collection
           if (scope.all) out.occurrences = (await listOccurrences()).map(serializeOccurrence);
           else if (scope.medical) out.occurrences = (await listOccurrences()).filter((occurrence) => occurrence.campers.length > 0).map(serializeOccurrence);
           break;
+        case "medications":
+          out.medications = (await listMedicationDoses()).map(serializeMedicationDose);
+          break;
         case "gallery":
-          // the album is published as a whole; before that only the admin and the photographers see it
-          out.gallery = canManageGallery(scope) || (await getSettings()).galleryPublished ? (await listGalleryPhotos()).map(serializePhoto) : [];
+          // Parents must submit a reference photo first; their matched list comes
+          // from POST /api/gallery/search-person and is never pushed or cached.
+          if (role === "parent") out.gallery = [];
+          else out.gallery = canManageGallery(scope) || (await getSettings()).galleryPublished ? (await listGalleryPhotos()).map(serializePhoto) : [];
           break;
         case "settings":
           // offenders list (out-of-scope emergency QR) is manager-only

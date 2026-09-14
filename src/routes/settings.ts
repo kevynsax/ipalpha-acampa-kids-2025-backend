@@ -363,7 +363,7 @@ settings.put("/", requireManager, async (c) => {
   if (scopeChanged) {
     // Any access-list change may alter which records a phone is allowed to keep.
     // Re-send every scoped collection so gains and revocations happen live.
-    publish("campers", "staff", "bedrooms", "roles", "events", "occurrences", "scores", "gallery");
+    publish("campers", "staff", "bedrooms", "roles", "events", "occurrences", "medications", "scores", "gallery");
     // someone may have just left every list while the team window is closed: log them out now
     if (!windowChanged) void evictStaffOutsideWindow().catch((err) => console.error("realtime: evict failed", err));
   }

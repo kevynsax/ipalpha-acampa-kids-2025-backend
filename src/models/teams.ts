@@ -33,7 +33,6 @@ function toTeam(doc: Record<string, unknown> | null): Team | null {
     _id: (doc._id as ObjectId).toString(),
     name: doc.name as string,
     color: typeof doc.color === "string" ? doc.color : "#2a9d8f",
-    jokerStaffId: typeof doc.jokerStaffId === "string" ? doc.jokerStaffId : null,
     order: (doc.order as number) ?? 0,
     createdAt: doc.createdAt as Date,
     updatedAt: doc.updatedAt as Date,
@@ -85,12 +84,6 @@ export async function unlinkTeamEverywhere(teamId: string): Promise<void> {
   ]);
 }
 
-/** Clears the joker of every team that pointed at this staff member (after they are deleted). */
-export async function clearJokerEverywhere(staffId: string): Promise<void> {
-  const db = await getDb();
-  await db.collection(COLLECTION).updateMany({ jokerStaffId: staffId }, { $set: { jokerStaffId: null, updatedAt: new Date() } });
-}
-
 export async function ensureTeamIndexes(): Promise<void> {
   const db = await getDb();
   await db.collection(COLLECTION).createIndex({ order: 1, name: 1 });
@@ -117,7 +110,6 @@ async function migrateLegacyTeamCategory(): Promise<void> {
       _id: new ObjectId(o.id),
       name: o.label,
       color: TEAM_PALETTE[i % TEAM_PALETTE.length],
-      jokerStaffId: null,
       order: o.order,
       createdAt: now,
       updatedAt: now,

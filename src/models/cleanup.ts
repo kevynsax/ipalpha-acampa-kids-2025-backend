@@ -13,18 +13,20 @@ import { loadAdminPhones } from "./users";
  * the Preparação / Instruções content are reused every year, so they only go
  * when asked for explicitly: the "docs" block, and the Programação toggle.
  */
-export const CLEANUP_GROUPS = ["campers", "staff", "bedrooms", "transports", "teams", "schedule", "docs", "occurrences", "scores", "gallery", "welcomes", "notices"] as const;
+export const CLEANUP_GROUPS = ["campers", "staff", "bedrooms", "transports", "teams", "schedule", "docs", "occurrences", "medications", "scores", "gallery", "welcomes", "notices"] as const;
 export type CleanupGroup = (typeof CLEANUP_GROUPS)[number];
 
 /**
  * Every kid, plus the check-in log, the parents' edit log, the emergency-QR
- * lookups (and the counters they feed) and the per-kid point scans.
+ * lookups (and the counters they feed), the per-kid point scans and the
+ * medical team's medication checklist (each tick belongs to a kid).
  */
 export async function wipeCampers(): Promise<number> {
   const db = await getDb();
   const { deletedCount } = await db.collection("campers").deleteMany({});
   await Promise.all([
     db.collection("checkinLog").deleteMany({}),
+    db.collection("medicationDoses").deleteMany({}),
     db.collection("camperChangeLog").deleteMany({}),
     db.collection("camperLookups").deleteMany({}),
     db.collection("scores").deleteMany({ camperId: { $ne: null } }),
@@ -62,8 +64,8 @@ function emptyList(group: StaffKeepGroup): unknown {
 /**
  * Every team member except the admins' own roster records (which can never be
  * deleted) and the people on the admin lists named in `keep`, plus their event
- * assignments, the teams' coringa, the kids they looked after and every admin
- * list that named them. A kept list is left untouched — its people stay on it.
+ * assignments, the kids they looked after and every admin list that named
+ * them. A kept list is left untouched — its people stay on it.
  */
 export async function wipeStaff(keep: readonly StaffKeepGroup[] = []): Promise<number> {
   const db = await getDb();
@@ -78,7 +80,6 @@ export async function wipeStaff(keep: readonly StaffKeepGroup[] = []): Promise<n
   for (const g of STAFF_KEEP_GROUPS) if (!keep.includes(g)) lists[g] = emptyList(g);
   await Promise.all([
     db.collection("campers").updateMany({ caretakerId: { $in: doomed } }, { $set: { caretakerId: null, updatedAt: now } }),
-    db.collection("teams").updateMany({ jokerStaffId: { $in: doomed } }, { $set: { jokerStaffId: null, updatedAt: now } }),
     db.collection<Record<string, unknown>>("schedule_events").updateMany(
       { "assignments.staffId": { $in: doomed } },
       { $pull: { assignments: { staffId: { $in: doomed } } } as never, $set: { updatedAt: now } },
@@ -156,6 +157,13 @@ export async function wipeDocs(): Promise<number> {
 export async function wipeOccurrences(): Promise<number> {
   const db = await getDb();
   const { deletedCount } = await db.collection("occurrences").deleteMany({});
+  return deletedCount;
+}
+
+/** Every dose the medical team ticked (the prescriptions stay on the kids). */
+export async function wipeMedications(): Promise<number> {
+  const db = await getDb();
+  const { deletedCount } = await db.collection("medicationDoses").deleteMany({});
   return deletedCount;
 }
 

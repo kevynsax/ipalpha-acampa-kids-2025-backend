@@ -10,6 +10,7 @@ import { listTeams } from "../models/teams";
 import { getSettings } from "../models/settings";
 import { listAdmins } from "../models/users";
 import { bedroomCapacity } from "../types";
+import { assignmentDetail, teamMap } from "./schedule";
 
 /**
  * Read-only "tools" the editor's AI helper may call when a request needs facts
@@ -75,7 +76,7 @@ export const AI_TOOLS: AiTool[] = [
         checkin_igreja: "No dia da saída, na igreja: o pai/mãe entrega a criança, os dados da ficha são confirmados e o check-in é registrado. Depois disso a criança está sob responsabilidade da equipe.",
         checkin_onibus: "Segunda chamada, dentro do veículo, antes de sair: confirma que cada criança embarcou no veículo certo.",
         quartos: "Cada criança e cada membro da equipe tem um quarto (alas: meninas, meninos, equipe). Cada quarto tem beliches e camas de solteiro; monitores do quarto cuidam das crianças dele.",
-        times: "Crianças e equipe são divididos em times (Configurações → Times: nome, cor e coringa) para gincanas. O Placar registra os pontos de cada time; só o admin, os organizadores e os organizadores dos jogos lançam pontos.",
+        times: "Crianças e equipe são divididos em times (Configurações → Times: nome e cor) para gincanas. O Placar registra os pontos de cada time; só o admin, os organizadores e os organizadores dos jogos lançam pontos.",
         programacao: "Eventos por dia e hora. Cada evento lista funções (papéis) e quem está escalado em cada uma, com um detalhe opcional (time, base, turno). Funções 'para todos' valem para toda a equipe.",
         instrucoes: "Documentos longos de referência para toda a equipe (regras, plano de emergência, rotina).",
         preparacao: "Checklists curtos que cada voluntário marca antes da viagem; funções podem ter a própria preparação.",
@@ -115,8 +116,10 @@ export const AI_TOOLS: AiTool[] = [
       additionalProperties: false,
     },
     run: async (args) => {
-      const [events, roles, { staffName }] = await Promise.all([listEvents(), listRoles(), labelMaps()]);
+      const [events, roles, staffList, teams, { staffName }] = await Promise.all([listEvents(), listRoles(), listStaff(), listTeams(), labelMaps()]);
       const roleById = new Map(roles.map((r) => [r._id, r]));
+      const staffById = new Map(staffList.map((s) => [s._id, s]));
+      const teamById = teamMap(teams);
       const date = typeof args.date === "string" ? args.date : null;
       return events
         .filter((e) => !date || e.date === date)
@@ -128,7 +131,13 @@ export const AI_TOOLS: AiTool[] = [
           observacoes: e.notes || undefined,
           funcoes: e.roles.map((rid) => {
             const r = roleById.get(rid);
-            const people = e.assignments.filter((a) => a.roleId === rid).map((a) => (a.detail ? `${staffName.get(a.staffId) ?? "?"} (${a.detail})` : (staffName.get(a.staffId) ?? "?")));
+            const people = e.assignments
+              .filter((a) => a.roleId === rid)
+              .map((a) => {
+                const who = staffName.get(a.staffId) ?? "?";
+                const { detail } = assignmentDetail(r, a, staffById.get(a.staffId), teamById);
+                return detail ? `${who} (${detail})` : who;
+              });
             return { funcao: r ? `${r.emoji} ${r.name}`.trim() : rid, para_todos: r?.forEveryone || undefined, escalados: people.length ? people : undefined };
           }),
         }));
@@ -139,7 +148,14 @@ export const AI_TOOLS: AiTool[] = [
     description:
       "As funções (papéis) da escala, com instruções e preparação de cada uma. Use SÓ quando o texto for sobre uma função específica ou precisar do nome certo de uma função.",
     parameters: NO_ARGS,
-    run: async () => (await listRoles()).map((r) => ({ funcao: `${r.emoji} ${r.name}`.trim(), para_todos: r.forEveryone || undefined, detalhe: r.hasDetail ? r.detailPlaceholder || "sim" : undefined, instrucoes: textOf(r.instructions, 600) || undefined, preparacao: textOf(r.preparation, 400) || undefined })),
+    run: async () =>
+      (await listRoles()).map((r) => ({
+        funcao: `${r.emoji} ${r.name}`.trim(),
+        para_todos: r.forEveryone || undefined,
+        detalhe: r.hasDetail ? (r.detailFromTeam ? "o time da pessoa" : r.detailPlaceholder || "sim") : undefined,
+        instrucoes: textOf(r.instructions, 600) || undefined,
+        preparacao: textOf(r.preparation, 400) || undefined,
+      })),
   },
   {
     name: "get_documents",
@@ -163,12 +179,12 @@ export const AI_TOOLS: AiTool[] = [
   {
     name: "get_categories",
     description:
-      "As listas fechadas do app: os TIMES (nome, cor, coringa), os TRANSPORTES (ônibus com cor e número, ou carros) e as categorias com suas opções: posição da cama, alergias, alergias a medicamentos, condições crônicas. Use para citar nomes corretos de times, veículos ou opções de saúde.",
+      "As listas fechadas do app: os TIMES (nome, cor), os TRANSPORTES (ônibus com cor e número, ou carros) e as categorias com suas opções: posição da cama, alergias, alergias a medicamentos, condições crônicas. Use para citar nomes corretos de times, veículos ou opções de saúde.",
     parameters: NO_ARGS,
     run: async () => {
       const [cats, teams, transports, { staffName }] = await Promise.all([listCategories(), listTeams(), listTransports(), labelMaps()]);
       return {
-        times: teams.map((t) => ({ nome: t.name, cor: t.color, coringa: t.jokerStaffId ? (staffName.get(t.jokerStaffId) ?? undefined) : undefined })),
+        times: teams.map((t) => ({ nome: t.name, cor: t.color })),
         transportes: transports.map((t) => (t.kind === "bus" ? { nome: transportLabel(t), tipo: "ônibus", cor: t.color ?? undefined, numero: t.number ?? undefined } : { nome: t.name, tipo: "carro" })),
         categorias: cats.map((c) => ({ categoria: `${c.emoji} ${c.name}`.trim(), chave: c.key, aplica_a: c.appliesTo, escolha: c.selection === "single" ? "uma opção" : "várias opções", descricao: c.description || undefined, opcoes: c.options.filter((o) => o.active).map((o) => o.label) })),
       };

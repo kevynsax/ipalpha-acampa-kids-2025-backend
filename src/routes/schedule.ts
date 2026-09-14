@@ -23,6 +23,8 @@ import {
   type ScheduleRoleData,
 } from "../models/schedule";
 import { listStaff } from "../models/staff";
+import { listTeams } from "../models/teams";
+import { assignmentDetail, teamMap } from "../services/schedule";
 import { onEventDeleted } from "./gallery";
 import type { CampEvent, EventAssignment, Role, ScheduleRole, SessionUser } from "../types";
 
@@ -43,6 +45,9 @@ const NOTES_MAX = 500;
 const INSTRUCTIONS_MAX = 20_000;
 const DATE_RE = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
 const DETAIL_MAX = 60;
+const HEX_RE = /^#[0-9a-f]{6}$/i;
+/** "" (default) or a #rrggbb tint chosen by the organizer for a person's detail */
+const detailColorOf = (v: unknown) => (typeof v === "string" && HEX_RE.test(v.trim()) ? v.trim().toLowerCase() : "");
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 function fail(c: Context, code: string, message: string, status: 400 | 403 | 404 | 409 = 400) {
@@ -75,6 +80,7 @@ export function serializeRole(r: ScheduleRole) {
     preparation: r.preparation,
     forEveryone: r.forEveryone,
     hasDetail: r.hasDetail,
+    detailFromTeam: r.detailFromTeam,
     detailPlaceholder: r.detailPlaceholder,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
@@ -137,16 +143,18 @@ schedule.get("/roles/:id/detail", ORGANIZER, async (c) => {
   const r = await findRoleById(c.req.param("id"));
   if (!r) return fail(c, "ROLE_NOT_FOUND", "Função não encontrada.", 404);
 
-  const [events, staff] = await Promise.all([listEvents(), listStaff()]);
+  const [events, staff, teams] = await Promise.all([listEvents(), listStaff(), listTeams()]);
   const active = staff.filter((s) => s.active);
+  const byId = new Map(staff.map((s) => [s._id, s]));
+  const teams_ = teamMap(teams);
   const usedIn = events
     .filter((e) => e.roles.includes(r._id))
     .map((e) => {
       const people = r.forEveryone
-        ? active.filter((s) => !e.assignments.some((a) => a.staffId === s._id)).map((s) => ({ staffId: s._id, name: s.name, detail: "" }))
+        ? active.filter((s) => !e.assignments.some((a) => a.staffId === s._id)).map((s) => ({ staffId: s._id, name: s.name, detail: "", detailColor: "" }))
         : e.assignments
             .filter((a) => a.roleId === r._id)
-            .map((a) => ({ staffId: a.staffId, name: staff.find((s) => s._id === a.staffId)?.name ?? "?", detail: a.detail }))
+            .map((a) => ({ staffId: a.staffId, name: byId.get(a.staffId)?.name ?? "?", ...assignmentDetail(r, a, byId.get(a.staffId), teams_) }))
             .sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
       return {
         eventId: e._id,
@@ -195,12 +203,51 @@ async function buildRolePatch(
     if (typeof v !== "boolean") return { code: "HAS_DETAIL_INVALID", message: "'Tem detalhe' deve ser sim ou não." };
     patch.hasDetail = v;
   }
+  if (has("detailFromTeam")) {
+    const v = body.detailFromTeam ?? false;
+    if (typeof v !== "boolean") return { code: "DETAIL_FROM_TEAM_INVALID", message: "'O detalhe é o time' deve ser sim ou não." };
+    patch.detailFromTeam = v;
+  }
   if (has("detailPlaceholder")) {
     const v = body.detailPlaceholder ?? "";
     if (typeof v !== "string") return { code: "DETAIL_PLACEHOLDER_INVALID", message: "Dica do detalhe inválida." };
     patch.detailPlaceholder = v.trim().slice(0, DETAIL_MAX);
   }
   return { patch };
+}
+
+/**
+ * Normalises the three detail flags so an impossible combination can never be
+ * stored: a "for everyone" role has no per-person detail at all, and a
+ * team-backed detail needs neither a typed value nor a hint.
+ */
+function normaliseDetailFlags(patch: Partial<ScheduleRoleData>, current?: ScheduleRole): void {
+  const value = <K extends keyof ScheduleRoleData>(k: K): ScheduleRoleData[K] =>
+    (patch[k] !== undefined ? patch[k] : current?.[k as keyof ScheduleRole]) as ScheduleRoleData[K];
+
+  if (value("forEveryone")) {
+    patch.hasDetail = false;
+    patch.detailFromTeam = false;
+    patch.detailPlaceholder = "";
+    return;
+  }
+  if (!value("hasDetail")) {
+    patch.detailFromTeam = false;
+    patch.detailPlaceholder = "";
+    return;
+  }
+  if (value("detailFromTeam")) patch.detailPlaceholder = "";
+}
+
+/**
+ * A role whose detail is the person's team may only hold staff WITH a team.
+ * Called when the flag is switched on: the organizer learns which assignments
+ * would lose their label before it happens.
+ */
+async function staffWithoutTeamIn(roleId: string): Promise<string[]> {
+  const [events, staff] = await Promise.all([listEvents(), listStaff()]);
+  const ids = new Set(events.flatMap((e) => e.assignments.filter((a) => a.roleId === roleId).map((a) => a.staffId)));
+  return staff.filter((s) => ids.has(s._id) && !s.team).map((s) => s.name);
 }
 
 /** POST /api/schedule/roles  { name, emoji?, instructions?, preparation?, forEveryone?, hasDetail?, detailPlaceholder? } */
@@ -210,6 +257,7 @@ schedule.post("/roles", ORGANIZER, async (c) => {
 
   const result = await buildRolePatch(body, false);
   if (!("patch" in result)) return fail(c, result.code, result.message);
+  normaliseDetailFlags(result.patch);
   const data = result.patch as ScheduleRoleData;
 
   if (await findRoleByName(data.name)) return fail(c, "NAME_DUPLICATE", `Já existe a função "${data.name}".`, 409);
@@ -228,11 +276,25 @@ schedule.put("/roles/:id", ORGANIZER, async (c) => {
 
   const result = await buildRolePatch(body, true);
   if (!("patch" in result)) return fail(c, result.code, result.message);
+  normaliseDetailFlags(result.patch, existing);
 
   if (result.patch.name) {
     const clash = await findRoleByName(result.patch.name);
     if (clash && clash._id !== existing._id) {
       return fail(c, "NAME_DUPLICATE", `Já existe a função "${result.patch.name}".`, 409);
+    }
+  }
+
+  // switching the detail to "the person's team": everyone already scaled needs one
+  if (result.patch.detailFromTeam && !existing.detailFromTeam) {
+    const without = await staffWithoutTeamIn(existing._id);
+    if (without.length > 0) {
+      return fail(
+        c,
+        "STAFF_WITHOUT_TEAM",
+        `${without.length === 1 ? "Esta pessoa não tem time" : "Estas pessoas não têm time"} nesta função: ${without.join(", ")}. Defina o time delas (ou tire-as da função) antes.`,
+        409,
+      );
     }
   }
 
@@ -355,7 +417,7 @@ schedule.post("/events", ORGANIZER, async (c) => {
 
 /**
  * PUT /api/schedule/events/:id/assignments
- * { assignments: [{ staffId, roleId, detail? }] } — replaces the whole list.
+ * { assignments: [{ staffId, roleId, detail?, detailColor? }] } — replaces the whole list.
  * Each person appears at most once; the role must be one of the event's roles.
  */
 schedule.put("/events/:id/assignments", ORGANIZER, async (c) => {
@@ -368,18 +430,27 @@ schedule.put("/events/:id/assignments", ORGANIZER, async (c) => {
   }
 
   const eventRoles = new Set(existing.roles);
-  const staffIds = new Set((await listStaff()).map((s) => s._id));
+  const staffById = new Map((await listStaff()).map((s) => [s._id, s]));
+  const roleById = new Map((await listRoles()).map((r) => [r._id, r]));
   const seen = new Set<string>();
   const assignments: EventAssignment[] = [];
   for (const item of body.assignments as Record<string, unknown>[]) {
     const staffId = item?.staffId;
     const roleId = item?.roleId;
-    if (typeof staffId !== "string" || !staffIds.has(staffId)) return fail(c, "STAFF_INVALID", "Membro da equipe não encontrado.");
+    if (typeof staffId !== "string" || !staffById.has(staffId)) return fail(c, "STAFF_INVALID", "Membro da equipe não encontrado.");
     if (typeof roleId !== "string" || !eventRoles.has(roleId)) return fail(c, "ROLE_INVALID", "A função precisa estar entre as funções do evento.");
     if (seen.has(staffId)) return fail(c, "STAFF_DUPLICATE", "Uma pessoa só pode ter uma função por evento.", 409);
     seen.add(staffId);
+    // the detail of a team-backed role is read from the staff record, never stored
+    const role = roleById.get(roleId);
+    if (role?.detailFromTeam) {
+      const person = staffById.get(staffId)!;
+      if (!person.team) return fail(c, "STAFF_WITHOUT_TEAM", `${person.name} não tem time — só quem tem time pode fazer "${role.name}".`, 409);
+      assignments.push({ staffId, roleId, detail: "", detailColor: "" });
+      continue;
+    }
     const detail = typeof item.detail === "string" ? item.detail.trim().slice(0, DETAIL_MAX) : "";
-    assignments.push({ staffId, roleId, detail });
+    assignments.push({ staffId, roleId, detail, detailColor: detailColorOf(item.detailColor) });
   }
 
   const updated = await updateEvent(existing._id, { assignments });
@@ -418,21 +489,30 @@ schedule.put("/events/:id", ORGANIZER, async (c) => {
 });
 
 /**
- * PUT /api/schedule/events/:id/assignments/:staffId  { roleId, detail? }
+ * PUT /api/schedule/events/:id/assignments/:staffId  { roleId, detail?, detailColor? }
  * Sets ONE person's role in the event (replacing any previous one).
  */
 schedule.put("/events/:id/assignments/:staffId", ORGANIZER, async (c) => {
   const existing = await findEventById(c.req.param("id"));
   if (!existing) return fail(c, "EVENT_NOT_FOUND", "Evento não encontrado.", 404);
   const staffId = c.req.param("staffId");
-  if (!(await listStaff()).some((s) => s._id === staffId)) return fail(c, "STAFF_INVALID", "Membro da equipe não encontrado.");
+  const person = (await listStaff()).find((s) => s._id === staffId);
+  if (!person) return fail(c, "STAFF_INVALID", "Membro da equipe não encontrado.");
 
-  const body = await c.req.json<{ roleId?: unknown; detail?: unknown }>().catch(() => null);
+  const body = await c.req.json<{ roleId?: unknown; detail?: unknown; detailColor?: unknown }>().catch(() => null);
   if (!body || typeof body.roleId !== "string" || !existing.roles.includes(body.roleId)) {
     return fail(c, "ROLE_INVALID", "A função precisa estar entre as funções do evento.");
   }
-  const detail = typeof body.detail === "string" ? body.detail.trim().slice(0, DETAIL_MAX) : "";
-  const assignments = [...existing.assignments.filter((a) => a.staffId !== staffId), { staffId, roleId: body.roleId, detail }];
+  // the detail of a team-backed role is read from the staff record, never stored
+  const role = await findRoleById(body.roleId);
+  if (role?.detailFromTeam && !person.team) {
+    return fail(c, "STAFF_WITHOUT_TEAM", `${person.name} não tem time — só quem tem time pode fazer "${role.name}".`, 409);
+  }
+  const detail = role?.detailFromTeam ? "" : typeof body.detail === "string" ? body.detail.trim().slice(0, DETAIL_MAX) : "";
+  const assignments = [
+    ...existing.assignments.filter((a) => a.staffId !== staffId),
+    { staffId, roleId: body.roleId, detail, detailColor: role?.detailFromTeam ? "" : detailColorOf(body.detailColor) },
+  ];
   const updated = await updateEvent(existing._id, { assignments });
   publish("events");
   void rearmWindows(); // the parents' window ends with the last event

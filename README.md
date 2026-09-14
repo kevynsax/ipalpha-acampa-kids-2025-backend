@@ -38,6 +38,9 @@ Copy `.env.example` to `.env` for local development. Production configuration an
 | `ACCOUNT_FREEZE_MINUTES` | how long the account stays frozen (default `30`) |
 | `SESSION_HOURS` | session token lifetime (default `24`) |
 | `APP_URL` | public URL of the frontend, appended to notification SMS (optional) |
+| `FACE_SERVICE_URL` | private face service (repo `ipalpha-acampa-kids-2025-face-service`, sibling folder `../face-service`) used to index gallery faces and run the parents' photo search. **Empty = feature disabled** (parents then see an empty album) |
+| `FACE_MATCH_THRESHOLD` | cosine similarity a gallery face must reach to count as a match (default `0.45`) — tune against real camp photos |
+| `FACE_MIN_DETECTION_SCORE` | detections below this are ignored, both when indexing and when reading the reference (default `0.55`) |
 | `NOTIFY_COALESCE_SECONDS` | changes to the same person within this window become one SMS (default `20`) |
 
 ## Login flow (roles + phone + OTP)
@@ -575,6 +578,49 @@ does `PUT /api/scores/scan/:eventId`). The note is always the event's
 Errors: `TEAM_NOT_FOUND`, `NAME_DUPLICATE`, `COLOR_INVALID`, `JOKER_INVALID`,
 `POINTS_INVALID`, `ALREADY_ZERO`, `SCORE_NOT_FOUND`. Both collections travel
 in the realtime snapshot (`teams`, `scores`) to every team member.
+
+## Photo album 📷 and the parents' face search
+
+Photographers (Settings → Fotógrafos), organizers and the admin upload to
+`gallery`; the whole album becomes visible to the camp through the single
+`settings.galleryPublished` switch (`PUT /api/gallery/publish`).
+
+| Method | Path | Who | Body |
+|---|---|---|---|
+| GET | `/api/gallery` | team, admin (**never parents**) | — (published photos; managers also see drafts) |
+| POST | `/api/gallery` | admin, organizer, photographer | multipart `file` + `thumb` + `caption?` + `eventId?` |
+| PUT | `/api/gallery/publish` | admin, organizer, photographer | `{ published }` |
+| PUT | `/api/gallery/:id`, `/bulk`, `/reorder` | admin, organizer, photographer | caption / event / order |
+| DELETE | `/api/gallery/:id`, POST `/bulk-delete` | admin, organizer, photographer | — |
+| GET | `/api/gallery/:id/thumb` | public (unguessable id) | — |
+| POST | `/api/gallery/search-person` | **parent only** | multipart `reference` → `{ matches: [{ photo, similarity }], indexedFaces, pendingPhotos }` |
+
+**Parents never receive the album.** Neither `GET /api/gallery` nor the
+realtime snapshot sends them a single photo: their tab is empty until they
+upload a reference picture of the person they are looking for. Only the
+photos whose faces match come back — and only those can then be downloaded.
+
+How the matching works (`services/faceRecognition.ts`, `services/galleryFaces.ts`):
+
+1. Every upload is queued for indexing; `backfillGalleryFaces()` catches older
+   photos at boot. Both call the private face service, which returns one
+   512-float ArcFace embedding per detected face.
+2. The embeddings are stored on the photo document (`faces[]`, `faceModel`,
+   `facesIndexedAt`) — never the cropped faces, never a person's identity.
+3. A search embeds the reference **in memory**, compares it to the stored
+   vectors by cosine similarity and keeps the photos above
+   `FACE_MATCH_THRESHOLD`. The reference image and its embedding are
+   discarded when the request ends.
+
+Errors: `FACE_SEARCH_UNAVAILABLE` (503, no service configured),
+`FACE_SEARCH_FAILED` (503), `FACE_NOT_FOUND` (no clear face),
+`MULTIPLE_FACES` (reference must show one person), `REFERENCE_MISSING`,
+`FILE_TYPE` (415), `FILE_TOO_LARGE` (413, 5 MB).
+
+This is biometric data about children: keep the face service cluster-internal,
+keep the album unpublished until the photos are reviewed, and drop the
+`gallery` collection (embeddings included) when the camp's retention period
+ends.
 
 ## SMS notifications to the team 📲
 
