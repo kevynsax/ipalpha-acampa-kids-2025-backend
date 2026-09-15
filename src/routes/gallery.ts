@@ -85,11 +85,10 @@ gallery.use("*", async (c, next) => {
 });
 
 /**
- * GET /api/gallery — everyone logged in, but the album only reaches parents
+ * GET /api/gallery — everyone logged in; the album only reaches parents
  * and the team once it is published (settings.galleryPublished).
  */
 gallery.get("/", async (c) => {
-  if (c.get("activeRole") === "parent") return c.json({ photos: [] });
   if (!(await canManage(c)) && !(await getSettings()).galleryPublished) return c.json({ photos: [] });
   return c.json({ photos: (await listGalleryPhotos()).map(serializePhoto) });
 });
@@ -151,8 +150,9 @@ gallery.put("/publish", async (c) => {
 });
 
 /**
- * A parent sends one temporary reference picture. Only matched photo ids are
- * returned; the image and its embedding are never stored.
+ * A parent sends one temporary reference picture to FILTER the album they
+ * already see. Only matched photo ids are returned; the image and its
+ * embedding are never stored.
  */
 gallery.post("/search-person", async (c) => {
   if (c.get("activeRole") !== "parent") return fail(c, "FORBIDDEN", "A busca por rosto está disponível para os responsáveis.", 403);

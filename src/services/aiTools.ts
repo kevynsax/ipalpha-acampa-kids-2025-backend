@@ -68,7 +68,7 @@ export const AI_TOOLS: AiTool[] = [
       perfis: {
         pais: "Vêem a ficha do próprio filho e confirmam os dados no check-in da igreja. Recebem a lista de contatos importantes.",
         equipe: "Voluntários. Vêem a programação, a própria escala, o próprio quarto (crianças e colegas do quarto), Instruções e Preparação (checklist pessoal). Acesso à parte do app pode ser limitado a uma janela de datas.",
-        equipe_medica: "Vê todas as crianças com dados de saúde (alergias, medicamentos, condições), todos os quartos e veículos. Registra ocorrências. Só leitura no resto.",
+        equipe_medica: "Vê todas as crianças com dados de saúde (alergias, medicamentos, condições), todos os quartos e veículos. Registra ocorrências (só as da própria equipe médica). Só leitura no resto.",
         organizacao: "Admin + organizadores. Gerenciam crianças, equipe, quartos, check-ins, programação, documentos e a maioria das configurações. Só o admin edita a lista de organizadores, categorias, notificações e Sobre. Organizadores dos jogos (Configurações → Jogos) editam a programação e lançam pontos no Placar.",
         ajudantes_checkin: "Membros da equipe que, dentro da janela de check-in, fazem a chamada das crianças na igreja (com os pais) ou na porta de um veículo (ônibus/van).",
       },
@@ -80,7 +80,7 @@ export const AI_TOOLS: AiTool[] = [
         programacao: "Eventos por dia e hora. Cada evento lista funções (papéis) e quem está escalado em cada uma, com um detalhe opcional (time, base, turno). Funções 'para todos' valem para toda a equipe.",
         instrucoes: "Documentos longos de referência para toda a equipe (regras, plano de emergência, rotina).",
         preparacao: "Checklists curtos que cada voluntário marca antes da viagem; funções podem ter a própria preparação.",
-        ocorrencias: "Registros permanentes de algo que aconteceu com crianças/equipe (saúde, incidentes). Feitos pela equipe médica e pela organização.",
+        ocorrencias: "Registros permanentes de algo que aconteceu com crianças/equipe (saúde, incidentes). Feitos pela equipe médica e pela organização. Cada grupo só vê as que o próprio grupo registrou; o admin vê todas.",
         notificacoes: "SMS automáticos para a pessoa afetada quando muda quarto, escala, documentos ou quando o check-in dela é registrado.",
       },
     }),

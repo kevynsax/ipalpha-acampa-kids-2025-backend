@@ -8,7 +8,7 @@ Built with **Bun** + **Hono** + **MongoDB**.
 - **Runtime**: [Bun](https://bun.sh)
 - **HTTP framework**: [Hono](https://hono.dev)
 - **Database**: MongoDB (official driver)
-- **Auth**: phone + OTP (SMS via [Comtele](https://docs.comtele.com.br)), JWT sessions valid for **24h**
+- **Auth**: phone + OTP (SMS via [Comtele](https://docs.comtele.com.br)), JWT sessions valid for **4 days**
 
 ## Getting started
 
@@ -36,11 +36,11 @@ Copy `.env.example` to `.env` for local development. Production configuration an
 | `OTP_EXPIRE_MINUTES` | OTP lifetime (default `5`) |
 | `OTP_MAX_ATTEMPTS` | wrong attempts before freezing the account (default `3`) |
 | `ACCOUNT_FREEZE_MINUTES` | how long the account stays frozen (default `30`) |
-| `SESSION_HOURS` | session token lifetime (default `24`) |
+| `SESSION_HOURS` | session token lifetime (default `96`, 4 days) |
 | `APP_URL` | public URL of the frontend, appended to notification SMS (optional) |
-| `FACE_SERVICE_URL` | private face service (repo `ipalpha-acampa-kids-2025-face-service`, sibling folder `../face-service`) used to index gallery faces and run the parents' photo search. **Empty = feature disabled** (parents then see an empty album) |
-| `FACE_MATCH_THRESHOLD` | cosine similarity a gallery face must reach to count as a match (default `0.45`) — tune against real camp photos |
-| `FACE_MIN_DETECTION_SCORE` | detections below this are ignored, both when indexing and when reading the reference (default `0.55`) |
+| `FACE_SERVICE_URL` | private face service (repo `ipalpha-acampa-kids-2025-face-service`, sibling folder `../face-service`) used to index gallery faces and run the parents' photo search. **Empty = face search disabled** (parents still see the published album) |
+| `FACE_MATCH_THRESHOLD` | cosine similarity a gallery face must reach to count as a match (default `0.22`) — low so parents find their kid; a few other children in the results is acceptable |
+| `FACE_MIN_DETECTION_SCORE` | detections below this are ignored, both when indexing and when reading the reference (default `0.4`) |
 | `NOTIFY_COALESCE_SECONDS` | changes to the same person within this window become one SMS (default `20`) |
 
 ## Login flow (roles + phone + OTP)
@@ -54,7 +54,7 @@ Copy `.env.example` to `.env` for local development. Production configuration an
    - with `COMTELE_API_KEY` set → real SMS via Comtele `POST /tokenmanager`, validated via `PUT /tokenmanager`
    - without a key → code logged to console, validated locally
 4. **3 wrong attempts freeze the account** for `ACCOUNT_FREEZE_MINUTES`.
-5. On success the backend issues a JWT bound to a MongoDB session doc, expiring **24h** later.
+5. On success the backend issues a JWT bound to a MongoDB session doc, expiring **4 days** later.
 
 > **"admin" in the route tables below** means `requireManager`: the admin
 > role **or** a team member listed in Settings → Organizadores (see
@@ -69,6 +69,16 @@ Copy `.env.example` to `.env` for local development. Production configuration an
 | POST | `/api/auth/otp/request` | `{ phone, role }` | sends OTP → `{ expiresAt, roles, delivery }` |
 | POST | `/api/auth/otp/verify` | `{ phone, role, code }` | → `{ token, tokenExpiresAt, user: { …, roles, activeRole } }` |
 | GET | `/api/auth/me` | (Bearer token) | → `{ user }` |
+| POST | `/api/auth/role` | `{ role }` (Bearer token) | the SAME person switches profile (mãe que também é da equipe): revokes this session and issues a new one → `{ token, tokenExpiresAt, user }`. `ROLE_FORBIDDEN` when the role isn't among their available ones; the target role's access window still applies |
+
+**Available profiles** (`services/roles.ts#availableRolesOf`). `users.roles` is
+only what the account was created with, and it goes stale: the admin puts
+someone on the team roster, or enrols a kid naming them as guardian, without
+ever touching their account. So the `roles` sent to the client — and what
+`/api/auth/role` accepts — is the stored list **plus** what the data says: an
+ACTIVE `staff` record with that phone adds `staff`, at least one kid with that
+`guardianPhone` adds `parent`. `admin` and `health_staff` are never derived.
+The role a login LANDS on is still `pickActiveRole(users.roles)`.
 | POST | `/api/auth/logout` | (Bearer token) | revokes the session |
 | GET | `/health` | — | liveness check |
 
@@ -167,7 +177,7 @@ Two collections:
   server-side** (`services/html.ts`: p/br/strong/em/u/s/ul/ol/li/h2/h3/
   blockquote/a/hr/img only, `http(s)`/`mailto`/`tel` links, images only from
   `/api/files/<id>` or `http(s)` — never `data:` —, scripts & handlers stripped).
-- **`schedule_events`** — `{ date "YYYY-MM-DD", title, emoji, startTime "HH:mm", endTime|null, notes, roles: string[] }` — `roles` are the role ids staff fulfil there.
+- **`schedule_events`** — `{ date "YYYY-MM-DD", title, emoji, startTime "HH:mm", endTime|null, notes, roles: string[], visibleToParents }` — `roles` are the role ids staff fulfil there. `visibleToParents` (default true) is whether parents see the event on their programme.
 
 **PG (pequeno grupo).** The `PG` column of the roster (Líder / Auxiliar) assigns
 each person to BOTH `PG` events (Sat & Sun 10:45). The Líder gives the study,
@@ -313,6 +323,14 @@ PARENTS (only sections listing `parent`); admins and organizers see all.
 `AUDIENCE_INVALID` when empty or unknown. Role-specific preparation is
 `schedule_roles.preparation`.
 
+Each section is a **checklist item**. The team's ticks live on their roster
+record (`staff.prepDone: string[]`, keys `section:<id>` / `role:<id>`); a
+PARENT has no roster record, so theirs live on their account
+(`users.prepDone: string[]`, only `section:<id>` keys) and come back on the
+wire as `section.done` — a boolean computed per session, always `false` for
+the team and the admin. Deleting a section (or wiping the Instruções /
+Preparação block) drops its key from every staff and user record.
+
 Creating / editing a section posted to the parents texts every parent with a
 phone (`notifications.parentContentChanges`), only while the parents' access
 window is open (checked at send time, coalesced like the team's SMS).
@@ -324,6 +342,7 @@ window is open (checked at send time, coalesced like the team's SMS).
 | PUT | `/api/preparation/reorder` | admin | `{ ids: string[] }` |
 | PUT | `/api/preparation/:id` | admin | partial |
 | DELETE | `/api/preparation/:id` | admin | — |
+| PUT | `/api/preparation/me/:key` | parent | `{ done: boolean }` — ticks / unticks one item of the responsible's checklist; `key` is `section:<id>` (must be a section posted to them). Stored in `users.prepDone: string[]` |
 | PUT | `/api/staff/me/prep/:key` | staff, health_staff, admin | `{ done: boolean }` — ticks / unticks one item of the person's checklist; `key` is `section:<id>` or `role:<id>`. Stored in `staff.prepDone: string[]` |
 
 ### Images for the editor 🖼️
@@ -415,8 +434,8 @@ A parent is a `users` doc with the `parent` role whose phone matches
   kids' rooms and the `parentContacts`, as `redacted` records with `name`,
   `phone`, `bedroom`, `roomRole` (no vest, health, team or check-in).
   Outside the window nothing.
-- **events**: from the check-in window start onwards (`services/camp.ts#parentEvents`),
-  with `roles` / `assignments` emptied. **roles**: none.
+- **events**: events with `visibleToParents`, with `roles` / `assignments` emptied.
+  **roles**: none.
 - categories (active options), teams, settings.
 
 The parents' window (`services/camp.ts#parentWindow`, read-only
@@ -472,10 +491,11 @@ window opens or closes — helpers gain / lose the data without a reload.
 
 `organizers: { staffIds: string[] }` — no time window. A listed person's
 scope is the **admin's** (`{ all: true, admin: false }`, `services/scope.ts`):
-every camper, staff member, bedroom, occurrence and the whole programme, and
+every camper, staff member, bedroom and the whole programme, and
 `middleware/roles.ts#requireManager` lets them do the admin's writes —
 campers, staff (CRUD + roll call), bedrooms, teams, documents, check-in
-reset and `PUT /api/settings`. Four areas stay with the real admin
+reset and `PUT /api/settings`. Occurrences: only the ones organizers
+registered (the admin sees every group). Four areas stay with the real admin
 (`requireAdmin`): the `organizers` list itself and the `notifications`
 switches (both 403 in `PUT /api/settings`, except `notifications.checkinReminder`),
 categories, `/welcome-preview`, `/api/ai/usage` ("Sobre"). Saving the list
@@ -488,9 +508,10 @@ scope gets `medical: true` (`services/scope.ts`): `camperVisibility` is
 `"full"` for **every camper** (health included) and `canSeeBedroom` is true
 for **every bedroom**, before / during / after the camp — which also gives
 them every vehicle. Strictly read-only: no camper / bedroom writes, no
-check-ins (those keep their own rules). Staff and programme: as any team
-member. Saving the list publishes `campers`, `bedrooms`; the frontend's
-window-close purge skips medical members.
+check-ins (those keep their own rules). Occurrences: only the ones the
+medical team registered. Staff and programme: as any team member. Saving
+the list publishes `campers`, `bedrooms`; the frontend's window-close purge
+skips medical members.
 
 ### Game organizers (Settings → Jogos) 🏆
 
@@ -587,7 +608,7 @@ Photographers (Settings → Fotógrafos), organizers and the admin upload to
 
 | Method | Path | Who | Body |
 |---|---|---|---|
-| GET | `/api/gallery` | team, admin (**never parents**) | — (published photos; managers also see drafts) |
+| GET | `/api/gallery` | anyone logged in | — (published photos; managers also see drafts) |
 | POST | `/api/gallery` | admin, organizer, photographer | multipart `file` + `thumb` + `caption?` + `eventId?` |
 | PUT | `/api/gallery/publish` | admin, organizer, photographer | `{ published }` |
 | PUT | `/api/gallery/:id`, `/bulk`, `/reorder` | admin, organizer, photographer | caption / event / order |
@@ -595,10 +616,9 @@ Photographers (Settings → Fotógrafos), organizers and the admin upload to
 | GET | `/api/gallery/:id/thumb` | public (unguessable id) | — |
 | POST | `/api/gallery/search-person` | **parent only** | multipart `reference` → `{ matches: [{ photo, similarity }], indexedFaces, pendingPhotos }` |
 
-**Parents never receive the album.** Neither `GET /api/gallery` nor the
-realtime snapshot sends them a single photo: their tab is empty until they
-upload a reference picture of the person they are looking for. Only the
-photos whose faces match come back — and only those can then be downloaded.
+Parents see the **published album**, same as the team. `POST /api/gallery/search-person`
+is an optional filter on top: a reference picture of their child keeps only
+the photos whose faces match. The rest of the album is one tap away.
 
 How the matching works (`services/faceRecognition.ts`, `services/galleryFaces.ts`):
 
@@ -609,7 +629,7 @@ How the matching works (`services/faceRecognition.ts`, `services/galleryFaces.ts
    `facesIndexedAt`) — never the cropped faces, never a person's identity.
 3. A search embeds the reference **in memory**, compares it to the stored
    vectors by cosine similarity and keeps the photos above
-   `FACE_MATCH_THRESHOLD`. The reference image and its embedding are
+   `FACE_MATCH_THRESHOLD` (low on purpose: find the kid, extras are ok). The reference image and its embedding are
    discarded when the request ends.
 
 Errors: `FACE_SEARCH_UNAVAILABLE` (503, no service configured),

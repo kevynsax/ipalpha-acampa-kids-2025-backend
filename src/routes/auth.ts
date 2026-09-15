@@ -4,11 +4,12 @@ import { findByPhone, toPublicUser, updateUser } from "../models/users";
 import { findStaffByPhone } from "../models/staff";
 import { getSettings, staffAccessOpen } from "../models/settings";
 import { staffHasAccess } from "../services/scope";
+import { availableRolesOf } from "../services/roles";
 import { comteleEnabled, comteleSendSms, resolveSmsTarget } from "../services/comtele";
 import { generateLocalCode, hashCode, verifyLocalCode } from "../services/otp";
 import { createSession, revokeSession, verifySessionToken } from "../services/session";
 import type { CheckinWindow, PublicUser, Role, SessionUser } from "../types";
-import { formatBrazilPhone, minutesBetween, normalizeBrazilPhone, pickActiveRole } from "../utils";
+import { formatBrazilPhone, isRole, minutesBetween, normalizeBrazilPhone, pickActiveRole } from "../utils";
 import { requireAuth } from "../middleware/auth";
 
 interface AuthEnv {
@@ -310,7 +311,7 @@ auth.post("/otp/verify", async (c) => {
     );
   }
 
-  // success — clear OTP, unfreeze, create session for the highest role held (24h)
+  // success — clear OTP, unfreeze, create session for the highest role held (4 days)
   await updateUser(user._id, { otp: null, frozenUntil: null });
 
   const { token, session } = await createSession(user._id, role);
@@ -319,13 +320,43 @@ auth.post("/otp/verify", async (c) => {
     success: true,
     token,
     tokenExpiresAt: session.expiresAt.toISOString(),
-    user: { ...toPublicUser(user), activeRole: role },
+    // `roles` is what the switcher offers: the stored ones PLUS the roster / guardian reality
+    user: { ...toPublicUser(user), roles: await availableRolesOf(user), activeRole: role },
   });
 });
 
 /** Who am I? (requires Bearer token) */
 auth.get("/me", requireAuth, async (c) => {
-  return c.json({ user: c.get("user") });
+  const me = c.get("user");
+  return c.json({ user: { ...me, roles: await availableRolesOf(me) } });
+});
+
+/**
+ * POST /api/auth/role  { role } — the SAME person switching profile (a mãe
+ * who is also on the team). No new SMS: the current session is revoked and a
+ * fresh one is issued for the role asked for, which must be one the person
+ * actually holds and whose access window is open right now.
+ */
+auth.post("/role", requireAuth, async (c) => {
+  const body = await c.req.json<{ role?: unknown }>().catch(() => null);
+  const role = body?.role;
+  if (!isRole(role)) return c.json({ error: { code: "ROLE_INVALID", message: "Perfil inválido." } }, 400);
+  const user = await findByPhone(c.get("user").phone);
+  if (!user) return c.json({ error: { code: "USER_NOT_FOUND", message: "Cadastro não encontrado." } }, 404);
+  const available = await availableRolesOf(user);
+  if (!available.includes(role)) return c.json({ error: { code: "ROLE_FORBIDDEN", message: "Você não tem este perfil." } }, 403);
+  // the target role's own access window (the team's / the parents')
+  const windowErr = await staffWindowError(user.phone, role);
+  if (windowErr) return c.json({ error: windowErr }, 403);
+
+  await revokeSession(c.get("sessionId"));
+  const { token, session } = await createSession(user._id, role);
+  return c.json({
+    success: true,
+    token,
+    tokenExpiresAt: session.expiresAt.toISOString(),
+    user: { ...toPublicUser(user), roles: available, activeRole: role },
+  });
 });
 
 /** Logout — revokes the session */

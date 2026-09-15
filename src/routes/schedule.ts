@@ -5,7 +5,7 @@ import { notifyEventChange, notifyRoleEdited } from "../services/notify";
 import { cleanHtml as sanitizeEditorHtml } from "../services/html";
 import { requireAuth } from "../middleware/auth";
 import { requireOrganizer, requireRole } from "../middleware/roles";
-import { resolveScope, scopeEvent, scopeRoles } from "../services/scope";
+import { isParent, resolveScope, scopeEvent, scopeRoles } from "../services/scope";
 import {
   countEventsUsingRole,
   deleteEvent,
@@ -97,6 +97,7 @@ export function serializeEvent(e: CampEvent) {
     endTime: e.endTime,
     notes: e.notes,
     roles: e.roles,
+    visibleToParents: e.visibleToParents,
     assignments: e.assignments,
     createdAt: e.createdAt,
     updatedAt: e.updatedAt,
@@ -118,7 +119,8 @@ const ORGANIZER = requireOrganizer;
 async function scopedSchedule(c: Context<Env>) {
   const [scope, roles, events] = await Promise.all([resolveScope(c.get("user")), listRoles(), listEvents()]);
   const roleById = new Map(roles.map((r) => [r._id, r]));
-  const scopedEvents = events.map((e) => scopeEvent(scope, e, roleById));
+  const visible = isParent(scope) ? events.filter((e) => e.visibleToParents) : events;
+  const scopedEvents = visible.map((e) => scopeEvent(scope, e, roleById));
   return { roles: scopeRoles(scope, roles, scopedEvents), events: scopedEvents };
 }
 
@@ -393,10 +395,16 @@ async function buildEventPatch(
     if (!Array.isArray(roles)) return { code: "ROLES_INVALID", message: roles.error };
     patch.roles = roles;
   }
+  if (body.visibleToParents !== undefined) {
+    if (typeof body.visibleToParents !== "boolean") {
+      return { code: "VISIBLE_TO_PARENTS_INVALID", message: "Informe se os pais veem este evento." };
+    }
+    patch.visibleToParents = body.visibleToParents;
+  }
   return { patch };
 }
 
-/** POST /api/schedule/events  { date, title, emoji?, startTime, endTime?, notes?, roles?: string[] } */
+/** POST /api/schedule/events  { date, title, emoji?, startTime, endTime?, notes?, roles?: string[], visibleToParents? } */
 schedule.post("/events", ORGANIZER, async (c) => {
   const body = await c.req.json<Record<string, unknown>>().catch(() => null);
   if (!body) return fail(c, "BODY_INVALID", "Corpo da requisição inválido.");
@@ -407,6 +415,7 @@ schedule.post("/events", ORGANIZER, async (c) => {
   if (data.endTime && data.endTime <= data.startTime) {
     return fail(c, "END_TIME_INVALID", "O fim precisa ser depois do início.");
   }
+  if (data.visibleToParents === undefined) data.visibleToParents = true;
 
   const created = await insertEvent({ ...data, assignments: [] });
   publish("events");

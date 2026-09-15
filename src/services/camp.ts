@@ -1,7 +1,7 @@
 import { listEvents } from "../models/schedule";
 import { getSettings } from "../models/settings";
 import type { CampEvent, Settings } from "../types";
-import { nowInSaoPauloWallClock, saoPauloWallClock, saoPauloWallClockToIso, todayInSaoPaulo } from "../utils";
+import { saoPauloWallClock, saoPauloWallClockToIso, todayInSaoPaulo } from "../utils";
 
 /**
  * "Is the camp happening right now?" — decided by the programme: from the
@@ -63,8 +63,8 @@ export function vestWindowOpen(p: CampPeriod, now = new Date()): boolean {
  * room staff phones): from the START of the kids' check-in window
  * (Settings → Check-in; one hour before the first event when unset) until
  * the END of the last event of the programme. Outside it the parent only
- * gets their kid's own data. The programme shown to parents is cut the same
- * way: events from the check-in start onwards.
+ * gets their kid's own data. The programme itself is the full timeline
+ * (past items stay on the phone, collapsed like the team's view).
  */
 export interface ParentWindow {
   from: Date | null;
@@ -94,12 +94,4 @@ export async function parentWindow(settings?: Settings, events?: CampEvent[]): P
 /** Is the parents' window open at `now`? Needs both ends (no programme = never). */
 export function parentWindowOpen(w: ParentWindow, now = new Date()): boolean {
   return !!w.from && !!w.until && w.from <= now && now < w.until;
-}
-
-/** The programme as parents see it: every event from the check-in start onwards (all when no window is set). */
-export function parentEvents(settings: Settings, events: CampEvent[]): CampEvent[] {
-  const from = settings.checkinWindow.from;
-  if (!from) return events;
-  const wall = nowInSaoPauloWallClock(from);
-  return events.filter((e) => saoPauloWallClock(e.date, e.startTime) >= wall);
 }

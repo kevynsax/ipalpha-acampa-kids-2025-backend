@@ -1,6 +1,7 @@
 import { ObjectId } from "mongodb";
 import { getDb } from "../db";
 import type { Camper, CamperChangeLog, CamperCheckin, CamperSex, CheckinKind, CheckinLog, Medication } from "../types";
+import { formatCpf } from "../utils";
 
 const LOG_COLLECTION = "checkinLog";
 /** every edit a PARENT made to their kid (append-only) */
@@ -16,7 +17,7 @@ function toCamper(doc: Record<string, unknown> | null): Camper | null {
     name: doc.name as string,
     birthDate: (doc.birthDate as string) ?? null,
     sex: doc.sex === "F" || doc.sex === "M" ? (doc.sex as CamperSex) : null,
-    cpf: s("cpf"),
+    cpf: formatCpf(s("cpf")),
     rg: s("rg"),
     school: s("school"),
     schoolGrade: s("schoolGrade"),
@@ -44,7 +45,7 @@ function toCamper(doc: Record<string, unknown> | null): Camper | null {
     emergencyContact: s("emergencyContact"),
     guardianName: s("guardianName"),
     guardianPhone: (doc.guardianPhone as string) ?? null,
-    guardianCpf: s("guardianCpf"),
+    guardianCpf: formatCpf(s("guardianCpf")),
     guardianEmail: s("guardianEmail"),
     checkin: toCheckin(doc.checkin),
     busCheckin: toCheckin(doc.busCheckin),

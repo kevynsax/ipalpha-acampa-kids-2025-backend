@@ -49,6 +49,16 @@ export function titleCaseName(raw: string): string {
     .join(" ");
 }
 
+/** Formats a Brazilian CPF as 123.456.789-00 (progressive while incomplete). */
+export function formatCpf(value: string): string {
+  const d = value.replace(/\D/g, "").slice(0, 11);
+  if (d.length === 0) return "";
+  if (d.length <= 3) return d;
+  if (d.length <= 6) return `${d.slice(0, 3)}.${d.slice(3)}`;
+  if (d.length <= 9) return `${d.slice(0, 3)}.${d.slice(3, 6)}.${d.slice(6)}`;
+  return `${d.slice(0, 3)}.${d.slice(3, 6)}.${d.slice(6, 9)}-${d.slice(9)}`;
+}
+
 /** +5511981234567 -> (11) 98123-4567 */
 export function formatBrazilPhone(e164: string): string {
   const n = e164.replace(/\D/g, "").replace(/^55/, "");

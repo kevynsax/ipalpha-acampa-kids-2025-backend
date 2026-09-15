@@ -8,7 +8,7 @@ import { insertCamperLookup } from "../models/camperLookups";
 import { CHECKIN_FIELD, deleteCamper, findCamperById, insertCamper, listCamperChanges, listCampers, listCheckinLog, logCamperChange, logCheckin, setCamperCheckin, updateCamper, type CamperData } from "../models/campers";
 import { FOREIGN_LOOKUP_ALERT_AT, FOREIGN_LOOKUP_BLOCK_AT, findStaffById, findStaffByPhone, listStaff, markForeignLookupAlerted, recordForeignLookup } from "../models/staff";
 import { CAMPER_CATEGORY_KEYS, PARENT_EDITABLE_FIELDS, type Camper, type CamperChangeLog, type CheckinKind, type ParentEditableField, type Role, type SessionUser } from "../types";
-import { normalizeBrazilPhone, titleCaseName } from "../utils";
+import { formatCpf, normalizeBrazilPhone, titleCaseName } from "../utils";
 import { bedroomFullMessage, isInvalid, parseBedroom, parseMedications, parseMulti, parseSingle, parseTeam, parseText, parseTransport } from "./_validate";
 import { serializeStaffList } from "./staff";
 import { camperVisibility, canParentEdit, canRunBusCheckin, canRunCheckin, resolveScope, type Scope } from "../services/scope";
@@ -42,7 +42,7 @@ export function serializeCamper(k: Camper) {
     name: k.name,
     birthDate: k.birthDate,
     sex: k.sex,
-    cpf: k.cpf,
+    cpf: formatCpf(k.cpf),
     rg: k.rg,
     school: k.school,
     schoolGrade: k.schoolGrade,
@@ -70,7 +70,7 @@ export function serializeCamper(k: Camper) {
     emergencyContact: k.emergencyContact,
     guardianName: k.guardianName,
     guardianPhone: k.guardianPhone,
-    guardianCpf: k.guardianCpf,
+    guardianCpf: formatCpf(k.guardianCpf),
     guardianEmail: k.guardianEmail,
     checkin: k.checkin,
     busCheckin: k.busCheckin,
@@ -238,7 +238,7 @@ async function buildPatch(
     if (!has(field)) continue;
     const v = parseText(body[field], SHORT_MAX);
     if (isInvalid(v)) return { code: `${field.toUpperCase()}_INVALID`, message: v.error };
-    patch[field] = field === "guardianName" ? titleCaseName(v) : v;
+    patch[field] = field === "guardianName" ? titleCaseName(v) : field === "cpf" || field === "guardianCpf" ? formatCpf(v) : v;
   }
   if (has("medications")) {
     const v = parseMedications(body.medications);

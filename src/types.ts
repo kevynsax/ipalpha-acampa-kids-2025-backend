@@ -24,6 +24,8 @@ export interface User {
   otp?: OtpState;
   /** set when the account is frozen after too many wrong OTP attempts */
   frozenUntil?: Date;
+  /** PARENTS: the Preparação items they ticked as done ("section:<id>") — the team's equivalent lives on `staff.prepDone` */
+  prepDone: string[];
   /** PARENTS: when the welcome SMS (app link) went out — null until then; sent ONCE, ever (services/notify.ts syncParentWelcomes) */
   welcomeSentAt: Date | null;
 }
@@ -391,10 +393,13 @@ export interface OccurrencePerson {
   name: string;
 }
 
+/** Who wrote the occurrence — medical and organizers only see their own group; the admin sees all. */
+export type OccurrenceGroup = "admin" | "organizer" | "medical";
+
 /**
- * A record of something that happened during camp. Admins and the medical
- * team create and read them. An occurrence may involve staff, campers, both,
- * or neither; records without a camper are restricted to admins.
+ * A record of something that happened during camp. Admins, organizers and the
+ * medical team create them. Each group only reads records it created; the
+ * admin reads every group. An occurrence may involve staff, campers, both, or neither.
  */
 export interface Occurrence {
   _id: string;
@@ -405,6 +410,8 @@ export interface Occurrence {
   createdByUserId: string;
   createdByName: string;
   createdByRole: Role;
+  /** missing on records written before groups existed — inferred on read */
+  createdByGroup?: OccurrenceGroup;
   createdAt: Date;
 }
 
@@ -569,6 +576,8 @@ export interface CampEvent {
   notes: string;
   /** ids of the roles staff fulfil in this event */
   roles: string[];
+  /** parents see this event on their programme (the team always does) */
+  visibleToParents: boolean;
   assignments: EventAssignment[];
   createdAt: Date;
   updatedAt: Date;

@@ -23,7 +23,7 @@ committed YAML or frontend `VITE_*` variables.
 | `MONGO_USERNAME`, `MONGO_PASSWORD` | Deployment-only expansion variables from Secret `mongo-credentials`, keys `username`, `password`; credentials must be URI-safe |
 | `FILES_DIR` | `/app/data/files`, mounted from `acampa-2025-pictures-pvc` |
 | `JWT_SECRET` | Secret `acampa-2025-secrets`, key `jwt-secret`; required, strong, never the development default |
-| `SESSION_HOURS` | `24` |
+| `SESSION_HOURS` | `96` |
 | `OTP_EXPIRE_MINUTES` | `5` |
 | `OTP_MAX_ATTEMPTS` | `3` |
 | `ACCOUNT_FREEZE_MINUTES` | `30` |
@@ -38,8 +38,8 @@ committed YAML or frontend `VITE_*` variables.
 | `AI_TRANSCRIBE_MODEL` | `whisper-large-v3-turbo` |
 | `AI_TRANSCRIBE_KEY` | Optional Secret key `ai-transcribe-key`; leave absent if the speech endpoint needs no authentication |
 | `FACE_SERVICE_URL` | `http://acampa-2025-face:8000` (cluster-internal only). Empty disables the parents' photo search |
-| `FACE_MATCH_THRESHOLD` | `0.45`; tune against real camp photos before changing |
-| `FACE_MIN_DETECTION_SCORE` | `0.55` |
+| `FACE_MATCH_THRESHOLD` | `0.22`; low so parents find their kid (a few other children in the results is ok) |
+| `FACE_MIN_DETECTION_SCORE` | `0.4` |
 
 MongoDB uses `MONGO_INITDB_ROOT_USERNAME` / `MONGO_INITDB_ROOT_PASSWORD`
 from `mongo-credentials`, and `MONGO_INITDB_DATABASE=camping`. These initialize

@@ -84,6 +84,8 @@ function toEvent(doc: Record<string, unknown> | null): CampEvent | null {
     notes: (doc.notes as string) ?? "",
     // legacy docs stored [{ roleId, slots }] — normalise to plain ids
     roles: ((doc.roles as unknown[]) ?? []).map((r) => (typeof r === "string" ? r : (r as { roleId: string }).roleId)),
+    // missing on old docs: parents already saw every event
+    visibleToParents: doc.visibleToParents !== false,
     // legacy docs have no detailColor — default to "" (no tint)
     assignments: (((doc.assignments as EventAssignment[]) ?? []).map((a) => ({ ...a, detailColor: a.detailColor ?? "" }))),
     createdAt: doc.createdAt as Date,

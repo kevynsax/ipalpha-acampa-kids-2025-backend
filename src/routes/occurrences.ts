@@ -1,13 +1,13 @@
 import { Hono, type Context } from "hono";
 import { requireAuth } from "../middleware/auth";
 import { findCamperById } from "../models/campers";
-import { insertOccurrence, listOccurrences } from "../models/occurrences";
+import { insertOccurrence, listOccurrences, occurrencesForGroup } from "../models/occurrences";
 import { findStaffById } from "../models/staff";
 import { cleanHtml } from "../services/html";
 import { notifyOccurrence } from "../services/notify";
 import { publish } from "../services/realtime";
-import { resolveScope } from "../services/scope";
-import type { Occurrence, OccurrencePerson, Role, SessionUser } from "../types";
+import { resolveScope, viewerOccurrenceGroup } from "../services/scope";
+import type { Occurrence, OccurrenceGroup, OccurrencePerson, Role, SessionUser } from "../types";
 
 interface Env {
   Variables: {
@@ -40,14 +40,11 @@ export function serializeOccurrence(occurrence: Occurrence) {
   };
 }
 
-async function occurrenceAccess(c: Context<Env, string>): Promise<{ admin: boolean; medical: boolean } | null> {
+async function occurrenceAccess(c: Context<Env, string>): Promise<OccurrenceGroup | null> {
   const role = c.get("activeRole");
-  if (role === "admin") return { admin: true, medical: false };
+  if (role === "admin") return "admin";
   if (role !== "staff" && role !== "health_staff") return null;
-  const scope = await resolveScope(c.get("user"));
-  // an organizer has the admin's scope over occurrences too
-  if (scope.all) return { admin: true, medical: false };
-  return scope.medical ? { admin: false, medical: true } : null;
+  return viewerOccurrenceGroup(await resolveScope(c.get("user")));
 }
 
 function parseIds(value: unknown, label: string): string[] | { error: string } {
@@ -67,27 +64,23 @@ async function resolvePeople(ids: string[], kind: "camper" | "staff"): Promise<O
 
 occurrences.use("*", requireAuth);
 
-/** Admin sees every occurrence; medical staff never receive records without a linked camper. */
+/** Admin sees every occurrence; organizers and medical staff only the records their group created. */
 occurrences.get("/", async (c) => {
-  const access = await occurrenceAccess(c);
-  if (!access) return fail(c, "FORBIDDEN", "Só a administração e a equipe médica podem ver ocorrências.", 403);
-  const list = await listOccurrences();
-  const visible = access.admin ? list : list.filter((occurrence) => occurrence.campers.length > 0);
+  const group = await occurrenceAccess(c);
+  if (!group) return fail(c, "FORBIDDEN", "Só a administração e a equipe médica podem ver ocorrências.", 403);
+  const visible = await occurrencesForGroup(await listOccurrences(), group);
   return c.json({ occurrences: visible.map(serializeOccurrence) });
 });
 
-/** Creates a permanent occurrence. Medical staff must link at least one camper. */
+/** Creates a permanent occurrence. Stamped with the author's group so peers can read it. */
 occurrences.post("/", async (c) => {
-  const access = await occurrenceAccess(c);
-  if (!access) return fail(c, "FORBIDDEN", "Só a administração e a equipe médica podem criar ocorrências.", 403);
+  const group = await occurrenceAccess(c);
+  if (!group) return fail(c, "FORBIDDEN", "Só a administração e a equipe médica podem criar ocorrências.", 403);
   const body = await c.req.json<Record<string, unknown>>().catch(() => null);
   if (!body) return fail(c, "BODY_INVALID", "Corpo da requisição inválido.");
 
   const camperIds = parseIds(body.camperIds, "Lista de acampantes");
   if (!Array.isArray(camperIds)) return fail(c, "CAMPERS_INVALID", camperIds.error);
-  if (!access.admin && camperIds.length === 0) {
-    return fail(c, "CAMPER_REQUIRED", "A equipe médica precisa relacionar pelo menos um acampante à ocorrência.", 403);
-  }
   const staffIds = parseIds(body.staffIds, "Lista da equipe");
   if (!Array.isArray(staffIds)) return fail(c, "STAFF_INVALID", staffIds.error);
 
@@ -107,6 +100,7 @@ occurrences.post("/", async (c) => {
     createdByUserId: c.get("userId"),
     createdByName: user.name,
     createdByRole: c.get("activeRole"),
+    createdByGroup: group,
   });
   publish("occurrences");
   void notifyOccurrence(created);

@@ -3,7 +3,7 @@ import { listCampers } from "../models/campers";
 import { listCategories } from "../models/categories";
 import { listTransports } from "../models/transports";
 import { listInstructions } from "../models/instructions";
-import { listOccurrences } from "../models/occurrences";
+import { listOccurrences, occurrencesForGroup } from "../models/occurrences";
 import { listMedicationDoses } from "../models/medications";
 import { listPrepSections } from "../models/preparation";
 import { listEvents, listRoles } from "../models/schedule";
@@ -20,7 +20,7 @@ import { serializeTransport } from "../routes/transports";
 import { serializeInstruction } from "../routes/instructions";
 import { serializeOccurrence } from "../routes/occurrences";
 import { serializeMedicationDose } from "../routes/medications";
-import { serializePrepSection } from "../routes/preparation";
+import { serializePrepListFor } from "../routes/preparation";
 import { serializeEvent, serializeRole } from "../routes/schedule";
 import { serializeSettings, serializeSettingsForManager } from "../routes/settings";
 import { serializePhoto } from "../routes/gallery";
@@ -28,8 +28,7 @@ import { serializeStaffList } from "../routes/staff";
 import { getSettings } from "../models/settings";
 import type { Role } from "../types";
 import { COLLECTIONS, type Collection, type Snapshot } from "./realtime";
-import { canManageGallery, canSeeBedroom, canSeeDoc, canSeePrep, isParent, resolveScope, scopeEvent, scopeRoles, type Viewer } from "./scope";
-import { parentEvents } from "./camp";
+import { canManageGallery, canSeeBedroom, canSeeDoc, isParent, resolveScope, scopeEvent, scopeRoles, viewerOccurrenceGroup, type Viewer } from "./scope";
 
 /**
  * Collections each role may read (mirrors the REST `requireRole` guards).
@@ -60,11 +59,9 @@ export async function loadCollections(viewer: Viewer, names: readonly Collection
   let wanted = names.filter((n) => allowed.has(n));
   const out: Snapshot = {};
   const scope = await resolveScope(viewer);
-  // Occurrences are reserved for admins and people explicitly listed on the
-  // medical team. Ordinary staff sessions must not receive even an empty
-  // collection from this read path.
-  // The medication checklist is the same: only the admin / organizers and the
-  // medical team receive it (it is health data of every kid).
+  // Occurrences: admin, organizers and the medical team. Each non-admin group
+  // only receives the records it created (see viewerOccurrenceGroup).
+  // The medication checklist is the same audience, unfiltered (health data of every kid).
   if (!scope.all && !scope.medical) wanted = wanted.filter((name) => name !== "occurrences" && name !== "medications");
 
   // roles and events are scoped together: a non-admin only learns about the
@@ -75,8 +72,7 @@ export async function loadCollections(viewer: Viewer, names: readonly Collection
     ? (async () => {
         const [roles, all] = await Promise.all([listRoles(), listEvents()]);
         const roleById = new Map(roles.map((r) => [r._id, r]));
-        // parents only get the programme from the check-in start onwards
-        const events = isParent(scope) ? parentEvents(await getSettings(), all) : all;
+        const events = isParent(scope) ? all.filter((e) => e.visibleToParents) : all;
         const scopedEvents = events.map((e) => scopeEvent(scope, e, roleById));
         return { roles: scopeRoles(scope, roles, scopedEvents), events: scopedEvents };
       })()
@@ -120,23 +116,23 @@ export async function loadCollections(viewer: Viewer, names: readonly Collection
           out.events = (await schedule!).events.map(serializeEvent);
           break;
         case "preparation":
-          out.preparation = (await listPrepSections()).filter((s) => canSeePrep(scope, s)).map(serializePrepSection);
+          out.preparation = serializePrepListFor(await listPrepSections(), scope);
           break;
         case "instructions":
           out.instructions = (await listInstructions()).filter((d) => canSeeDoc(scope, d)).map(serializeInstruction);
           break;
-        case "occurrences":
-          if (scope.all) out.occurrences = (await listOccurrences()).map(serializeOccurrence);
-          else if (scope.medical) out.occurrences = (await listOccurrences()).filter((occurrence) => occurrence.campers.length > 0).map(serializeOccurrence);
+        case "occurrences": {
+          const group = viewerOccurrenceGroup(scope);
+          if (group) out.occurrences = (await occurrencesForGroup(await listOccurrences(), group)).map(serializeOccurrence);
           break;
+        }
         case "medications":
           out.medications = (await listMedicationDoses()).map(serializeMedicationDose);
           break;
         case "gallery":
-          // Parents must submit a reference photo first; their matched list comes
-          // from POST /api/gallery/search-person and is never pushed or cached.
-          if (role === "parent") out.gallery = [];
-          else out.gallery = canManageGallery(scope) || (await getSettings()).galleryPublished ? (await listGalleryPhotos()).map(serializePhoto) : [];
+          // published album for the camp; photographers / organizers also see drafts.
+          // parents may further FILTER it with POST /api/gallery/search-person.
+          out.gallery = canManageGallery(scope) || (await getSettings()).galleryPublished ? (await listGalleryPhotos()).map(serializePhoto) : [];
           break;
         case "settings":
           // offenders list (out-of-scope emergency QR) is manager-only

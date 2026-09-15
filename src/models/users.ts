@@ -13,6 +13,7 @@ function toUser(doc: Record<string, unknown> | null): User | null {
     updatedAt: doc.updatedAt as Date,
     otp: doc.otp as User["otp"],
     frozenUntil: doc.frozenUntil as Date | undefined,
+    prepDone: (doc.prepDone as string[]) ?? [],
     welcomeSentAt: (doc.welcomeSentAt as Date) ?? null,
   };
 }
@@ -87,6 +88,20 @@ export async function loadAdminPhones(): Promise<Set<string>> {
 /** Is this phone an admin account's? (see loadAdminPhones) */
 export function isAdminPhone(phone: string | null): boolean {
   return phone !== null && ADMIN_PHONES.has(phone);
+}
+
+/** Ticks / unticks one Preparação item for a PARENT (their checklist lives on the user record). */
+export async function setUserPrepDone(id: string, key: string, done: boolean): Promise<User | null> {
+  if (!ObjectId.isValid(id)) return null;
+  const db = await getDb();
+  const res = await db
+    .collection("users")
+    .findOneAndUpdate(
+      { _id: new ObjectId(id) },
+      (done ? { $addToSet: { prepDone: key }, $set: { updatedAt: new Date() } } : { $pull: { prepDone: key }, $set: { updatedAt: new Date() } }) as never,
+      { returnDocument: "after" },
+    );
+  return toUser(res as Record<string, unknown> | null);
 }
 
 export async function updateUser(id: string, patch: Record<string, unknown>): Promise<void> {

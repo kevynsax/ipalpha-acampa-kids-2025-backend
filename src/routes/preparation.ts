@@ -12,8 +12,10 @@ import {
 } from "../models/preparation";
 import { cleanHtml } from "../services/html";
 import { publish } from "../services/realtime";
-import { canSeePrep, resolveScope } from "../services/scope";
+import { canSeePrep, isParent, prepDoneOf, resolveScope, type Scope } from "../services/scope";
 import { notifyPreparationChange } from "../services/notify";
+import { findByPhone, setUserPrepDone } from "../models/users";
+import { clearPrepDoneKey } from "../models/preparation";
 import { isEmojiLike } from "../utils";
 import { PREP_AUDIENCES, PREP_TEAM_AUDIENCES, type PrepAudience, type PrepSection, type Role, type SessionUser } from "../types";
 
@@ -33,6 +35,7 @@ interface Env {
  * itself (PUT /api/schedule/roles/:id { preparation }).
  *
  *   GET    /api/preparation              team + parents + admin (filtered to what the session may see)
+ *   PUT    /api/preparation/me/:key      parent  { done: boolean } — ticks one item of THEIR checklist
  *   POST   /api/preparation              admin   { title, emoji?, audiences?, content? }
  *   PUT    /api/preparation/reorder      admin   { ids }
  *   PUT    /api/preparation/:id          admin
@@ -47,7 +50,7 @@ function fail(c: Context, code: string, message: string, status: 400 | 404 = 400
   return c.json({ error: { code, message } }, status);
 }
 
-export function serializePrepSection(s: PrepSection) {
+export function serializePrepSection(s: PrepSection, done?: Set<string>) {
   return {
     id: s._id,
     title: s.title,
@@ -55,9 +58,17 @@ export function serializePrepSection(s: PrepSection) {
     audiences: s.audiences,
     content: s.content,
     order: s.order,
+    /** PARENT sessions only: has this responsible already ticked the item? (the team's ticks live on `staff.prepDone`) */
+    done: done ? done.has(`section:${s._id}`) : false,
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
   };
+}
+
+/** The sections this session may read, each already carrying its own ✓ for a parent. */
+export function serializePrepListFor(list: PrepSection[], scope: Scope) {
+  const done = isParent(scope) ? new Set(prepDoneOf(scope)) : undefined;
+  return list.filter((s) => canSeePrep(scope, s)).map((s) => serializePrepSection(s, done));
 }
 
 function buildPatch(body: Record<string, unknown>, partial: boolean): { patch: Partial<PrepSectionData> } | { code: string; message: string } {
@@ -92,8 +103,29 @@ preparation.use("*", requireAuth);
 
 preparation.get("/", requireRole("admin", "staff", "health_staff", "parent"), async (c) => {
   const scope = await resolveScope(c.get("user"));
-  const list = (await listPrepSections()).filter((s) => canSeePrep(scope, s));
-  return c.json({ sections: list.map(serializePrepSection) });
+  return c.json({ sections: serializePrepListFor(await listPrepSections(), scope) });
+});
+
+/**
+ * PUT /api/preparation/me/:key  { done: boolean } — a PARENT ticks / unticks
+ * one item of their own checklist (`key` is "section:<id>"). The team's
+ * equivalent is PUT /api/staff/me/prep/:key (stored on the staff record).
+ * Must be declared before /:id.
+ */
+preparation.put("/me/:key", requireRole("parent"), async (c) => {
+  const key = c.req.param("key");
+  if (!/^section:[a-f0-9]{24}$/.test(key)) return fail(c, "KEY_INVALID", "Item inválido.");
+  const body = await c.req.json<{ done?: unknown }>().catch(() => null);
+  if (!body || typeof body.done !== "boolean") return fail(c, "BODY_INVALID", "Envie { done: true | false }.");
+  const section = await findPrepSectionById(key.slice("section:".length));
+  const scope = await resolveScope(c.get("user"));
+  if (!section || !canSeePrep(scope, section)) return fail(c, "SECTION_NOT_FOUND", "Seção não encontrada.", 404);
+  const me = await findByPhone(c.get("user").phone);
+  if (!me) return fail(c, "USER_NOT_FOUND", "Cadastro não encontrado.", 404);
+  const updated = await setUserPrepDone(me._id, key, body.done);
+  // only this parent's payload changes; publish re-sends the collection to everyone (cheap, ~10 sections)
+  publish("preparation");
+  return c.json({ done: (updated?.prepDone ?? []).includes(key) });
 });
 
 preparation.post("/", requireManager, async (c) => {
@@ -118,7 +150,7 @@ preparation.put("/reorder", requireManager, async (c) => {
   const rest = existing.map((s) => s._id).filter((id) => !ordered.includes(id));
   await Promise.all([...ordered, ...rest].map((id, order) => updatePrepSection(id, { order })));
   publish("preparation");
-  return c.json({ sections: (await listPrepSections()).map(serializePrepSection) });
+  return c.json({ sections: (await listPrepSections()).map((s) => serializePrepSection(s)) });
 });
 
 preparation.put("/:id", requireManager, async (c) => {
@@ -135,9 +167,12 @@ preparation.put("/:id", requireManager, async (c) => {
 });
 
 preparation.delete("/:id", requireManager, async (c) => {
-  const ok = await deletePrepSection(c.req.param("id"));
+  const id = c.req.param("id");
+  const ok = await deletePrepSection(id);
   if (!ok) return fail(c, "SECTION_NOT_FOUND", "Seção não encontrada.", 404);
-  publish("preparation");
+  // the checklist ticks of the team and of the parents point at a section that no longer exists
+  await clearPrepDoneKey(`section:${id}`);
+  publish("preparation", "staff");
   return c.json({ success: true });
 });
 

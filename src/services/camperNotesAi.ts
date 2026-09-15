@@ -1,7 +1,7 @@
 import { config } from "../config";
 import { listCategories } from "../models/categories";
 import { CAMPER_CATEGORY_KEYS, MEDICATION_TIMES_MAX, MEDICATIONS_MAX, type Medication } from "../types";
-import { normalizeBrazilPhone } from "../utils";
+import { formatCpf, normalizeBrazilPhone } from "../utils";
 import type { AiVendor } from "../routes/ai";
 
 /**
@@ -204,7 +204,7 @@ function fieldLines(lists: OptionLabels, subject: NotesSubject): Record<FieldKey
     weightKg: `- "weightKg": number ou null. Peso em kg quando o texto informa ("Peso: 28.5kg" → 28.5, "30kgkg" → 30). null se não há.`,
     insurance: `- "insurance": string. Nome do convênio/plano de saúde ("Sulamerica", "Bradesco Saúde", "Amil Black"); iniciais maiúsculas, sem o número da carteirinha. "Não tem" / "particular" → "Não tem". Vazio se não há.`,
     insuranceCard: `- "insuranceCard": string. Número da carteirinha do convênio, só dígitos e espaços como escrito. Vazio se não há.`,
-    cpf: `- "cpf": string. CPF DA CRIANÇA, 11 dígitos como escrito ("123.456.789-00"). Só se o texto deixa claro que é o CPF da criança, não o do responsável. Vazio se não há.`,
+    cpf: `- "cpf": string. CPF DA CRIANÇA no formato "123.456.789-00". Só se o texto deixa claro que é o CPF da criança, não o do responsável. Vazio se não há.`,
     rg: `- "rg": string. RG/identidade DA CRIANÇA, como escrito ("12.345.678-9"), incluindo o órgão emissor se informado. Vazio se não há.`,
     school: `- "school": string. Nome da ESCOLA/colégio onde a criança estuda, iniciais maiúsculas ("Colégio Adventista"). Sem a série. Vazio se não há.`,
     schoolGrade: `- "schoolGrade": string. SÉRIE/ano escolar da criança como escrito ("5º ano", "2ª série do fundamental"). Vazio se não há.`,
@@ -212,7 +212,7 @@ function fieldLines(lists: OptionLabels, subject: NotesSubject): Record<FieldKey
     invitedBy: `- "invitedBy": string. Quem CONVIDOU a criança para o acampamento, nome com iniciais maiúsculas. Vazio se não há.`,
     guardianName: `- "guardianName": string. Nome do RESPONSÁVEL (pai, mãe ou responsável legal que fez a inscrição), iniciais maiúsculas e acentos. NÃO é contato de emergência. Vazio se não há.`,
     guardianPhone: `- "guardianPhone": string. Telefone do responsável no formato "11 99999-4999" (DDD, espaço, 5 dígitos, hífen, 4 dígitos); se faltar o DDD, use 11. É o telefone do responsável principal, NÃO o de emergência. Vazio se não há.`,
-    guardianCpf: `- "guardianCpf": string. CPF DO RESPONSÁVEL, 11 dígitos como escrito. Vazio se não há.`,
+    guardianCpf: `- "guardianCpf": string. CPF DO RESPONSÁVEL no formato "123.456.789-00". Vazio se não há.`,
     guardianEmail: `- "guardianEmail": string. E-mail do responsável, minúsculas. Vazio se não há.`,
     emergencyContact: `- "emergencyContact": string. Contatos de emergência. Formato SEMPRE: "Nome (vínculo) 11 99999-4999". Vínculo = parentesco (pai, mãe, avó, tia, madrasta…) e só se informado; nunca escreva "(emergência)" ou "(contato)". Telefone SEMPRE como "11 99999-4999" (DDD, espaço, 5 dígitos, hífen, 4 dígitos); se faltar o DDD, use 11. Vários contatos separados por " / ". Se só há telefone, escreva só o telefone. Nome com iniciais maiúsculas e acentos corretos.`,
     generalNotes:
@@ -535,7 +535,7 @@ function normalizeAll(a: Record<string, unknown>, cur: Partial<CamperNotesFields
     insurance: str(a.insurance, 120) || cur.insurance?.trim() || "",
     insuranceCard: str(a.insuranceCard, 120) || cur.insuranceCard?.trim() || "",
     // identity fields: the observations are the latest word, so the model's answer replaces what the form had
-    cpf: str(a.cpf, 40) || cur.cpf?.trim() || "",
+    cpf: formatCpf(str(a.cpf, 40) || cur.cpf?.trim() || ""),
     rg: str(a.rg, 40) || cur.rg?.trim() || "",
     school: str(a.school, 120) || cur.school?.trim() || "",
     schoolGrade: str(a.schoolGrade, 60) || cur.schoolGrade?.trim() || "",
@@ -543,7 +543,7 @@ function normalizeAll(a: Record<string, unknown>, cur: Partial<CamperNotesFields
     invitedBy: str(a.invitedBy, 120) || cur.invitedBy?.trim() || "",
     guardianName: str(a.guardianName, 120) || cur.guardianName?.trim() || "",
     guardianPhone: formatEmergencyContact(str(a.guardianPhone, 40)) || cur.guardianPhone?.trim() || "",
-    guardianCpf: str(a.guardianCpf, 40) || cur.guardianCpf?.trim() || "",
+    guardianCpf: formatCpf(str(a.guardianCpf, 40) || cur.guardianCpf?.trim() || ""),
     guardianEmail: str(a.guardianEmail, 160).toLowerCase() || cur.guardianEmail?.trim() || "",
     generalNotes: str(a.generalNotes, 1000),
   };

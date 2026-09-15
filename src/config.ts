@@ -14,7 +14,7 @@ export const config = {
   filesDir: process.env.FILES_DIR ?? "data/files",
 
   jwtSecret: process.env.JWT_SECRET ?? "dev-secret-change-me",
-  sessionHours: Number(process.env.SESSION_HOURS ?? 24),
+  sessionHours: Number(process.env.SESSION_HOURS ?? 96),
 
   otp: {
     length: 6,
@@ -36,10 +36,10 @@ export const config = {
   /** Private InsightFace service used to index and search gallery faces. */
   face: {
     serviceUrl: (process.env.FACE_SERVICE_URL ?? "").replace(/\/$/, ""),
-    /** Cosine similarity; tune against real camp photos before changing it. */
-    matchThreshold: Number(process.env.FACE_MATCH_THRESHOLD ?? 0.45),
-    /** Avoid weak/tiny detections in busy group pictures. */
-    minDetectionScore: Number(process.env.FACE_MIN_DETECTION_SCORE ?? 0.55),
+    /** Cosine similarity. Prefer recall: parents should find their kid even if a few other children come along. */
+    matchThreshold: Number(process.env.FACE_MATCH_THRESHOLD ?? 0.22),
+    /** Weak detections still count — group shots and hats are the usual camp photo. */
+    minDetectionScore: Number(process.env.FACE_MIN_DETECTION_SCORE ?? 0.4),
   },
 
   /** OpenAI-compatible gateway for the editor's AI helper (empty key = feature hidden) */

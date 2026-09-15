@@ -2,7 +2,8 @@ import { listCampersOfGuardian } from "../models/campers";
 import { listEvents } from "../models/schedule";
 import { checkinWindowOpen, getSettings, staffAccessOpen } from "../models/settings";
 import { findStaffByPhone } from "../models/staff";
-import type { CampEvent, Camper, DocAudience, PrepAudience, Role, RoomRole, ScheduleRole, Settings, Staff } from "../types";
+import { findByPhone } from "../models/users";
+import type { CampEvent, Camper, DocAudience, OccurrenceGroup, PrepAudience, Role, RoomRole, ScheduleRole, Settings, Staff } from "../types";
 import { campInProgress, campPeriod, parentWindowOf, parentWindowOpen, vestWindowOpen } from "./camp";
 
 /**
@@ -40,10 +41,11 @@ import { campInProgress, campPeriod, parentWindowOf, parentWindowOpen, vestWindo
  *                  full (they look after them).
  *   organizer    → a staff member the admin listed as an ORGANIZER (no time
  *                  window): the ADMIN'S data scope (`all: true`) — every
- *                  camper, staff member, bedroom, occurrence and the whole
- *                  programme — and the admin's writes, EXCEPT the four
- *                  admin-only areas: the organizers list itself, categories,
- *                  notifications and the "about" page (`admin: false`).
+ *                  camper, staff member, bedroom and the whole programme —
+ *                  and the admin's writes, EXCEPT the four admin-only areas:
+ *                  the organizers list itself, categories, notifications and
+ *                  the "about" page (`admin: false`). Occurrences: only the
+ *                  ones the organizers themselves registered (the admin sees all).
  *   game         → a staff member the admin listed as a GAME organizer (no
  *   organizer      window): writes the programme (events, roles, assignments)
  *                  and the scoreboard (Placar): give / take / zero points of
@@ -60,8 +62,9 @@ import { campInProgress, campPeriod, parentWindowOf, parentWindowOpen, vestWindo
  *   medical      → a staff member the admin listed as MEDICAL team (no time
  *                  window): every camper in FULL (health included), every
  *                  bedroom — hence every vehicle — the whole time. Read-only:
- *                  never writes campers, rooms or check-ins. Staff / programme:
- *                  as any team member.
+ *                  never writes campers, rooms or check-ins. Occurrences: only
+ *                  the ones the medical team registered. Staff / programme: as
+ *                  any team member.
  *   vest helper  → a staff member the admin listed as a VEST (colete) helper,
  *                  until VEST_GRACE_DAYS after the camp ends (they collect the
  *                  vests back in the days after): every staff member as NAME + PHONE +
@@ -78,9 +81,9 @@ import { campInProgress, campPeriod, parentWindowOf, parentWindowOpen, vestWindo
  *                  event — see services/camp.ts#parentWindow) additionally
  *                  the team members of those rooms and the "important
  *                  contacts" (Settings → Contatos) as NAME + PHONE records.
- *                  Outside the window: no staff at all. The programme: every
- *                  event from the check-in start onwards, without roles or
- *                  assignments. They may edit their kid's health block
+ *                  Outside the window: no staff at all. The programme: events
+ *                  marked visible to parents, without roles or assignments.
+ *                  They may edit their kid's health block
  *                  (PUT /api/campers/:id/parent).
  *
  * ORDINARY team members (on none of the lists above, nor a parent contact)
@@ -140,9 +143,11 @@ export type Scope =
       parentContacts: boolean;
       /** PARENT session: staff ids listed as important contacts (Settings → Contatos), inside the window */
       parentContactIds: string[];
+      /** PARENT session: the Preparação items they ticked as done ("section:<id>" — stored on their user record) */
+      parentPrepDone: string[];
     };
 
-export const NO_ACCESS: Extract<Scope, { all: false }> = { all: false, staffId: null, bedroom: null, checkinHelper: false, busHelperVehicle: null, busOutboundHelper: false, busReturnHelper: false, organizer: false, gameOrganizer: false, scoreHelper: false, medical: false, vestHelper: false, photographer: false, kidsRoomsDraft: false, campActive: false, roomRole: "helper", parentKids: [], parentBedrooms: [], parentContacts: false, parentContactIds: [] };
+export const NO_ACCESS: Extract<Scope, { all: false }> = { all: false, staffId: null, bedroom: null, checkinHelper: false, busHelperVehicle: null, busOutboundHelper: false, busReturnHelper: false, organizer: false, gameOrganizer: false, scoreHelper: false, medical: false, vestHelper: false, photographer: false, kidsRoomsDraft: false, campActive: false, roomRole: "helper", parentKids: [], parentBedrooms: [], parentContacts: false, parentContactIds: [], parentPrepDone: [] };
 
 /** Is this a PARENT session with at least one kid enrolled? */
 export function isParent(scope: Scope): boolean {
@@ -176,7 +181,7 @@ export function staffHasAccess(staffId: string, s: Settings, now = new Date()): 
 
 /** The parent's scope: their kids (by guardian phone), the kids' rooms and — inside the parents' window — the contacts. */
 async function resolveParentScope(phone: string): Promise<Scope> {
-  const [kids, settings, events] = await Promise.all([listCampersOfGuardian(phone), getSettings(), listEvents()]);
+  const [kids, settings, events, user] = await Promise.all([listCampersOfGuardian(phone), getSettings(), listEvents(), findByPhone(phone)]);
   if (kids.length === 0) return NO_ACCESS;
   const open = parentWindowOpen(parentWindowOf(settings, events));
   return {
@@ -186,6 +191,7 @@ async function resolveParentScope(phone: string): Promise<Scope> {
     parentBedrooms: settings.kidsRoomsDraft ? [] : [...new Set(kids.map((k) => k.bedroom).filter((b): b is string => !!b))],
     parentContacts: open,
     parentContactIds: open ? settings.parentContacts.map((p) => p.staffId) : [],
+    parentPrepDone: user?.prepDone ?? [],
   };
 }
 
@@ -226,6 +232,11 @@ export async function resolveScope(viewer: Viewer): Promise<Scope> {
   return { ...NO_ACCESS, staffId: me._id, bedroom: me.bedroom, checkinHelper, busHelperVehicle, busOutboundHelper, busReturnHelper, organizer, gameOrganizer, scoreHelper, medical, vestHelper, photographer, kidsRoomsDraft, campActive, roomRole: me.roomRole };
 }
 
+/** The Preparação items this session has already ticked (parents; the team's live on their staff record). */
+export function prepDoneOf(scope: Scope): string[] {
+  return isParent(scope) ? asParent(scope).parentPrepDone : [];
+}
+
 /** May this PARENT session edit `k`'s "Pontos de atenção"? (their own kid) */
 export function canParentEdit(scope: Scope, k: Pick<Camper, "_id">): boolean {
   return isParent(scope) && asParent(scope).parentKids.includes(k._id);
@@ -251,6 +262,12 @@ export function canSeePrep(scope: Scope, s: { audiences: PrepAudience[] }): bool
 /** May this session do what the admin does (campers, staff, rooms, check-ins, documents, most settings)? (admin or organizer) */
 export function canManage(scope: Scope): boolean {
   return scope.all;
+}
+
+/** Which occurrence group this session belongs to (null = cannot see / create). */
+export function viewerOccurrenceGroup(scope: Scope): OccurrenceGroup | null {
+  if (scope.all) return scope.admin ? "admin" : "organizer";
+  return scope.medical ? "medical" : null;
 }
 
 /** Is this the real admin? (organizers list, categories, notifications, about) */

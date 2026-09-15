@@ -74,6 +74,16 @@ export async function deletePrepSection(id: string): Promise<boolean> {
   return res.deletedCount === 1;
 }
 
+/** Drops one checklist key ("section:<id>") from every team member and every parent — after the section is deleted. */
+export async function clearPrepDoneKey(key: string): Promise<void> {
+  const db = await getDb();
+  const now = new Date();
+  await Promise.all([
+    db.collection("staff").updateMany({ prepDone: key }, { $pull: { prepDone: key }, $set: { updatedAt: now } } as never),
+    db.collection("users").updateMany({ prepDone: key }, { $pull: { prepDone: key }, $set: { updatedAt: now } } as never),
+  ]);
+}
+
 export async function ensurePrepIndexes(): Promise<void> {
   const db = await getDb();
   await db.collection(COLLECTION).createIndex({ order: 1 });

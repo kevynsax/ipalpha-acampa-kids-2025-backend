@@ -146,11 +146,18 @@ export async function wipeSchedule(withRoles = false): Promise<number> {
 
 /**
  * The texts the team reads: Instruções and Preparação (one block — they are
- * written together and reused together). Nothing else points at them.
+ * written together and reused together). The Preparação checklist ticks point
+ * at the deleted sections, so they go with them (team and parents alike).
  */
 export async function wipeDocs(): Promise<number> {
   const db = await getDb();
-  const [instructions, prep] = await Promise.all([db.collection("instructions").deleteMany({}), db.collection("prep_sections").deleteMany({})]);
+  const now = new Date();
+  const [instructions, prep] = await Promise.all([
+    db.collection("instructions").deleteMany({}),
+    db.collection("prep_sections").deleteMany({}),
+    db.collection("staff").updateMany({ prepDone: { $exists: true, $ne: [] } }, { $set: { prepDone: [], updatedAt: now } }),
+    db.collection("users").updateMany({ prepDone: { $exists: true, $ne: [] } }, { $set: { prepDone: [], updatedAt: now } }),
+  ]);
   return instructions.deletedCount + prep.deletedCount;
 }
 
