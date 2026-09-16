@@ -1,4 +1,5 @@
 import { Hono, type Context } from "hono";
+import { config } from "../config";
 import { requireAuth } from "../middleware/auth";
 import { requireAdmin, requireManager } from "../middleware/roles";
 import { listTransports } from "../models/transports";
@@ -83,11 +84,14 @@ export async function serializeSettings(s: Settings) {
   };
 }
 
-/** Same as serializeSettings, plus the offenders list (admin / organizer only). */
-export async function serializeSettingsForManager(s: Awaited<ReturnType<typeof getSettings>>) {
+/** Same as serializeSettings, plus the offenders list (admin / organizer only) and the super-admin flag (drives the ⚙️ → Sementes tab). */
+export async function serializeSettingsForManager(s: Awaited<ReturnType<typeof getSettings>>, viewerPhone?: string) {
   const base = await serializeSettings(s);
+  const superPhone = config.superAdminPhone ? normalizeBrazilPhone(config.superAdminPhone) : null;
   return {
     ...base,
+    /** read-only: this session is the deployment owner (SUPER_ADMIN_PHONE) — the only one who maintains the seeds */
+    superAdmin: !!superPhone && viewerPhone === superPhone,
     foreignLookupOffenders: (await listForeignLookupOffenders(FOREIGN_LOOKUP_ALERT_AT)).map((p) => ({
       staffId: p._id,
       name: p.name,
@@ -389,7 +393,7 @@ settings.put("/", requireManager, async (c) => {
     // the admin may have closed the team's window right now: log those people out
     void evictStaffOutsideWindow().catch((err) => console.error("realtime: evict failed", err));
   }
-  return c.json({ settings: await serializeSettingsForManager(updated) });
+  return c.json({ settings: await serializeSettingsForManager(updated, c.get("user").phone) });
 });
 
 /** GET /api/settings/welcome-preview — admin. How many people would get the welcome SMS RIGHT NOW if the toggle were on (never welcomed, inside their window, with a phone). */
@@ -413,7 +417,7 @@ settings.post("/foreign-lookups/reset", requireManager, async (c) => {
   const staff = await resetForeignLookups();
   console.log(`🧹 foreign lookups reset by ${c.get("user").name}: ${staff} staff`);
   publish("staff", "settings");
-  return c.json({ staff, settings: await serializeSettingsForManager(await getSettings()) });
+  return c.json({ staff, settings: await serializeSettingsForManager(await getSettings(), c.get("user").phone) });
 });
 
 export default settings;

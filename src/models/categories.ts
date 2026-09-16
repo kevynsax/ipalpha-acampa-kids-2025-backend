@@ -81,6 +81,17 @@ export async function updateCategory(
   return toCategory(res as Record<string, unknown> | null);
 }
 
+/** Atomically appends one option; safe when independent import tasks run together. */
+export async function appendCategoryOption(id: string, option: CategoryOption): Promise<boolean> {
+  if (!ObjectId.isValid(id)) return false;
+  const db = await getDb();
+  const res = await db.collection<{ _id: ObjectId; options: CategoryOption[]; updatedAt: Date }>(COLLECTION).updateOne(
+    { _id: new ObjectId(id), "options.id": { $ne: option.id } },
+    { $push: { options: option }, $set: { updatedAt: new Date() } },
+  );
+  return res.modifiedCount === 1;
+}
+
 export async function deleteCategory(id: string): Promise<boolean> {
   const db = await getDb();
   const res = await db.collection(COLLECTION).deleteOne({ _id: new ObjectId(id) });

@@ -42,6 +42,31 @@ Copy `.env.example` to `.env` for local development. Production configuration an
 | `FACE_MATCH_THRESHOLD` | cosine similarity a gallery face must reach to count as a match (default `0.22`) — low so parents find their kid; a few other children in the results is acceptable |
 | `FACE_MIN_DETECTION_SCORE` | detections below this are ignored, both when indexing and when reading the reference (default `0.4`) |
 | `NOTIFY_COALESCE_SECONDS` | changes to the same person within this window become one SMS (default `20`) |
+| `AI_BASE_URL` / `AI_API_KEY` | OpenAI-compatible API used by the existing editor AI helpers |
+| `AI_ASSISTANT_BASE_URL` / `AI_ASSISTANT_API_KEY` | optional separate provider for the read-only camp assistant; when empty, it reuses `AI_BASE_URL` / `AI_API_KEY` |
+| `AI_ASSISTANT_MODEL` | tool-calling model for the admin/organizer camp assistant (default `gpt-6-astra`) |
+| `AI_LIVE_BASE_URL` / `AI_LIVE_API_KEY` | OpenAI **Live** API for the spoken, two-way assistant (`POST /v1/live/sessions`). An OpenAI-compatible gateway is not enough. **Empty key = the drawer stays text-only** |
+| `AI_LIVE_MODEL` | voice model that runs the conversation (default `gpt-live-1`) |
+| `AI_LIVE_VOICE` | the voice it answers in (default `marin`) |
+| `AI_LIVE_BACKEND_MODEL` | reasoning model GPT-Live delegates to, and the one that actually reads MongoDB (default `gpt-5.6-terra`) |
+
+## Read-only camp assistant
+
+Admins and listed organizers see a live assistant button throughout the logged-in app. The browser sends questions to `POST /api/assistant/chat`; the backend keeps the API key private and lets the model query an explicit allowlist of application collections with read-only MongoDB tools.
+
+- No insert, update, delete, `$out`, `$merge`, `$where`, server-side JavaScript or cross-collection `$lookup` is exposed.
+- `sessions` is never exposed. OTP internals, QR tokens, file bytes and gallery face embeddings are stripped.
+- Queries are capped by execution time, result count and response size.
+- Access is enforced server-side: real admin or a staff session currently listed in Settings → Organizadores.
+
+### Talking to it (GPT-Live)
+
+With `AI_LIVE_API_KEY` set, the drawer opens on a spoken conversation instead of a chat box. It is a real two-way call, not push-to-talk: both sides can speak at once and the person can cut the answer off mid-sentence.
+
+- The browser holds the microphone and the speaker over WebRTC. `POST /api/assistant/live` trades its SDP offer for GPT-Live's answer, so the API key never reaches the client.
+- GPT-Live only runs the conversation. It delegates every question to the `AI_LIVE_BACKEND_MODEL` Responses model, which gets the same prompt and the same read-only MongoDB tools as the written chat.
+- Tool calls come back down the browser's data channel and are executed by `POST /api/assistant/tool`, which re-checks the caller's session and role — the browser never touches Mongo.
+- Sessions are billed per minute, so closing the drawer hangs up.
 
 ## Login flow (roles + phone + OTP)
 
@@ -287,6 +312,11 @@ keys: `team → equipe`, `transportation → transporte`, `allergies → alergia
 `healthIssues → condicao-cronica`. `bedroom` is a **Bedroom id** — assigning
 someone to a full room fails with 409 `BEDROOM_FULL`.
 `foodRestrictions` and `healthNotes` are free text (≤ 500 chars); `medications` is the same list as on campers.
+`phone` is the person's **login** and is therefore **required and unique** on
+`POST /api/staff` / `PUT /api/staff/:id`: an empty phone gets 400
+`PHONE_REQUIRED` and a phone already on the roster gets 409 `PHONE_DUPLICATE`.
+(Bulk imports write through the model, so records that arrived without a phone
+stay readable — the form asks for one the first time they are edited.)
 `roomRole` is `"caretaker"` (responsável: looks after specific kids) or
 `"helper"` (auxiliar, the default).
 
@@ -304,7 +334,7 @@ orphaning kids they still carried). An admin never enters as "Equipe": see
 |---|---|---|---|
 | GET | `/api/staff?active=true\|false` | admin, staff, health_staff | — |
 | GET | `/api/staff/:id` | admin, staff, health_staff | — |
-| POST | `/api/staff` | admin | `{ name, phone, active?, team?, bedroom?, transportation?, allergies?, foodRestrictions?, healthIssues?, medications? }` |
+| POST | `/api/staff` | admin | `{ name, phone (obrigatório, único), active?, team?, bedroom?, transportation?, allergies?, foodRestrictions?, healthIssues?, medications? }` |
 | PUT | `/api/staff/:id` | admin | partial (same fields + `roomRole`) |
 | POST | `/api/staff/:id/move` | admin | `{ bedroom, kids: "orphan" \| "bring" \| "assign" \| "swap", assignTo?, swapWith? }` — moves a caretaker and decides what happens to their kids: stay orphans, come along (room + bed cleared), go to `assignTo` (same room; a helper is promoted) or swap with `swapWith` (target room: both people switch rooms, each takes the other's kids) |
 | DELETE | `/api/staff/:id` | admin | — (their kids become orphans) |

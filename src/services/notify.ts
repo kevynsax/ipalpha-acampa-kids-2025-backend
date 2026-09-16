@@ -1,5 +1,5 @@
 import { config } from "../config";
-import { findBedroomById } from "../models/bedrooms";
+import { findBedroomById, listBedrooms } from "../models/bedrooms";
 import { claimBirthdayNotice, countCampersPerBedroom, listCampers } from "../models/campers";
 import { findTransportById } from "../models/transports";
 import { transportLabel as transportLabelOf } from "../routes/transports";
@@ -9,7 +9,7 @@ import { claimStaffPhotosNotice, claimStaffWelcome, findStaffById, listStaff } f
 import { findTeamById, listTeams } from "../models/teams";
 import { claimParentPhotosNotice, claimParentWelcome, listAdmins, listParents } from "../models/users";
 import { PARENT_FIELD_LABEL, PREP_AUDIENCES } from "../types";
-import type { CampEvent, Camper, CamperChangeLog, DocAudience, InstructionDoc, Occurrence, PrepAudience, PrepSection, ScheduleRole, Settings, Staff, Team } from "../types";
+import type { Bedroom, CampEvent, Camper, CamperChangeLog, DocAudience, InstructionDoc, Occurrence, PrepAudience, PrepSection, RoomRole, ScheduleRole, Settings, Staff, Team } from "../types";
 import { formatBrazilPhone, saoPauloWallClock, saoPauloWallClockToIso, todayInSaoPaulo } from "../utils";
 import { birthdayDuringCamp, campPeriod } from "./camp";
 import { comteleEnabled, comteleSendSms, resolveSmsTarget, type SmsAudience } from "./comtele";
@@ -529,6 +529,150 @@ export async function notifyStaffChange(before: Staff, after: Staff): Promise<vo
     }
   } catch (err) {
     console.error("notify: staff change failed", err);
+  }
+}
+
+// ── "montar quartos" applied: the whole delta at once ──────────────────────────
+
+/** One person's slice of the bulk room apply — only the facts that may be texted. */
+export interface RoomsPersonChange {
+  name: string;
+  /** present = the person's own bedroom changed ("after" null = they now have none) */
+  room?: { after: string | null };
+  /** present = the room role changed — the NEW role */
+  role?: RoomRole;
+  /** the kids under their care: names gained / lost, or all kept through a move */
+  kids?: { gained: string[]; lost: string[]; sameAfterMove: boolean };
+}
+
+/** "Maria e João" / "Maria, João +2" — first names of a list of names */
+function namesLabel(names: string[]): string {
+  return peopleLabel(names.map((name) => ({ name })));
+}
+
+/**
+ * The bulk-apply SMS: ONE text per person describing their whole situation
+ * after the change — new room, new role and what happened to their kids —
+ * packed into a single segment. Falls back from names to counts when the
+ * detailed version does not fit.
+ */
+export function composeRoomsAppliedSms(p: RoomsPersonChange): string {
+  const facts: string[] = [];
+  if (p.room) facts.push(p.room.after ? `seu quarto agora é o ${p.room.after}` : "você ficou sem quarto");
+  if (p.role) facts.push(p.role === "caretaker" ? "agora você é LÍDER de crianças no seu quarto" : "agora você é AUXILIAR no seu quarto (sem crianças próprias)");
+  const g = p.kids?.gained ?? [];
+  const l = p.kids?.lost ?? [];
+  const detailed = () => {
+    if (g.length && l.length) return `${namesLabel(g)} ${g.length === 1 ? "está" : "estão"} sob seus cuidados; ${namesLabel(l)} não ${l.length === 1 ? "está mais com você" : "estão mais com você"}`;
+    if (g.length) return `${namesLabel(g)} ${g.length === 1 ? "está" : "estão"} sob seus cuidados`;
+    if (l.length) return `${namesLabel(l)} não ${l.length === 1 ? "está" : "estão"} mais sob seus cuidados`;
+    if (p.kids?.sameAfterMove) return "as crianças são as mesmas";
+    return null;
+  };
+  const counted = () => {
+    if (g.length && l.length) return `você ganhou ${g.length} e perdeu ${l.length} ${g.length + l.length === 1 ? "criança" : "crianças"}`;
+    if (g.length) return `você ganhou ${g.length} ${g.length === 1 ? "criança nova" : "crianças novas"}`;
+    if (l.length) return `você perdeu ${l.length} ${l.length === 1 ? "criança" : "crianças"}`;    if (p.kids?.sameAfterMove) return "as crianças são as mesmas";
+    return null;
+  };
+  const render = (kids: string | null) =>
+    `${config.comtele.prefix}: ${first(p.name)}, ${[...facts, kids].filter(Boolean).join("; ")}. Veja em ${appLink()}`;
+  for (const kids of [detailed(), counted(), null]) {
+    const msg = render(kids);
+    if (msg.length <= SMS_MAX) return msg;
+  }
+  return clip(render(null), SMS_MAX);
+}
+
+/**
+ * Call after POST /api/bedrooms/apply applied the whole "montar quartos"
+ * delta, with the staff + campers lists from BEFORE and AFTER. Texts every
+ * team member concerned — ONE well-thought SMS each (not coalesced: the
+ * apply is a single deliberate action) covering everything that changed for
+ * them: their room, their role and the kids under their care. Same gates as
+ * the individual writes (staffChanges / bedroomChanges, the kids-rooms
+ * draft mutes room and kid texts) and the team access window.
+ */
+/** One team member who WOULD be texted by the apply: the exact SMS they'd get. */
+export interface RoomsAppliedMessage {
+  staffId: string;
+  name: string;
+  text: string;
+}
+
+/**
+ * Pure core of notifyRoomsApplied: given the before/after state + settings +
+ * the rooms, work out exactly who gets an SMS and what it says. Same gates as
+ * the delivery (staffChanges / bedroomChanges, the kids-rooms draft, the team
+ * access window). Used both to SEND (notifyRoomsApplied) and to PREVIEW the
+ * texts on the Concluir dialog, so the two can never drift.
+ */
+export function roomsAppliedMessages(
+  before: { staff: Staff[]; campers: Camper[] },
+  after: { staff: Staff[]; campers: Camper[] },
+  settings: Settings,
+  rooms: Bedroom[],
+): RoomsAppliedMessage[] {
+  const out: RoomsAppliedMessage[] = [];
+  const n = settings.notifications;
+  if (!n.staffChanges && !n.bedroomChanges) return out;
+  const roomName = (id: string | null) => (id ? rooms.find((b) => b._id === id)?.name ?? null : null);
+  const beforeStaff = new Map(before.staff.map((s) => [s._id, s]));
+  const kidsBeforeOf = new Map<string, Camper[]>();
+  for (const k of before.campers) {
+    if (!k.caretakerId) continue;
+    const list = kidsBeforeOf.get(k.caretakerId) ?? [];
+    list.push(k);
+    kidsBeforeOf.set(k.caretakerId, list);
+  }
+  const kidsAfterOf = new Map<string, Camper[]>();
+  for (const k of after.campers) {
+    if (!k.caretakerId) continue;
+    const list = kidsAfterOf.get(k.caretakerId) ?? [];
+    list.push(k);
+    kidsAfterOf.set(k.caretakerId, list);
+  }
+  for (const s of after.staff) {
+    const was = beforeStaff.get(s._id);
+    if (!was || !s.active || !s.phone) continue;
+    const kidsBefore = kidsBeforeOf.get(s._id) ?? [];
+    const kidsAfter = kidsAfterOf.get(s._id) ?? [];
+    const beforeIds = new Set(kidsBefore.map((k) => k._id));
+    const afterIds = new Set(kidsAfter.map((k) => k._id));
+    const gained = kidsAfter.filter((k) => !beforeIds.has(k._id));
+    const lost = kidsBefore.filter((k) => !afterIds.has(k._id));
+    const roomChanged = was.bedroom !== s.bedroom;
+    const roleChanged = was.roomRole !== s.roomRole;
+    if (!roomChanged && !roleChanged && !gained.length && !lost.length) continue;
+    const showRoom = roomChanged && n.staffChanges && !settings.kidsRoomsDraft;
+    const showRole = roleChanged && n.staffChanges;
+    const sameAfterMove = roomChanged && !gained.length && !lost.length && kidsAfter.length > 0;
+    const showKids = n.bedroomChanges && !settings.kidsRoomsDraft && (!!gained.length || !!lost.length || sameAfterMove);
+    if (!showRoom && !showRole && !showKids) continue;
+    if (!staffHasAccess(s._id, settings)) continue;
+    const change: RoomsPersonChange = { name: s.name };
+    if (showRoom) change.room = { after: roomName(s.bedroom) };
+    if (showRole) change.role = s.roomRole;
+    if (showKids) change.kids = { gained: gained.map((k) => k.name), lost: lost.map((k) => k.name), sameAfterMove };
+    out.push({ staffId: s._id, name: s.name, text: composeRoomsAppliedSms(change) });
+  }
+  return out;
+}
+
+export async function notifyRoomsApplied(
+  before: { staff: Staff[]; campers: Camper[] },
+  after: { staff: Staff[]; campers: Camper[] },
+): Promise<void> {
+  try {
+    const settings = await getSettings();
+    const rooms = await listBedrooms();
+    const staffById = new Map(after.staff.map((s) => [s._id, s]));
+    for (const m of roomsAppliedMessages(before, after, settings, rooms)) {
+      const s = staffById.get(m.staffId);
+      if (s) await deliver(s, m.text, "rooms-apply");
+    }
+  } catch (err) {
+    console.error("notify: rooms apply failed", err);
   }
 }
 

@@ -32,11 +32,22 @@ committed YAML or frontend `VITE_*` variables.
 | `COMTELE_PREFIX` | `AcampaKids` |
 | `APP_URL` | `https://ipalpha-kids-camping.kevyn.com.br` (SMS links) |
 | `NOTIFY_COALESCE_SECONDS` | `20` |
+| `IMPORT_ADMIN_PHONE` | Admin E.164 phone notified when an AI import review takes over five minutes |
+| `IMPORT_SUPER_ADMIN_PHONE` | Super-admin E.164 phone for import error alerts; default `+5561985891092` |
+| `SUPER_ADMIN_PHONE` | E.164 phone guaranteed the top-level `admin` login role at API startup |
 | `AI_BASE_URL` | `https://ai-models.kevyn.com.br/v1` |
 | `AI_API_KEY` | Secret `acampa-2025-secrets`, key `ai-api-key`; optional, empty disables AI |
 | `AI_TRANSCRIBE_URL` | `https://whisper.kevyn.com.br/v1`; empty hides voice input |
 | `AI_TRANSCRIBE_MODEL` | `whisper-large-v3-turbo` |
 | `AI_TRANSCRIBE_KEY` | Optional Secret key `ai-transcribe-key`; leave absent if the speech endpoint needs no authentication |
+| `AI_ASSISTANT_BASE_URL` | `https://ai-models.kevyn.com.br/v1` (same gateway as the editor) |
+| `AI_ASSISTANT_API_KEY` | Optional Secret key `ai-assistant-api-key`; leave absent to reuse `AI_API_KEY` |
+| `AI_ASSISTANT_MODEL` | tool-calling model for the written camp assistant (`gpt-6-astra`) |
+| `AI_LIVE_BASE_URL` | `https://api.openai.com/v1` — GPT-Live needs OpenAI directly; the gateway has no `/v1/live` |
+| `AI_LIVE_API_KEY` | Secret `acampa-2025-secrets`, key `ai-live-api-key`; **optional**, empty leaves the assistant drawer text-only |
+| `AI_LIVE_MODEL` | voice model running the spoken conversation (`gpt-live-1`) |
+| `AI_LIVE_VOICE` | voice it answers in (`marin`) |
+| `AI_LIVE_BACKEND_MODEL` | reasoning model GPT-Live delegates to, and the one that reads MongoDB (`gpt-5.6-terra`) |
 | `FACE_SERVICE_URL` | `http://acampa-2025-face:8000` (cluster-internal only). Empty disables the parents' photo search |
 | `FACE_MATCH_THRESHOLD` | `0.22`; low so parents find their kid (a few other children in the results is ok) |
 | `FACE_MIN_DETECTION_SCORE` | `0.4` |
@@ -49,6 +60,22 @@ The frontend needs **no production environment variables**: `/api`, uploaded
 images, and WebSocket traffic use the browser origin, routed by Traefik.
 `VITE_API_URL` is an optional **build-time** override, not an nginx runtime
 variable. `DEV_LAN` is development-only. Docker excludes local `.env` files.
+
+### Rotating or adding a secret key
+
+`acampa-2025-secrets` already exists, so **patch** it — never re-create it from a
+single `--from-literal`, that would drop `jwt-secret` and the rest. Read the value
+from the terminal so it never reaches shell history or the process table:
+
+```bash
+read -rs "?AI_LIVE_API_KEY: " value; echo
+jq -n --arg v "$value" '{stringData:{"ai-live-api-key":$v}}' \
+  | kubectl -n ipalpha-kids patch secret acampa-2025-secrets --type merge --patch-file /dev/stdin
+unset value
+kubectl -n ipalpha-kids rollout restart deploy/acampa-2025-backend
+```
+
+(`read -rs "?prompt"` is zsh; in bash it is `read -rs -p "AI_LIVE_API_KEY: " value`.)
 
 ## Face service (parents' photo search)
 
@@ -79,6 +106,10 @@ variable. `DEV_LAN` is development-only. Docker excludes local `.env` files.
 - Keep one backend replica with `Recreate`: realtime sockets and notification
   timers are process-local. A rollout causes a brief API interruption; clients
   reconnect. MongoDB also uses `Recreate` to avoid two writers on its data files.
+- Run a separate worker Deployment from the same backend image with command
+  `bun run src/worker.ts`. Keep one replica: it claims 15 imported campers at a
+  time, reviews them in parallel, requeues stale claims on startup and sleeps
+  for 10 seconds only when the queue is empty.
 - Startup creates indexes and performs one-off migrations (including transports,
   teams, parent-edit stamps, and admin roster entries). Back up MongoDB before
   publishing. A code rollback does **not** undo these data migrations.

@@ -11,7 +11,11 @@ import type { CamperSex } from "../types";
  * any failure returns `sex: null`.
  */
 
-export const GUESS_SEX_MODEL = { id: "glm-5.3-flash", label: "GLM 5.3 Flash", vendor: "zhipu" as AiVendor };
+export const GUESS_SEX_MODELS = [
+  { id: "glm-5.3-flash", label: "GLM 5.3 Flash", vendor: "zhipu" as AiVendor },
+  { id: "muse-spark-1.3", label: "Muse Spark 1.3", vendor: "meta" as AiVendor },
+] as const;
+export const GUESS_SEX_MODEL = GUESS_SEX_MODELS[0];
 const TIMEOUT_MS = 15_000;
 const NAME_MAX = 100;
 
@@ -47,47 +51,58 @@ export async function guessCamperSex(name: string, signal?: AbortSignal): Promis
   const input = name.trim().slice(0, NAME_MAX);
   if (!input || !config.ai.apiKey) return { sex: null };
 
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
-  const onAbort = () => ctrl.abort();
-  signal?.addEventListener("abort", onAbort);
-  try {
-    const res = await fetch(`${config.ai.baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${config.ai.apiKey}` },
-      body: JSON.stringify({
-        model: GUESS_SEX_MODEL.id,
-        temperature: 0,
-        reasoning_effort: "low",
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: input },
-        ],
-      }),
-      signal: ctrl.signal,
-    });
-    if (!res.ok) return { sex: null };
-    const data = (await res.json().catch(() => null)) as
-      | { choices?: { message?: { content?: string } }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } }
-      | null;
-    const content = (data?.choices?.[0]?.message?.content ?? "").trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-    const start = content.indexOf("{");
-    const end = content.lastIndexOf("}");
-    if (start < 0 || end < start) return { sex: null };
-    let parsed: unknown;
+  for (const model of GUESS_SEX_MODELS) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+    const onAbort = () => ctrl.abort();
+    signal?.addEventListener("abort", onAbort);
     try {
-      parsed = JSON.parse(content.slice(start, end + 1));
-    } catch {
-      return { sex: null };
+      const res = await fetch(`${config.ai.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${config.ai.apiKey}` },
+        body: JSON.stringify({
+          model: model.id,
+          temperature: 0,
+          reasoning_effort: "low",
+          response_format: { type: "json_object" },
+          messages: [
+            { role: "system", content: SYSTEM_PROMPT },
+            { role: "user", content: input },
+          ],
+        }),
+        signal: ctrl.signal,
+      });
+      if (res.status === 429) {
+        console.warn(`guess-sex ${model.id} HTTP 429, trying next model`);
+        continue;
+      }
+      if (!res.ok) {
+        console.warn(`guess-sex ${model.id} HTTP ${res.status}`);
+        continue;
+      }
+      const data = (await res.json().catch(() => null)) as
+        | { choices?: { message?: { content?: string } }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } }
+        | null;
+      const content = (data?.choices?.[0]?.message?.content ?? "").trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+      const start = content.indexOf("{");
+      const end = content.lastIndexOf("}");
+      if (start < 0 || end < start) continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(content.slice(start, end + 1));
+      } catch {
+        continue;
+      }
+      const sex = parsed && typeof parsed === "object" ? parseSex((parsed as Record<string, unknown>).sex) : null;
+      if (!sex) continue;
+      const usage = { promptTokens: data?.usage?.prompt_tokens ?? 0, completionTokens: data?.usage?.completion_tokens ?? 0 };
+      return { sex, model: model.id, vendor: model.vendor, usage };
+    } catch (error) {
+      console.warn(`guess-sex ${model.id} failed: ${error instanceof Error ? error.message : "unknown error"}`);
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
     }
-    const sex = parsed && typeof parsed === "object" ? parseSex((parsed as Record<string, unknown>).sex) : null;
-    const usage = { promptTokens: data?.usage?.prompt_tokens ?? 0, completionTokens: data?.usage?.completion_tokens ?? 0 };
-    return { sex, model: GUESS_SEX_MODEL.id, vendor: GUESS_SEX_MODEL.vendor, usage };
-  } catch {
-    return { sex: null };
-  } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener("abort", onAbort);
   }
+  return { sex: null };
 }

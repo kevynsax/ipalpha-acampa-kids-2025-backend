@@ -13,13 +13,15 @@ import type { Role, SessionUser, User } from "../types";
  *
  *   - PARENT without a single kid enrolled — the enrolment was cancelled, or
  *     the account merely carries a stale `roles: ["parent"]`.
- *   - ADMIN entered as STAFF — an admin's roster record is only their room /
- *     transport / vest, never a team profile (see services/roles.ts).
+ *   - STAFF without an active roster record — including an administrator who
+ *     chose the separate team profile after OTP.
  *
  * Returns true when the session must be dropped (and drops it).
  */
 export async function roleNoLongerValid(role: Role, user: Pick<User, "_id" | "phone" | "roles">): Promise<boolean> {
-  const invalid = role === "parent" ? (await listCampersOfGuardian(user.phone)).length === 0 : role === "staff" && user.roles.includes("admin");
+  const invalid = role === "parent"
+    ? (await listCampersOfGuardian(user.phone)).length === 0
+    : role === "staff" ? !(await findStaffByPhone(user.phone))?.active : false;
   if (!invalid) return false;
   await revokeUserSessions(user._id);
   return true;

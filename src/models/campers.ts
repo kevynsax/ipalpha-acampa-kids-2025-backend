@@ -1,6 +1,6 @@
 import { ObjectId } from "mongodb";
 import { getDb } from "../db";
-import type { Camper, CamperChangeLog, CamperCheckin, CamperSex, CheckinKind, CheckinLog, Medication } from "../types";
+import type { Camper, CamperAiReviewStatus, CamperChangeLog, CamperCheckin, CamperSex, CheckinKind, CheckinLog, Medication } from "../types";
 import { formatCpf } from "../utils";
 
 const LOG_COLLECTION = "checkinLog";
@@ -51,6 +51,11 @@ function toCamper(doc: Record<string, unknown> | null): Camper | null {
     busCheckin: toCheckin(doc.busCheckin),
     busReturnCheckin: toCheckin(doc.busReturnCheckin),
     parentEditedAt: (doc.parentEditedAt as Date) ?? null,
+    importId: (doc.importId as string) ?? null,
+    aiReviewStatus: (["pending", "processing", "reviewed", "error"] as CamperAiReviewStatus[]).includes(doc.aiReviewStatus as CamperAiReviewStatus) ? (doc.aiReviewStatus as CamperAiReviewStatus) : null,
+    aiReviewError: s("aiReviewError"),
+    aiReviewStartedAt: (doc.aiReviewStartedAt as Date) ?? null,
+    aiReviewFinishedAt: (doc.aiReviewFinishedAt as Date) ?? null,
     createdAt: doc.createdAt as Date,
     updatedAt: doc.updatedAt as Date,
   };
@@ -190,11 +195,15 @@ export async function listCheckinLog(camperId?: string): Promise<CheckinLog[]> {
   return docs.map((d) => ({ ...(d as unknown as CheckinLog), _id: (d._id as ObjectId).toString() }));
 }
 
-/** Append-only: one line per parent edit, with the fields that changed (before / after). Also stamps the kid's `parentEditedAt`. */
-export async function logCamperChange(entry: Omit<CamperChangeLog, "_id">): Promise<void> {
+/**
+ * Append-only: one line per edit to a kid (parent or medical team), with the
+ * fields that changed. Parent edits also stamp the kid's `parentEditedAt`
+ * (it drives the 🕓 history button); medical edits leave it alone.
+ */
+export async function logCamperChange(entry: Omit<CamperChangeLog, "_id">, stampParentEditedAt = true): Promise<void> {
   const db = await getDb();
   await db.collection(CHANGE_LOG_COLLECTION).insertOne(entry);
-  await db.collection(COLLECTION).updateOne({ _id: new ObjectId(entry.camperId) }, { $set: { parentEditedAt: entry.at } });
+  if (stampParentEditedAt) await db.collection(COLLECTION).updateOne({ _id: new ObjectId(entry.camperId) }, { $set: { parentEditedAt: entry.at } });
 }
 
 /** Boot: kids edited by a parent BEFORE `parentEditedAt` existed get the stamp from their newest log line. */
@@ -215,6 +224,44 @@ export async function listCamperChanges(camperId: string): Promise<CamperChangeL
   const db = await getDb();
   const docs = await db.collection(CHANGE_LOG_COLLECTION).find({ camperId }).sort({ at: -1 }).toArray();
   return docs.map((d) => ({ ...(d as unknown as CamperChangeLog), _id: (d._id as ObjectId).toString() }));
+}
+
+/** Claims the next imported campers for one worker batch. */
+export async function claimCampersForAiReview(limit = 15): Promise<Camper[]> {
+  const db = await getDb();
+  const out: Camper[] = [];
+  const now = new Date();
+  for (let i = 0; i < limit; i++) {
+    const doc = await db.collection(COLLECTION).findOneAndUpdate(
+      { aiReviewStatus: "pending" },
+      { $set: { aiReviewStatus: "processing", aiReviewStartedAt: now, aiReviewError: "", updatedAt: now } },
+      { sort: { createdAt: 1 }, returnDocument: "after" },
+    );
+    const camper = toCamper(doc as Record<string, unknown> | null);
+    if (!camper) break;
+    out.push(camper);
+  }
+  return out;
+}
+
+/** Requeues jobs left processing after a worker crash / rollout. */
+export async function requeueStaleAiReviews(staleMs = 10 * 60_000): Promise<number> {
+  const db = await getDb();
+  const res = await db.collection(COLLECTION).updateMany(
+    { aiReviewStatus: "processing", aiReviewStartedAt: { $lt: new Date(Date.now() - staleMs) } },
+    { $set: { aiReviewStatus: "pending", aiReviewStartedAt: null, aiReviewError: "", updatedAt: new Date() } },
+  );
+  return res.modifiedCount;
+}
+
+export async function finishCamperAiReview(id: string, patch: Partial<CamperData>, error?: string): Promise<Camper | null> {
+  const now = new Date();
+  return updateCamper(id, {
+    ...patch,
+    aiReviewStatus: error ? "error" : "reviewed",
+    aiReviewError: error ?? "",
+    aiReviewFinishedAt: now,
+  });
 }
 
 /** Every kid whose guardian phone is `phone` (a parent may have several kids enrolled). */
@@ -263,5 +310,7 @@ export async function ensureCamperIndexes(): Promise<void> {
   await db.collection(LOG_COLLECTION).createIndex({ camperId: 1, at: -1 });
   await db.collection(LOG_COLLECTION).createIndex({ at: -1 });
   await db.collection(COLLECTION).createIndex({ guardianPhone: 1 }, { sparse: true });
+  await db.collection(COLLECTION).createIndex({ aiReviewStatus: 1, createdAt: 1 });
+  await db.collection(COLLECTION).createIndex({ importId: 1, aiReviewStatus: 1 });
   await db.collection(CHANGE_LOG_COLLECTION).createIndex({ camperId: 1, at: -1 });
 }

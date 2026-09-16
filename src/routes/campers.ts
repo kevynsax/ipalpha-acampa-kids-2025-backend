@@ -7,10 +7,10 @@ import { findBedroomById } from "../models/bedrooms";
 import { insertCamperLookup } from "../models/camperLookups";
 import { CHECKIN_FIELD, deleteCamper, findCamperById, insertCamper, listCamperChanges, listCampers, listCheckinLog, logCamperChange, logCheckin, setCamperCheckin, updateCamper, type CamperData } from "../models/campers";
 import { FOREIGN_LOOKUP_ALERT_AT, FOREIGN_LOOKUP_BLOCK_AT, findStaffById, findStaffByPhone, listStaff, markForeignLookupAlerted, recordForeignLookup } from "../models/staff";
-import { CAMPER_CATEGORY_KEYS, PARENT_EDITABLE_FIELDS, type Camper, type CamperChangeLog, type CheckinKind, type ParentEditableField, type Role, type SessionUser } from "../types";
+import { CAMPER_CATEGORY_KEYS, MEDICAL_EDITABLE_FIELDS, PARENT_EDITABLE_FIELDS, type Camper, type CamperChangeLog, type CheckinKind, type MedicalEditableField, type ParentEditableField, type Role, type SessionUser } from "../types";
 import { formatCpf, normalizeBrazilPhone, titleCaseName } from "../utils";
 import { bedroomFullMessage, isInvalid, parseBedroom, parseMedications, parseMulti, parseSingle, parseTeam, parseText, parseTransport } from "./_validate";
-import { adminRosterBlock, serializeStaffList } from "./staff";
+import { serializeStaffList } from "./staff";
 import { camperVisibility, canParentEdit, canRunBusCheckin, canRunCheckin, resolveScope, type Scope } from "../services/scope";
 import { campInProgress, campPeriod } from "../services/camp";
 import { resolveCamperSex } from "../services/camperSex";
@@ -78,6 +78,11 @@ export function serializeCamper(k: Camper) {
     busCheckin: k.busCheckin,
     busReturnCheckin: k.busReturnCheckin,
     parentEditedAt: k.parentEditedAt,
+    importId: k.importId,
+    aiReviewStatus: k.aiReviewStatus,
+    aiReviewError: k.aiReviewError,
+    aiReviewStartedAt: k.aiReviewStartedAt,
+    aiReviewFinishedAt: k.aiReviewFinishedAt,
     createdAt: k.createdAt,
     updatedAt: k.updatedAt,
   };
@@ -137,6 +142,11 @@ export function serializeCamperFor(k: Camper, scope: Scope) {
     healthNotes: "",
     generalNotes: "",
     bedroomPreference: "",
+    importId: null,
+    aiReviewStatus: null,
+    aiReviewError: "",
+    aiReviewStartedAt: null,
+    aiReviewFinishedAt: null,
   };
 }
 
@@ -278,9 +288,6 @@ async function caretakerConsistent(bedroom: string | null, caretakerId: string |
   if (!caretakerId) return null;
   const s = await findStaffById(caretakerId);
   if (!s) return "Líder não encontrado.";
-  // an admin is on the roster only for the room / transport / vest: never a líder
-  const adminBlocked = adminRosterBlock(s, { roomRole: "caretaker" });
-  if (adminBlocked) return adminBlocked;
   if (!bedroom || s.bedroom !== bedroom) return `${s.name.split(" ")[0]} não dorme neste quarto.`;
   if (s.roomRole !== "caretaker") return `${s.name.split(" ")[0]} é auxiliar neste quarto, não líder.`;
   return null;
@@ -530,6 +537,51 @@ campers.put("/:id/parent", requireRole("parent"), async (c) => {
   await logCamperChange(entry);
   publish("campers");
   void notifyParentEdit(updated, entry);
+  return c.json({ camper: serializeCamperFor(updated, scope), changed: true });
+});
+
+// ── medical edits: the MEDICAL team (and the organization) may edit the health block of any kid ──
+
+/**
+ * PUT /api/campers/:id/health — the medical team edits the HEALTH block of a
+ * kid: allergies, drug allergies, chronic conditions, neurodivergence,
+ * medicines (the prescription the checklist ticks), food restrictions, medical
+ * notes, weight and the convênio. Only the fields in MEDICAL_EDITABLE_FIELDS
+ * are accepted; everything else in the body is ignored. Every real change is
+ * validated (same rules as the admin form), written to the kid's change
+ * history with who did it and pushed live to every device.
+ */
+campers.put("/:id/health", requireRole("admin", "staff", "health_staff"), async (c) => {
+  const [existing, scope] = await Promise.all([findCamperById(c.req.param("id")), resolveScope(c.get("user"))]);
+  // not the medical team (or an unknown kid) → same answer as "does not exist" (no probing)
+  if (!existing || !(scope.all || scope.medical)) return fail(c, "CAMPER_NOT_FOUND", "Acampante não encontrado.", 404);
+
+  const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+  if (!body) return fail(c, "BODY_INVALID", "Corpo da requisição inválido.");
+  const allowed: Record<string, unknown> = {};
+  for (const f of MEDICAL_EDITABLE_FIELDS) if (body[f] !== undefined) allowed[f] = body[f];
+  if (Object.keys(allowed).length === 0) return fail(c, "NOTHING_TO_UPDATE", "Nada para atualizar.");
+
+  const result = await buildPatch(allowed, true);
+  if (!("patch" in result)) return fail(c, result.code, result.message);
+
+  const changes: CamperChangeLog["changes"] = [];
+  for (const f of MEDICAL_EDITABLE_FIELDS) {
+    if (!(f in result.patch)) continue;
+    const before = existing[f];
+    const after = (result.patch as Record<MedicalEditableField, unknown>)[f];
+    if (!sameValue(before, after)) changes.push({ field: f, before, after });
+  }
+  if (changes.length === 0) return c.json({ camper: serializeCamperFor(existing, scope), changed: false });
+
+  const updated = (await updateCamper(existing._id, result.patch))!;
+  const user = c.get("user");
+  // every field here is medical, and it is NOT a parent edit: the history keeps it, `parentEditedAt` stays as the parents' own
+  await logCamperChange(
+    { camperId: existing._id, camperName: existing.name, at: new Date(), byUserId: user.id, byName: user.name, byRole: user.activeRole, medical: true, changes },
+    false,
+  );
+  publish("campers");
   return c.json({ camper: serializeCamperFor(updated, scope), changed: true });
 });
 

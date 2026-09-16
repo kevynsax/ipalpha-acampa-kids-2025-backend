@@ -57,6 +57,9 @@ export interface CategoryOption {
   order: number;
   /** inactive options are hidden from forms but kept for existing records */
   active: boolean;
+  /** import dry-run option; hidden until the import is applied */
+  draft?: boolean;
+  importId?: string;
 }
 
 /**
@@ -116,6 +119,9 @@ export function busColorName(hex: string | null | undefined): string | null {
  */
 export interface Transport {
   _id: string;
+  /** import dry-run document; normal lists hide it until apply */
+  draft?: boolean;
+  importId?: string;
   kind: TransportKind;
   /** cars only: free-text name ("Carro do João"); undefined for buses */
   name?: string;
@@ -123,6 +129,8 @@ export interface Transport {
   color?: string;
   /** buses only: the vehicle number ("1", "2"…); undefined for cars */
   number?: string;
+  /** buses only: how many seats the bus has; undefined when unknown / cars */
+  capacity?: number;
   order: number;
   createdAt: Date;
   updatedAt: Date;
@@ -140,6 +148,9 @@ export type BedroomGroup = (typeof BEDROOM_GROUPS)[number];
  */
 export interface Bedroom {
   _id: string;
+  /** import dry-run document; normal lists hide it until apply */
+  draft?: boolean;
+  importId?: string;
   /** door label, e.g. "103" */
   name: string;
   group: BedroomGroup;
@@ -190,6 +201,14 @@ export const MEDICATION_TIMES_MAX = 12;
 
 export interface Staff {
   _id: string;
+  /** leader created during an import review; hidden until apply */
+  draft?: boolean;
+  importId?: string;
+  /** bulk AI health-note triage for spreadsheet imports */
+  aiReviewStatus?: CamperAiReviewStatus | null;
+  aiReviewError?: string;
+  aiReviewStartedAt?: Date | null;
+  aiReviewFinishedAt?: Date | null;
   name: string;
   /** "F" | "M" | null — from the room (girls/boys) or a GLM guess on the name; never collected on the form */
   sex: CamperSex | null;
@@ -256,6 +275,9 @@ export interface Staff {
  */
 export interface Team {
   _id: string;
+  /** import dry-run document; normal lists hide it until apply */
+  draft?: boolean;
+  importId?: string;
   name: string;
   /** CSS colour (#rrggbb) shown on the scoreboard and tags */
   color: string;
@@ -359,11 +381,72 @@ export interface Camper {
   busReturnCheckin: CamperCheckin | null;
   /** when a PARENT last edited the "Pontos de atenção" (see CamperChangeLog) — null until they do */
   parentEditedAt: Date | null;
+  /** spreadsheet import process that created this camper; null for regular records */
+  importId: string | null;
+  /** bulk AI observation triage, shown as a subtle pulse while pending */
+  aiReviewStatus: CamperAiReviewStatus | null;
+  aiReviewError: string;
+  aiReviewStartedAt: Date | null;
+  aiReviewFinishedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
 
 export type CamperSex = "F" | "M";
+
+/** Background AI triage state for campers created by a spreadsheet import. */
+export type CamperAiReviewStatus = "pending" | "processing" | "reviewed" | "error";
+
+/** One reusable raw spreadsheet value → resolved system value mapping. */
+export interface CamperImportDictionaryEntry {
+  field: string;
+  raw: string;
+  normalized: string;
+  value: unknown;
+  label: string;
+  draft: boolean;
+  kind: "column" | "text" | "boolean" | "date" | "bedroom" | "transportation" | "team" | "staff" | "category";
+}
+
+export type CamperImportStatus = "needs_mapping" | "analyzing" | "panic" | "review" | "ready" | "importing" | "completed" | "error";
+export type CamperImportReviewKind = "leader" | "date" | "guardianName" | "phone" | "cpf" | "email";
+
+export interface CamperImportReviewItem {
+  id: string;
+  row: number;
+  kind: CamperImportReviewKind;
+  field: string;
+  kidName: string;
+  guardianName: string;
+  birthDate: string;
+  age: number | null;
+  emergencyContact: string;
+  original: string;
+  value: string;
+  skip: boolean;
+  resolved: boolean;
+  /** A grouped review (notably one missing leader) can affect several spreadsheet rows. */
+  affectedRows?: number[];
+  options?: { id: string; label: string }[];
+}
+
+export type StaffImportReviewKind = "phone" | "duplicate" | "bedroom" | "roomRole" | "inactive";
+export interface StaffImportReviewItem {
+  id: string;
+  row: number;
+  kind: StaffImportReviewKind;
+  field: string;
+  memberName: string;
+  original: string;
+  value: string;
+  skip: boolean;
+  resolved: boolean;
+  context?: string;
+  existingId?: string;
+  existingName?: string;
+  existingPhone?: string | null;
+  options?: { id: string; label: string }[];
+}
 
 export type RoomRole = "caretaker" | "helper";
 export const ROOM_ROLES: readonly RoomRole[] = ["caretaker", "helper"];
@@ -461,7 +544,9 @@ export const MEDICATION_SOS_SLOT = "sos";
  */
 export const PARENT_EDITABLE_FIELDS = ["allergies", "drugAllergies", "healthIssues", "medications", "foodRestrictions", "healthNotes", "weightKg", "insurance", "insuranceCard", "generalNotes"] as const;
 export type ParentEditableField = (typeof PARENT_EDITABLE_FIELDS)[number];
-export const PARENT_FIELD_LABEL: Record<ParentEditableField, string> = {
+/** a field that can appear in a kid's change log (parent or medical edits) */
+export type CamperChangeField = ParentEditableField | MedicalEditableField;
+export const PARENT_FIELD_LABEL: Record<CamperChangeField, string> = {
   allergies: "alergias",
   drugAllergies: "alergia a medicamentos",
   healthIssues: "condição de saúde",
@@ -472,9 +557,19 @@ export const PARENT_FIELD_LABEL: Record<ParentEditableField, string> = {
   insurance: "convênio",
   insuranceCard: "carteirinha do convênio",
   generalNotes: "observações",
+  neurodivergent: "neurodivergente",
 };
 
-/** One edit a parent made to their kid's record — permanent history, read by the admin. */
+/**
+ * Fields the MEDICAL team (and the organization) may edit on any kid
+ * (PUT /api/campers/:id/health): the health block the parents fill in, plus
+ * `neurodivergent` (a diagnosis only admin + medical see anyway). Every
+ * change is logged in the kid's change history with who did it.
+ */
+export const MEDICAL_EDITABLE_FIELDS = ["allergies", "drugAllergies", "healthIssues", "neurodivergent", "medications", "foodRestrictions", "healthNotes", "weightKg", "insurance", "insuranceCard"] as const;
+export type MedicalEditableField = (typeof MEDICAL_EDITABLE_FIELDS)[number];
+
+/** One edit to a kid's record (parent or medical team) — permanent history, read by the admin. */
 export interface CamperChangeLog {
   _id: string;
   camperId: string;
@@ -485,7 +580,7 @@ export interface CamperChangeLog {
   byRole: Role;
   /** true when at least one MEDICAL field changed (anything but `generalNotes`) */
   medical: boolean;
-  changes: { field: ParentEditableField; before: unknown; after: unknown }[];
+  changes: { field: CamperChangeField; before: unknown; after: unknown }[];
 }
 
 /** The kids' roll calls: church arrival, bus to camp, and bus back to church. */
@@ -894,4 +989,78 @@ export interface Session {
   role: Role;
   createdAt: Date;
   expiresAt: Date;
+}
+
+// ── Seeds (super-admin maintained templates the setup wizard imports) ──────
+
+/** One room of a known camping place, as the wizard seeds it. */
+export interface SeedPlaceRoom {
+  name: string;
+  group: "girls" | "boys" | "staff";
+  bunkBeds: number;
+  singleBeds: number;
+}
+
+/** A camping place the church already uses: rooms + beds, address, location. */
+export interface SeedPlace {
+  id: string;
+  name: string;
+  address: string;
+  lat: number | null;
+  lng: number | null;
+  notes?: string;
+  rooms: SeedPlaceRoom[];
+}
+
+/** A função template the schedule prefill creates when needed. */
+export interface SeedRole {
+  key: string;
+  name: string;
+  emoji: string;
+  forRoomRoles: RoomRole[];
+  hasDetail?: boolean;
+  detailFromTeam?: boolean;
+  detailPlaceholder?: string;
+}
+
+/** An event template; `day` is relative (1 = departure friday). */
+export interface SeedEvent {
+  day: number;
+  start: string;
+  end: string | null;
+  title: string;
+  emoji: string;
+  roles: string[];
+  visibleToParents?: boolean;
+  notes?: string;
+}
+
+/** One bus of the fleet the wizard seeds on an empty camp. */
+export interface SeedBus {
+  number: string;
+  color: string;
+  capacity: number | null;
+}
+
+/** The two starter documents the wizard writes. */
+export interface SeedDocs {
+  prepTitle: string;
+  prepEmoji: string;
+  prepContent: string;
+  addressTitle: string;
+  addressEmoji: string;
+}
+
+/**
+ * Everything the setup wizard imports, maintained by the SUPER ADMIN in
+ * ⚙️ → Sementes. Stored as ONE document; `null` sections anywhere mean "use
+ * the app's built-in defaults" (which is also what Restaurar returns to).
+ */
+export interface Seeds {
+  places: SeedPlace[];
+  roles: SeedRole[];
+  events: SeedEvent[];
+  fleet: SeedBus[];
+  docs: SeedDocs;
+  updatedAt: Date | null;
 }

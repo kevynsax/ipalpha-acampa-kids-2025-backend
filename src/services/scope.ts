@@ -62,10 +62,11 @@ import { autoRoleCovers } from "./schedule";
  *                  resolved and shown. Everything else: as any team member.
  *   medical      → a staff member the admin listed as MEDICAL team (no time
  *                  window): every camper in FULL (health included), every
- *                  bedroom — hence every vehicle — the whole time. Read-only:
- *                  never writes campers, rooms or check-ins. Occurrences: only
- *                  the ones the medical team registered. Staff / programme: as
- *                  any team member.
+ *                  bedroom — hence every vehicle — the whole time. They may
+ *                  edit the kids' HEALTH block (PUT /api/campers/:id/health),
+ *                  never rooms or check-ins. Occurrences: only the ones the
+ *                  medical team registered. Staff / programme: as any team
+ *                  member.
  *   vest helper  → a staff member the admin listed as a VEST (colete) helper,
  *                  until VEST_GRACE_DAYS after the camp ends (they collect the
  *                  vests back in the days after): every staff member as NAME + PHONE +
@@ -77,12 +78,15 @@ import { autoRoleCovers } from "./schedule";
  *   publishes them, and sees the drafts on the Fotos tab. Everything else:
  *   as any team member.
 *   parent       → their OWN kids (matched by the guardian phone), in full,
- *                  and the kids' rooms. WHILE THE PARENTS' WINDOW is open
- *                  (from the kids' check-in start to the end of the last
- *                  event — see services/camp.ts#parentWindow) additionally
- *                  the team members of those rooms and the "important
- *                  contacts" (Settings → Contatos) as NAME + PHONE records.
- *                  Outside the window: no staff at all. The programme: events
+ *                  and the kids' rooms. The "important contacts"
+ *                  (Settings → Contatos) as NAME + PHONE records the WHOLE
+ *                  time the parent may use the app (their access window —
+ *                  they are the numbers to call when something happens).
+ *                  WHILE THE PARENTS' WINDOW is open (from the kids' check-in
+ *                  start to the end of the last event — see
+ *                  services/camp.ts#parentWindow) additionally the team
+ *                  members of their kids' rooms, same NAME + PHONE shape.
+ *                  Outside it: the contacts only. The programme: events
  *                  marked visible to parents, without roles or assignments.
  *                  They may edit their kid's health block
  *                  (PUT /api/campers/:id/parent).
@@ -124,7 +128,7 @@ export type Scope =
       gameOrganizer: boolean;
       /** true when this person is a listed SCORE helper (no window): bulk QR scan by event only — no per-team points, no zero, no organizer rights */
       scoreHelper: boolean;
-      /** true when this person is on the MEDICAL team (no window): every camper + bedroom in full, read-only */
+      /** true when this person is on the MEDICAL team (no window): every camper + bedroom in full, and may edit the kids' health block */
       medical: boolean;
       /** true when this person hands out / takes back the team VESTS — listed AND before / during / up to VEST_GRACE_DAYS after the camp: every staff member as name + phone */
       vestHelper: boolean;
@@ -140,15 +144,15 @@ export type Scope =
       parentKids: string[];
       /** PARENT session: the rooms of those kids */
       parentBedrooms: string[];
-      /** PARENT session: true while the parents' window is open — room staff + important contacts are sent (name + phone) */
-      parentContacts: boolean;
-      /** PARENT session: staff ids listed as important contacts (Settings → Contatos), inside the window */
+      /** PARENT session: true while the parents' window is open — the team of their kids' ROOMS is sent (name + phone) */
+      parentRoomStaff: boolean;
+      /** PARENT session: staff ids listed as important contacts (Settings → Contatos) — sent the whole time the parent has access */
       parentContactIds: string[];
       /** PARENT session: the Preparação items they ticked as done ("section:<id>" — stored on their user record) */
       parentPrepDone: string[];
     };
 
-export const NO_ACCESS: Extract<Scope, { all: false }> = { all: false, staffId: null, bedroom: null, checkinHelper: false, busHelperVehicle: null, busOutboundHelper: false, busReturnHelper: false, organizer: false, gameOrganizer: false, scoreHelper: false, medical: false, vestHelper: false, photographer: false, kidsRoomsDraft: false, campActive: false, roomRole: "helper", parentKids: [], parentBedrooms: [], parentContacts: false, parentContactIds: [], parentPrepDone: [] };
+export const NO_ACCESS: Extract<Scope, { all: false }> = { all: false, staffId: null, bedroom: null, checkinHelper: false, busHelperVehicle: null, busOutboundHelper: false, busReturnHelper: false, organizer: false, gameOrganizer: false, scoreHelper: false, medical: false, vestHelper: false, photographer: false, kidsRoomsDraft: false, campActive: false, roomRole: "helper", parentKids: [], parentBedrooms: [], parentRoomStaff: false, parentContactIds: [], parentPrepDone: [] };
 
 /** Is this a PARENT session with at least one kid enrolled? */
 export function isParent(scope: Scope): boolean {
@@ -180,7 +184,11 @@ export function staffHasAccess(staffId: string, s: Settings, now = new Date()): 
   return isPrivilegedStaff(staffId, s) || staffAccessOpen(s.staffAccessWindow, now);
 }
 
-/** The parent's scope: their kids (by guardian phone), the kids' rooms and — inside the parents' window — the contacts. */
+/**
+ * The parent's scope: their kids (by guardian phone), the kids' rooms, the
+ * important contacts (always — they are the numbers to call) and, inside the
+ * parents' window, the team of those rooms.
+ */
 async function resolveParentScope(phone: string): Promise<Scope> {
   const [kids, settings, events, user] = await Promise.all([listCampersOfGuardian(phone), getSettings(), listEvents(), findByPhone(phone)]);
   if (kids.length === 0) return NO_ACCESS;
@@ -190,8 +198,8 @@ async function resolveParentScope(phone: string): Promise<Scope> {
     kidsRoomsDraft: settings.kidsRoomsDraft,
     parentKids: kids.map((k) => k._id),
     parentBedrooms: settings.kidsRoomsDraft ? [] : [...new Set(kids.map((k) => k.bedroom).filter((b): b is string => !!b))],
-    parentContacts: open,
-    parentContactIds: open ? settings.parentContacts.map((p) => p.staffId) : [],
+    parentRoomStaff: open,
+    parentContactIds: settings.parentContacts.map((p) => p.staffId),
     parentPrepDone: user?.prepDone ?? [],
   };
 }
@@ -354,10 +362,11 @@ export type StaffVisibility = "full" | "contact" | "none";
 
 export function staffVisibility(scope: Scope, s: Pick<Staff, "_id" | "bedroom" | "active">): StaffVisibility {
   if (scope.all || scope.organizer) return "full";
-  // a parent, inside the parents' window: the team of their kids' rooms + the important contacts, name + phone only
+  // a parent: the important contacts the whole time; the team of their kids' rooms only inside the parents' window. Name + phone either way.
   if (isParent(scope)) {
-    if (!scope.parentContacts || !s.active) return "none";
-    return scope.parentContactIds.includes(s._id) || (s.bedroom !== null && scope.parentBedrooms.includes(s.bedroom)) ? "contact" : "none";
+    if (!s.active) return "none";
+    if (scope.parentContactIds.includes(s._id)) return "contact";
+    return scope.parentRoomStaff && s.bedroom !== null && scope.parentBedrooms.includes(s.bedroom) ? "contact" : "none";
   }
   if (scope.staffId === s._id) return "full";
   // the vest helper reaches everyone by phone, and nothing more

@@ -84,7 +84,7 @@ export function serializeCategory(cat: Category) {
     appliesTo: cat.appliesTo,
     selection: cat.selection,
     order: cat.order,
-    options: cat.options.map((o) => ({ id: o.id, label: o.label, order: o.order, active: o.active })),
+    options: cat.options.map((o) => ({ id: o.id, label: o.label, order: o.order, active: o.active, draft: o.draft === true })),
     createdAt: cat.createdAt,
     updatedAt: cat.updatedAt,
   };
@@ -120,7 +120,7 @@ categories.get("/", async (c) => {
   return c.json({
     categories: list.map((cat) => {
       const s = serializeCategory(cat);
-      return isAdmin ? s : { ...s, options: s.options.filter((o) => o.active) };
+      return isAdmin ? { ...s, options: s.options.filter((o) => !o.draft) } : { ...s, options: s.options.filter((o) => o.active && !o.draft) };
     }),
   });
 });
@@ -128,7 +128,8 @@ categories.get("/", async (c) => {
 categories.get("/:id", async (c) => {
   const cat = await findCategoryById(c.req.param("id"));
   if (!cat) return fail(c, "CATEGORY_NOT_FOUND", "Categoria não encontrada.", 404);
-  return c.json({ category: serializeCategory(cat) });
+  const serialized = serializeCategory(cat);
+  return c.json({ category: { ...serialized, options: serialized.options.filter((o) => !o.draft) } });
 });
 
 // ── write (admin only) ──────────────────────────────────────────────────────

@@ -96,7 +96,7 @@ export async function loadCollections(viewer: Viewer, names: readonly Collection
           const isAdmin = role === "admin";
           out.categories = (await listCategories()).map((cat) => {
             const s = serializeCategory(cat);
-            return isAdmin ? s : { ...s, options: s.options.filter((o) => o.active) };
+            return isAdmin ? { ...s, options: s.options.filter((o) => !o.draft) } : { ...s, options: s.options.filter((o) => o.active && !o.draft) };
           });
           break;
         }
@@ -135,9 +135,9 @@ export async function loadCollections(viewer: Viewer, names: readonly Collection
           out.gallery = canManageGallery(scope) || (await getSettings()).galleryPublished ? (await listGalleryPhotos()).map(serializePhoto) : [];
           break;
         case "settings":
-          // offenders list (out-of-scope emergency QR) is manager-only
+          // offenders list (out-of-scope emergency QR) + super-admin flag are manager-only
           out.settings = scope.all
-            ? await serializeSettingsForManager(await getSettings())
+            ? await serializeSettingsForManager(await getSettings(), viewer.phone)
             : await serializeSettings(await getSettings());
           break;
       }

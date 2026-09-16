@@ -10,19 +10,22 @@ function toTransport(doc: Record<string, unknown> | null): Transport | null {
   if (!doc) return null;
   return {
     _id: (doc._id as ObjectId).toString(),
+    draft: doc.draft === true,
+    importId: (doc.importId as string) ?? undefined,
     kind: (doc.kind as TransportKind) ?? "bus",
     name: (doc.name as string) ?? undefined,
     color: (doc.color as string) ?? undefined,
     number: (doc.number as string) ?? undefined,
+    capacity: (doc.capacity as number) ?? undefined,
     order: (doc.order as number) ?? 0,
     createdAt: doc.createdAt as Date,
     updatedAt: doc.updatedAt as Date,
   };
 }
 
-export async function listTransports(): Promise<Transport[]> {
+export async function listTransports(includeDraft = false): Promise<Transport[]> {
   const db = await getDb();
-  const docs = await db.collection(COLLECTION).find().sort({ order: 1 }).toArray();
+  const docs = await db.collection(COLLECTION).find(includeDraft ? {} : { draft: { $ne: true } }).sort({ order: 1 }).toArray();
   return docs.map((d) => toTransport(d as Record<string, unknown>)!);
 }
 

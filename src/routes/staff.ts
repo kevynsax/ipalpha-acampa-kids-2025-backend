@@ -51,20 +51,6 @@ function fail(c: Context, code: string, message: string, status: 400 | 404 | 409
   return c.json({ error: { code, message } }, status);
 }
 
-/**
- * An ADMIN's roster record exists only so they have a room, a transport and a
- * vest like everyone else — it is not a team profile. It never becomes a
- * líder, never receives kids and never joins a time. Returns the error
- * message for the attempted change, or null.
- */
-export function adminRosterBlock(s: Pick<Staff, "name" | "phone">, patch: { roomRole?: RoomRole; team?: string | null }): string | null {
-  if (!isAdminPhone(s.phone)) return null;
-  const first = s.name.split(" ")[0];
-  if (patch.roomRole === "caretaker") return `${first} é admin do app: não pode ser líder de quarto nem receber crianças.`;
-  if (patch.team) return `${first} é admin do app: não entra em um time.`;
-  return null;
-}
-
 /** Full record — admin only (or the person themself). */
 export function serializeStaff(s: Staff) {
   return serialize(s);
@@ -151,6 +137,10 @@ function serialize(s: Staff) {
     healthIssues: s.healthIssues,
     medications: s.medications,
     healthNotes: s.healthNotes,
+    aiReviewStatus: s.aiReviewStatus ?? null,
+    aiReviewError: s.aiReviewError ?? "",
+    aiReviewStartedAt: s.aiReviewStartedAt ?? null,
+    aiReviewFinishedAt: s.aiReviewFinishedAt ?? null,
     checkin: s.checkin,
     vest: s.vest,
     prepDone: s.prepDone,
@@ -185,7 +175,9 @@ async function buildPatch(
   if (has("phone")) {
     const raw = body.phone;
     if (raw === undefined || raw === null || (typeof raw === "string" && !raw.trim())) {
-      patch.phone = null; // allowed: person hasn't registered a phone yet
+      // the phone is the login: the form never creates or leaves a member without one.
+      // (the importer writes straight to the model, so old records with no phone stay valid until edited)
+      return { code: "PHONE_REQUIRED", message: "Informe o celular: é por ele que a pessoa entra no app." };
     } else {
       const phone = typeof raw === "string" ? normalizeBrazilPhone(raw) : null;
       if (!phone) return { code: "PHONE_INVALID", message: "Informe um celular brasileiro válido com DDD." };
@@ -575,8 +567,6 @@ staff.put("/:id", async (c) => {
   if (isAdminPhone(existing.phone)) {
     if (result.patch.phone !== undefined && result.patch.phone !== existing.phone) return fail(c, "ADMIN_LOCKED", "O celular de um admin não pode ser alterado por aqui.", 409);
     if (result.patch.active === false) return fail(c, "ADMIN_LOCKED", "Um admin não pode ser desativado.", 409);
-    const blocked = adminRosterBlock(existing, result.patch);
-    if (blocked) return fail(c, "ADMIN_LOCKED", blocked, 409);
   }
 
   if (result.patch.phone && result.patch.phone !== existing.phone) {
@@ -650,17 +640,6 @@ staff.post("/:id/move", async (c) => {
   const myKids = await listCampers({ caretakerId: me._id });
   const other = typeof body.swapWith === "string" ? await findStaffById(body.swapWith) : typeof body.assignTo === "string" ? await findStaffById(body.assignTo) : null;
   const touched = new Set<string>();
-
-  // an admin's roster record is not a team profile: it never takes kids over
-  // ("bring" / "swap" would make the person a líder; "swap" / "assign" the other one)
-  for (const [who, becomes] of [
-    [me, kids === "bring" || kids === "swap"],
-    [other, kids === "swap" || kids === "assign"],
-  ] as const) {
-    if (!who || !becomes) continue;
-    const blocked = adminRosterBlock(who, { roomRole: "caretaker" });
-    if (blocked) return fail(c, "ADMIN_LOCKED", blocked, 409);
-  }
 
   if (kids === "swap") {
     if (!other || !target || other.bedroom !== target) return fail(c, "SWAP_INVALID", "Escolha alguém que durma no quarto de destino para trocar.", 409);

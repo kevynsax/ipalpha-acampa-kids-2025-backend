@@ -6,8 +6,8 @@ export interface AiUsageEntry {
   at: Date;
   vendor: string;
   model: string;
-  /** "edit" (assistant panel), "suggest" (title/emoji), "image" (generated illustration), "camper_notes" (sorting a kid's observations), "dedup_field" (background repeat clean-up) or "guess_sex" (infer a kid's sex from the name) */
-  kind: "edit" | "suggest" | "image" | "camper_notes" | "dedup_field" | "guess_sex";
+  /** AI feature that made the request, including the read-only admin/organizer data assistant. */
+  kind: "edit" | "suggest" | "image" | "camper_notes" | "dedup_field" | "guess_sex" | "assistant_chat" | "assistant_voice";
   userId: string;
   promptTokens: number;
   completionTokens: number;
@@ -22,6 +22,13 @@ export interface AiVendorUsage {
   completionTokens: number;
   lastAt: string | null;
   models: { model: string; calls: number; promptTokens: number; completionTokens: number }[];
+}
+
+export interface AiKindUsage {
+  kind: string;
+  calls: number;
+  promptTokens: number;
+  completionTokens: number;
 }
 
 export async function recordAiUsage(entry: AiUsageEntry): Promise<void> {
@@ -63,4 +70,24 @@ export async function aiUsageByVendor(): Promise<AiVendorUsage[]> {
   return [...byVendor.values()]
     .map((v) => ({ ...v, models: v.models.sort((a, b) => b.calls - a.calls) }))
     .sort((a, b) => b.calls - a.calls);
+}
+
+/** Totals per kind of request (assistant chat, suggestions, illustrations…), most used first. */
+export async function aiUsageByKind(): Promise<AiKindUsage[]> {
+  const db = await getDb();
+  const rows = (await db
+    .collection(COLLECTION)
+    .aggregate([
+      {
+        $group: {
+          _id: "$kind",
+          calls: { $sum: 1 },
+          promptTokens: { $sum: "$promptTokens" },
+          completionTokens: { $sum: "$completionTokens" },
+        },
+      },
+      { $sort: { calls: -1 } },
+    ])
+    .toArray()) as { _id: string; calls: number; promptTokens: number; completionTokens: number }[];
+  return rows.map((r) => ({ kind: r._id, calls: r.calls, promptTokens: r.promptTokens, completionTokens: r.completionTokens }));
 }

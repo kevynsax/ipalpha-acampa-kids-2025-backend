@@ -1,4 +1,5 @@
 import { config } from "../config";
+import { recordSms } from "../models/smsUsage";
 import { getSettings } from "../models/settings";
 import { toComtelePhone } from "../utils";
 
@@ -54,7 +55,11 @@ export async function comteleSendSms(
       | { Success?: boolean; Message?: string }
       | null;
 
-    if (res.ok && data?.Success) return { ok: true };
+    if (res.ok && data?.Success) {
+      // every real send is billed ≈ R$ 0,095 — the counter on the "Sobre" page
+      void recordSms({ at: new Date(), phone: phoneE164, chars: content.length });
+      return { ok: true };
+    }
     return { ok: false, message: data?.Message ?? `Comtele HTTP ${res.status}` };
   } catch (err) {
     return { ok: false, message: err instanceof Error ? err.message : "Comtele request failed" };

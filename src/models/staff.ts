@@ -2,7 +2,7 @@ import { ObjectId } from "mongodb";
 import { getDb } from "../db";
 import type { CamperCheckin, CamperSex, Staff, VestStatus } from "../types";
 import { ROOM_ROLES } from "../types";
-import { reassignCampers, toCheckin, toMedications } from "./campers";
+import { toCheckin, toMedications } from "./campers";
 
 const COLLECTION = "staff";
 
@@ -10,6 +10,12 @@ function toStaff(doc: Record<string, unknown> | null): Staff | null {
   if (!doc) return null;
   return {
     _id: (doc._id as ObjectId).toString(),
+    draft: doc.draft === true,
+    importId: (doc.importId as string) ?? undefined,
+    aiReviewStatus: (["pending", "processing", "reviewed", "error"] as const).includes(doc.aiReviewStatus as never) ? doc.aiReviewStatus as Staff["aiReviewStatus"] : null,
+    aiReviewError: (doc.aiReviewError as string) ?? "",
+    aiReviewStartedAt: (doc.aiReviewStartedAt as Date) ?? null,
+    aiReviewFinishedAt: (doc.aiReviewFinishedAt as Date) ?? null,
     name: doc.name as string,
     sex: doc.sex === "F" || doc.sex === "M" ? (doc.sex as CamperSex) : null,
     phone: (doc.phone as string) ?? null,
@@ -47,9 +53,9 @@ export const NO_VEST: VestStatus = { delivered: null, returned: null };
 
 export type StaffData = Omit<Staff, "_id" | "createdAt" | "updatedAt" | "checkin" | "vest" | "prepDone" | "welcomeSentAt" | "foreignLookupCount" | "foreignLookupNames" | "foreignLookupAlertedAt">;
 
-export async function listStaff(filter: { active?: boolean } = {}): Promise<Staff[]> {
+export async function listStaff(filter: { active?: boolean; includeDraft?: boolean } = {}): Promise<Staff[]> {
   const db = await getDb();
-  const query: Record<string, unknown> = {};
+  const query: Record<string, unknown> = filter.includeDraft ? {} : { draft: { $ne: true } };
   if (filter.active !== undefined) query.active = filter.active;
   const docs = await db
     .collection(COLLECTION)
@@ -88,6 +94,38 @@ export async function updateStaff(id: string, patch: Partial<StaffData>): Promis
       { returnDocument: "after" },
     );
   return toStaff(res as Record<string, unknown> | null);
+}
+
+export async function claimStaffForAiReview(limit: number): Promise<Staff[]> {
+  const db = await getDb();
+  const out: Staff[] = [];
+  for (let i = 0; i < limit; i++) {
+    const now = new Date();
+    const doc = await db.collection(COLLECTION).findOneAndUpdate(
+      { aiReviewStatus: "pending" },
+      { $set: { aiReviewStatus: "processing", aiReviewStartedAt: now, aiReviewError: "", updatedAt: now } },
+      { sort: { createdAt: 1 }, returnDocument: "after" },
+    );
+    const staff = toStaff(doc as Record<string, unknown> | null);
+    if (!staff) break;
+    out.push(staff);
+  }
+  return out;
+}
+
+export async function finishStaffAiReview(id: string, patch: Partial<StaffData>, error = ""): Promise<void> {
+  const db = await getDb();
+  const now = new Date();
+  await db.collection(COLLECTION).updateOne({ _id: new ObjectId(id) }, { $set: { ...patch, aiReviewStatus: error ? "error" : "reviewed", aiReviewError: error, aiReviewFinishedAt: now, updatedAt: now } });
+}
+
+export async function requeueStaleStaffAiReviews(staleMs = 15 * 60_000): Promise<number> {
+  const db = await getDb();
+  const res = await db.collection(COLLECTION).updateMany(
+    { aiReviewStatus: "processing", aiReviewStartedAt: { $lt: new Date(Date.now() - staleMs) } },
+    { $set: { aiReviewStatus: "pending", aiReviewStartedAt: null, aiReviewError: "", updatedAt: new Date() } },
+  );
+  return res.modifiedCount;
 }
 
 /** Marks the person as arrived (`null` undoes it). */
@@ -252,28 +290,20 @@ export async function deleteStaff(id: string): Promise<boolean> {
 /**
  * Every admin account (users.roles has "admin") also lives on the team roster,
  * so they get a room, food restrictions, a vest… like everyone else. That
- * record is NOT a team profile though: an admin is never a líder (no kids
- * under their care) and never joins a time. Called at boot: creates the
- * missing records (matched by phone) and normalizes the existing ones,
- * orphaning any kid a past líder-admin still carries.
+ * Existing records are never rewritten: an administrator may also genuinely
+ * serve on the team and the login lets them choose either profile. Called at
+ * boot only to create a minimal roster record when one is missing.
  */
-export async function ensureAdminsOnRoster(admins: { name: string; phone: string }[]): Promise<{ created: number; normalized: number; orphaned: number }> {
+export async function ensureAdminsOnRoster(admins: { name: string; phone: string }[]): Promise<{ created: number }> {
   let created = 0;
-  let normalized = 0;
-  let orphaned = 0;
   for (const a of admins) {
     const existing = await findStaffByPhone(a.phone);
     if (!existing) {
       await insertStaff({ name: a.name, sex: null, phone: a.phone, active: true, team: null, bedroom: null, roomRole: "helper", transportation: null, allergies: [], drugAllergies: [], foodRestrictions: "", healthIssues: [], medications: [], healthNotes: "" });
       created++;
-      continue;
     }
-    if (existing.roomRole !== "caretaker" && existing.team === null) continue;
-    if (existing.roomRole === "caretaker") orphaned += await reassignCampers(existing._id, null);
-    await updateStaff(existing._id, { roomRole: "helper", team: null });
-    normalized++;
   }
-  return { created, normalized, orphaned };
+  return { created };
 }
 
 export async function ensureStaffIndexes(): Promise<void> {
@@ -288,4 +318,6 @@ export async function ensureStaffIndexes(): Promise<void> {
     .collection(COLLECTION)
     .createIndex({ phone: 1 }, { unique: true, partialFilterExpression: { phone: { $type: "string" } } });
   await db.collection(COLLECTION).createIndex({ active: 1, name: 1 });
+  await db.collection(COLLECTION).createIndex({ aiReviewStatus: 1, createdAt: 1 });
+  await db.collection(COLLECTION).createIndex({ importId: 1, aiReviewStatus: 1 });
 }

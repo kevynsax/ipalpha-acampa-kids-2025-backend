@@ -4,7 +4,7 @@ import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { config } from "./config";
 import { getDb } from "./db";
-import { ensureIndexes, ensureRosterLogins, listAdmins, loadAdminPhones } from "./models/users";
+import { ensureIndexes, ensureLoginAccount, ensureRosterLogins, listAdmins, loadAdminPhones } from "./models/users";
 import { ensureCategoryIndexes } from "./models/categories";
 import { ensureTransportIndexes } from "./models/transports";
 import { ensureBedroomIndexes } from "./models/bedrooms";
@@ -16,14 +16,17 @@ import { ensureInstructionIndexes } from "./models/instructions";
 import { ensureOccurrenceIndexes } from "./models/occurrences";
 import { ensureMedicationIndexes } from "./models/medications";
 import { ensureFileIndexes } from "./models/files";
+import { ensureSmsUsageIndex } from "./models/smsUsage";
 import { ensureTeamIndexes } from "./models/teams";
 import { ensureScoreIndexes } from "./models/scores";
 import { ensureCamperLookupIndexes } from "./models/camperLookups";
+import { ensureCamperImportIndexes } from "./models/camperImports";
 import { ensureGalleryIndexes } from "./models/gallery";
 import teamRoutes from "./routes/teams";
 import scoreRoutes from "./routes/scores";
 import galleryRoutes from "./routes/gallery";
 import authRoutes from "./routes/auth";
+import adminsRoutes from "./routes/admins";
 import categoryRoutes from "./routes/categories";
 import transportRoutes from "./routes/transports";
 import staffRoutes from "./routes/staff";
@@ -38,12 +41,18 @@ import occurrenceRoutes from "./routes/occurrences";
 import medicationRoutes from "./routes/medications";
 import fileRoutes from "./routes/files";
 import aiRoutes from "./routes/ai";
+import assistantRoutes from "./routes/assistant";
 import cleanupRoutes from "./routes/cleanup";
+import seedsRoutes from "./routes/seeds";
+import camperImportRoutes from "./routes/camperImports";
+import staffImportRoutes from "./routes/staffImports";
 import { comteleEnabled } from "./services/comtele";
-import { rearmWindows, scheduleBirthdayNotices, scheduleCheckinReminder } from "./services/realtime";
+import { publish, rearmWindows, scheduleBirthdayNotices, scheduleCheckinReminder } from "./services/realtime";
 import { sendBirthdayNotices, sendCheckinReminder, syncParentWelcomes, syncWelcomes } from "./services/notify";
 import { getSettings } from "./models/settings";
 import { backfillGalleryFaces } from "./services/galleryFaces";
+import { ensureProbablyGenreOnStaff } from "./services/camperSex";
+import { normalizeBrazilPhone } from "./utils";
 
 const app = new Hono();
 
@@ -61,14 +70,18 @@ app.get("/health", (c) =>
 );
 
 app.route("/api/auth", authRoutes);
+app.route("/api/admins", adminsRoutes);
 app.route("/api/categories", categoryRoutes);
 app.route("/api/transports", transportRoutes);
 app.route("/api/staff", staffRoutes);
 app.route("/api/bedrooms", bedroomRoutes);
 app.route("/api/schedule", scheduleRoutes);
 app.route("/api/campers", camperRoutes);
+app.route("/api/camper-imports", camperImportRoutes);
+app.route("/api/staff-imports", staffImportRoutes);
 app.route("/api/settings", settingsRoutes);
 app.route("/api/cleanup", cleanupRoutes);
+app.route("/api/seeds", seedsRoutes);
 app.route("/api/preparation", preparationRoutes);
 app.route("/api/instructions", instructionRoutes);
 app.route("/api/occurrences", occurrenceRoutes);
@@ -83,6 +96,8 @@ app.route("/api/files", fileRoutes);
 app.route("/api/gallery", galleryRoutes);
 // AI helper for the WYSIWYG editor (proxies the OpenAI-compatible gateway; AI_API_KEY)
 app.route("/api/ai", aiRoutes);
+// Read-only camp data assistant for admins and organizers.
+app.route("/api/assistant", assistantRoutes);
 // WebSocket: full snapshot on connect + live updates after every write (see services/realtime.ts)
 app.route("/api/realtime", realtimeRoutes);
 
@@ -92,6 +107,7 @@ console.log("Connecting to MongoDB…");
 const db = await getDb();
 await ensureIndexes();
 await ensureCamperLookupIndexes();
+await ensureCamperImportIndexes();
 await ensureCategoryIndexes();
 await ensureTransportIndexes();
 await ensureStaffIndexes();
@@ -107,17 +123,26 @@ await ensureInstructionIndexes();
 await ensureOccurrenceIndexes();
 await ensureMedicationIndexes();
 await ensureFileIndexes();
+await ensureSmsUsageIndex(); // the SMS cost counter on the "Sobre" page
 await ensureTeamIndexes(); // also migrates the legacy "equipe" category into teams
 await ensureScoreIndexes();
 await ensureGalleryIndexes();
 void backfillGalleryFaces();
-// every admin is on the team roster too (room, food restrictions, vest…); their record can't be deleted nor have the phone changed,
-// and it is never a team profile: no líder, no time, no kids
+// The deployment owner is always able to recover the top-level admin profile.
+// $addToSet preserves any parent/staff roles already held by the same phone.
+if (config.superAdminPhone) {
+  const phone = normalizeBrazilPhone(config.superAdminPhone);
+  if (!phone) throw new Error("SUPER_ADMIN_PHONE must be a valid Brazilian mobile number with DDD.");
+  const { created } = await ensureLoginAccount("Administrador", phone, "admin");
+  if (created) console.log("🔑 super-admin login created from SUPER_ADMIN_PHONE");
+}
+// Every admin is also present in the roster for room, health and vest data.
+// Existing staff assignments are preserved, so an admin who is genuinely on
+// the team can choose either profile after login.
 {
   await loadAdminPhones();
-  const { created, normalized, orphaned } = await ensureAdminsOnRoster((await listAdmins()).map((a) => ({ name: a.name, phone: a.phone })));
+  const { created } = await ensureAdminsOnRoster((await listAdmins()).map((a) => ({ name: a.name, phone: a.phone })));
   if (created > 0) console.log(`👤 ${created} admin(s) added to the team roster`);
-  if (normalized > 0) console.log(`🔑 ${normalized} admin roster record(s) reset to auxiliar / no time${orphaned > 0 ? ` (${orphaned} kid(s) left without a líder)` : ""}`);
 }
 {
   const n = await ensureRosterLogins();
@@ -125,6 +150,11 @@ void backfillGalleryFaces();
     `👤 roster logins: staff ${n.staffCreated} created / ${n.staffPhones} phones, parents ${n.parentsCreated} created / ${n.guardianPhones} phones`,
   );
 }
+void ensureProbablyGenreOnStaff()
+  .then((r) => {
+    if (r.updated > 0) publish("staff");
+  })
+  .catch((err) => console.error("staff sex backfill failed", err));
 console.log(`MongoDB connected → ${config.dbName}`);
 // re-arm the check-in window timers (they live in memory)
 {

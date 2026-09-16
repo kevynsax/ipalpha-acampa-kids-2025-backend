@@ -65,9 +65,10 @@ async function staffWindowError(phone: string, role: Role) {
 
 /**
  * The profile a login LANDS on: the highest-privilege one the person may
- * ACTUALLY enter with (see services/roles#availableRolesOf) — an admin is
- * always an admin, and a stored "parent" with no kid enrolled is not offered
- * at all. Falls back to the stored list only when the data offers nothing, so
+ * ACTUALLY enter with (see services/roles#availableRolesOf). The first token
+ * uses the highest role; the client immediately shows the profile chooser
+ * when more than one is available. Falls back to the stored list only when
+ * the data offers nothing, so
  * the error the person gets is still about their own account.
  */
 async function landingRole(user: User): Promise<{ role: Role; available: Role[] }> {
@@ -77,8 +78,9 @@ async function landingRole(user: User): Promise<{ role: Role; available: Role[] 
 
 /**
  * The same person can hold multiple roles (parent + staff + admin).
- * Login flow: phone number only. The session's active role is picked
- * automatically as the highest-privilege role the person holds.
+ * Login flow: phone number only. The first session uses the highest role; the
+ * frontend asks which profile to keep before opening the application whenever
+ * this array contains more than one role.
  */
 auth.post("/otp/request", async (c) => {
   const body = await c.req.json<{ phone?: string }>().catch(() => null);

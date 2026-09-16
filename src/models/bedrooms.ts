@@ -8,6 +8,8 @@ function toBedroom(doc: Record<string, unknown> | null): Bedroom | null {
   if (!doc) return null;
   return {
     _id: (doc._id as ObjectId).toString(),
+    draft: doc.draft === true,
+    importId: (doc.importId as string) ?? undefined,
     name: doc.name as string,
     group: doc.group as BedroomGroup,
     bunkBeds: (doc.bunkBeds as number) ?? 0,
@@ -20,9 +22,9 @@ function toBedroom(doc: Record<string, unknown> | null): Bedroom | null {
 
 export type BedroomData = Omit<Bedroom, "_id" | "createdAt" | "updatedAt">;
 
-export async function listBedrooms(filter: { group?: BedroomGroup } = {}): Promise<Bedroom[]> {
+export async function listBedrooms(filter: { group?: BedroomGroup; includeDraft?: boolean } = {}): Promise<Bedroom[]> {
   const db = await getDb();
-  const query: Record<string, unknown> = {};
+  const query: Record<string, unknown> = filter.includeDraft ? {} : { draft: { $ne: true } };
   if (filter.group) query.group = filter.group;
   const docs = await db
     .collection(COLLECTION)

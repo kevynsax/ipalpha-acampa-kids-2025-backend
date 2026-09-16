@@ -4,7 +4,8 @@ import { stream } from "hono/streaming";
 import { config } from "../config";
 import { requireAuth } from "../middleware/auth";
 import { requireAdmin } from "../middleware/roles";
-import { aiUsageByVendor, recordAiUsage } from "../models/aiUsage";
+import { aiUsageByKind, aiUsageByVendor, recordAiUsage } from "../models/aiUsage";
+import { smsUsageTotal } from "../models/smsUsage";
 import { resolveScope } from "../services/scope";
 import { isEmojiLike } from "../utils";
 import { runTool, toolSpecs } from "../services/aiTools";
@@ -229,9 +230,9 @@ ai.use("*", requireAuth);
  * tiny round trip in parallel; primaries that answer come first, backups fill
  * the gaps. If nothing answers, the primaries are listed anyway.
  */
-/** GET /api/ai/usage — admin: totals per vendor for the settings "about" page */
+/** GET /api/ai/usage — admin: totals per vendor and per kind of request (plus the SMS counter) for the settings "about" page */
 ai.get("/usage", requireAdmin, async (c) => {
-  return c.json({ vendors: await aiUsageByVendor() });
+  return c.json({ vendors: await aiUsageByVendor(), kinds: await aiUsageByKind(), sms: await smsUsageTotal() });
 });
 
 ai.get("/models", async (c) => {

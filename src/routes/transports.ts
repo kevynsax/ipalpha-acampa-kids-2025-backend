@@ -25,6 +25,7 @@ const transports = new Hono<Env>();
 
 const NAME_MAX = 60;
 const NUMBER_MAX = 8;
+const CAPACITY_MAX = 200;
 
 function fail(c: Context, code: string, message: string, status: 400 | 404 = 400) {
   return c.json({ error: { code, message } }, status);
@@ -39,6 +40,18 @@ function cleanText(value: unknown, max: number): string | null {
 
 function parseKind(value: unknown): TransportKind | null {
   return TRANSPORT_KINDS.includes(value as TransportKind) ? (value as TransportKind) : null;
+}
+
+/**
+ * The number of seats: a whole number from 1 to CAPACITY_MAX. `undefined`
+ * clears it (capacity is optional — an unknown bus size), `null` means the
+ * value was sent but is not a valid seat count.
+ */
+function cleanCapacity(value: unknown): number | undefined | null {
+  if (value === undefined || value === null || value === "") return undefined;
+  const n = typeof value === "number" ? value : Number(String(value).trim());
+  if (!Number.isInteger(n) || n < 1 || n > CAPACITY_MAX) return null;
+  return n;
 }
 
 /** normalizes "#0F9A8A" / "0f9a8a" → "#0f9a8a"; null when not a hex colour */
@@ -67,6 +80,7 @@ export function serializeTransport(t: Transport) {
     name: t.name ?? null,
     color: t.color ?? null,
     number: t.number ?? null,
+    capacity: t.capacity ?? null,
     label: transportLabel(t),
     order: t.order,
     createdAt: t.createdAt,
@@ -96,21 +110,25 @@ transports.post("/", async (c) => {
   let name: string | undefined;
   let color: string | undefined;
   let number: string | undefined;
+  let capacity: number | undefined;
   if (kind === "bus") {
     // a bus has no name — its label is derived from the number + colour
     const parsedColor = cleanColor(body.color);
     if (!parsedColor) return fail(c, "COLOR_INVALID", "Escolha a cor do ônibus.");
     const parsedNumber = cleanText(body.number, NUMBER_MAX);
     if (!parsedNumber) return fail(c, "NUMBER_INVALID", `Informe o número do ônibus (até ${NUMBER_MAX} caracteres).`);
+    const parsedCapacity = cleanCapacity(body.capacity);
+    if (parsedCapacity === null) return fail(c, "CAPACITY_INVALID", `Informe a capacidade entre 1 e ${CAPACITY_MAX} lugares.`);
     color = parsedColor;
     number = parsedNumber;
+    capacity = parsedCapacity;
   } else {
     const parsedName = cleanText(body.name, NAME_MAX);
     if (!parsedName) return fail(c, "NAME_INVALID", `Informe um nome com até ${NAME_MAX} caracteres.`);
     name = parsedName;
   }
 
-  const t = await insertTransport({ kind, name, color, number, order: await nextTransportOrder() });
+  const t = await insertTransport({ kind, name, color, number, capacity, order: await nextTransportOrder() });
   publish("transports");
   return c.json({ transport: serializeTransport(t) }, 201);
 });
@@ -148,6 +166,7 @@ transports.put("/:id", async (c) => {
     if (body.kind !== undefined && t.kind === "bus") {
       patch.color = undefined;
       patch.number = undefined;
+      patch.capacity = undefined;
     }
     if (body.name !== undefined || (body.kind !== undefined && t.kind === "bus")) {
       const name = cleanText(body.name, NAME_MAX);
@@ -166,6 +185,11 @@ transports.put("/:id", async (c) => {
       const number = cleanText(body.number, NUMBER_MAX);
       if (!number) return fail(c, "NUMBER_INVALID", `Informe o número do ônibus (até ${NUMBER_MAX} caracteres).`);
       patch.number = number;
+    }
+    if (body.capacity !== undefined || (body.kind !== undefined && t.kind === "car")) {
+      const capacity = cleanCapacity(body.capacity);
+      if (capacity === null) return fail(c, "CAPACITY_INVALID", `Informe a capacidade entre 1 e ${CAPACITY_MAX} lugares.`);
+      patch.capacity = capacity;
     }
   }
 

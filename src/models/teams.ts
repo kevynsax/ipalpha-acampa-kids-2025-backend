@@ -31,6 +31,8 @@ function toTeam(doc: Record<string, unknown> | null): Team | null {
   if (!doc) return null;
   return {
     _id: (doc._id as ObjectId).toString(),
+    draft: doc.draft === true,
+    importId: (doc.importId as string) ?? undefined,
     name: doc.name as string,
     color: typeof doc.color === "string" ? doc.color : "#2a9d8f",
     order: (doc.order as number) ?? 0,
@@ -41,9 +43,9 @@ function toTeam(doc: Record<string, unknown> | null): Team | null {
 
 export type TeamData = Omit<Team, "_id" | "createdAt" | "updatedAt">;
 
-export async function listTeams(): Promise<Team[]> {
+export async function listTeams(includeDraft = false): Promise<Team[]> {
   const db = await getDb();
-  const docs = await db.collection(COLLECTION).find().sort({ order: 1, name: 1 }).toArray();
+  const docs = await db.collection(COLLECTION).find(includeDraft ? {} : { draft: { $ne: true } }).sort({ order: 1, name: 1 }).toArray();
   return docs.map((d) => toTeam(d as Record<string, unknown>)!);
 }
 
