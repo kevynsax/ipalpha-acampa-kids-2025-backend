@@ -1,11 +1,23 @@
 import { ObjectId } from "mongodb";
 import { getDb } from "../db";
-import type { CampEvent, EventAssignment, ScheduleRole } from "../types";
+import type { CampEvent, EventAssignment, RoomRole, ScheduleRole } from "../types";
+import { ROOM_ROLES } from "../types";
 
 const ROLES = "schedule_roles";
 const EVENTS = "schedule_events";
 
 // ── roles ───────────────────────────────────────────────────────────────────
+
+/**
+ * `forRoomRoles: RoomRole[]` — the positions the função falls on by itself.
+ * Older documents held a boolean `forEveryone` ("vale para toda a equipe"),
+ * which is exactly both positions; `false` meant "escalada pessoa por pessoa",
+ * i.e. no position at all.
+ */
+function toRoomRoles(doc: Record<string, unknown>): RoomRole[] {
+  if (Array.isArray(doc.forRoomRoles)) return ROOM_ROLES.filter((r) => (doc.forRoomRoles as unknown[]).includes(r));
+  return doc.forEveryone === true ? [...ROOM_ROLES] : [];
+}
 
 function toRole(doc: Record<string, unknown> | null): ScheduleRole | null {
   if (!doc) return null;
@@ -15,7 +27,7 @@ function toRole(doc: Record<string, unknown> | null): ScheduleRole | null {
     emoji: (doc.emoji as string) ?? "🎯",
     instructions: (doc.instructions as string) ?? "",
     preparation: (doc.preparation as string) ?? "",
-    forEveryone: (doc.forEveryone as boolean) ?? false,
+    forRoomRoles: toRoomRoles(doc),
     hasDetail: (doc.hasDetail as boolean) ?? false,
     detailFromTeam: (doc.detailFromTeam as boolean) ?? false,
     detailPlaceholder: (doc.detailPlaceholder as string) ?? "",

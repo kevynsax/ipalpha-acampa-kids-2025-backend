@@ -1,8 +1,8 @@
 import { ObjectId } from "mongodb";
 import { getDb } from "../db";
-import type { CamperCheckin, Staff, VestStatus } from "../types";
+import type { CamperCheckin, CamperSex, Staff, VestStatus } from "../types";
 import { ROOM_ROLES } from "../types";
-import { toCheckin, toMedications } from "./campers";
+import { reassignCampers, toCheckin, toMedications } from "./campers";
 
 const COLLECTION = "staff";
 
@@ -11,6 +11,7 @@ function toStaff(doc: Record<string, unknown> | null): Staff | null {
   return {
     _id: (doc._id as ObjectId).toString(),
     name: doc.name as string,
+    sex: doc.sex === "F" || doc.sex === "M" ? (doc.sex as CamperSex) : null,
     phone: (doc.phone as string) ?? null,
     active: (doc.active as boolean) ?? true,
     team: (doc.team as string) ?? null,
@@ -249,19 +250,30 @@ export async function deleteStaff(id: string): Promise<boolean> {
 }
 
 /**
- * Every admin account (users.roles ∋ "admin") also lives on the team roster,
- * so they get a room, food restrictions, a vest… like everyone else. Called at
- * boot: creates the missing records (matched by phone), never touches the
- * existing ones. Returns the number of records created.
+ * Every admin account (users.roles has "admin") also lives on the team roster,
+ * so they get a room, food restrictions, a vest… like everyone else. That
+ * record is NOT a team profile though: an admin is never a líder (no kids
+ * under their care) and never joins a time. Called at boot: creates the
+ * missing records (matched by phone) and normalizes the existing ones,
+ * orphaning any kid a past líder-admin still carries.
  */
-export async function ensureAdminsOnRoster(admins: { name: string; phone: string }[]): Promise<number> {
+export async function ensureAdminsOnRoster(admins: { name: string; phone: string }[]): Promise<{ created: number; normalized: number; orphaned: number }> {
   let created = 0;
+  let normalized = 0;
+  let orphaned = 0;
   for (const a of admins) {
-    if (await findStaffByPhone(a.phone)) continue;
-    await insertStaff({ name: a.name, phone: a.phone, active: true, team: null, bedroom: null, roomRole: "helper", transportation: null, allergies: [], drugAllergies: [], foodRestrictions: "", healthIssues: [], medications: [], healthNotes: "" });
-    created++;
+    const existing = await findStaffByPhone(a.phone);
+    if (!existing) {
+      await insertStaff({ name: a.name, sex: null, phone: a.phone, active: true, team: null, bedroom: null, roomRole: "helper", transportation: null, allergies: [], drugAllergies: [], foodRestrictions: "", healthIssues: [], medications: [], healthNotes: "" });
+      created++;
+      continue;
+    }
+    if (existing.roomRole !== "caretaker" && existing.team === null) continue;
+    if (existing.roomRole === "caretaker") orphaned += await reassignCampers(existing._id, null);
+    await updateStaff(existing._id, { roomRole: "helper", team: null });
+    normalized++;
   }
-  return created;
+  return { created, normalized, orphaned };
 }
 
 export async function ensureStaffIndexes(): Promise<void> {

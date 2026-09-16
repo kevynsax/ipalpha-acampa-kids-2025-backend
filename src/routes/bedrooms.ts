@@ -18,6 +18,7 @@ import { BEDROOM_GROUPS, bedroomCapacity, type Bedroom, type BedroomGroup, type 
 import { serializeCamperList } from "./campers";
 import { serializeStaffList } from "./staff";
 import { canSeeBedroom, resolveScope } from "../services/scope";
+import { applyBedroomGroupToOccupants } from "../services/camperSex";
 
 interface Env {
   Variables: {
@@ -216,6 +217,11 @@ bedrooms.put("/:id", async (c) => {
   }
 
   const updated = await updateBedroom(existing._id, result.patch);
+  if (result.patch.group && result.patch.group !== existing.group) {
+    const n = await applyBedroomGroupToOccupants(existing._id, result.patch.group, { userId: c.get("userId"), signal: c.req.raw.signal });
+    if (n.campers) publish("campers");
+    if (n.staff) publish("staff");
+  }
   const occ = await occupancy();
   publish("bedrooms");
   return c.json({ bedroom: serializeBedroom(updated!, occ.get(updated!._id)) });

@@ -5,7 +5,7 @@ import { requireAuth } from "../middleware/auth";
 import { requireManager, requireRole } from "../middleware/roles";
 import { countStaffPerBedroom, findBedroomById } from "../models/bedrooms";
 import { countCampersPerBedroom } from "../models/campers";
-import { listCampers, reassignCampers, setCaretakerOf } from "../models/campers";
+import { listCampers, reassignCampers, setCaretakerOf, updateCamper } from "../models/campers";
 import { listEvents, listRoles, unassignStaffEverywhere } from "../models/schedule";
 import { serializeCamperList } from "./campers";
 import {
@@ -23,13 +23,14 @@ import {
 } from "../models/staff";
 import { logCheckin } from "../models/campers";
 import { bedroomCapacity, ROOM_ROLES, STAFF_CATEGORY_KEYS, type Role, type RoomRole, type SessionUser, type Staff } from "../types";
+import { resolveCamperSex } from "../services/camperSex";
 import { canHandleVests, hideOwnBedroom, resolveScope, staffVisibility, type Scope } from "../services/scope";
 import { bedroomFullMessage, isInvalid, parseBedroom, parseMedications, parseMulti, parseTeam, parseText, parseTransport } from "./_validate";
 import { listTeams } from "../models/teams";
-import { assignmentDetail, teamMap } from "../services/schedule";
+import { assignmentDetail, autoRoleFor, dutyOf, teamMap } from "../services/schedule";
 import { distanceMeters, normalizeBrazilPhone, titleCaseName, nowInSaoPauloWallClock, saoPauloWallClock, saoPauloWallClockToIso, todayInSaoPaulo } from "../utils";
 import { getSettings } from "../models/settings";
-import { isAdminPhone } from "../models/users";
+import { ensureLoginAccount, isAdminPhone } from "../models/users";
 import { notifyCaretakerChange, notifyCheckin, notifyStaffChange, syncWelcomes } from "../services/notify";
 
 interface Env {
@@ -48,6 +49,20 @@ const TEXT_MAX = 500;
 
 function fail(c: Context, code: string, message: string, status: 400 | 404 | 409 = 400) {
   return c.json({ error: { code, message } }, status);
+}
+
+/**
+ * An ADMIN's roster record exists only so they have a room, a transport and a
+ * vest like everyone else — it is not a team profile. It never becomes a
+ * líder, never receives kids and never joins a time. Returns the error
+ * message for the attempted change, or null.
+ */
+export function adminRosterBlock(s: Pick<Staff, "name" | "phone">, patch: { roomRole?: RoomRole; team?: string | null }): string | null {
+  if (!isAdminPhone(s.phone)) return null;
+  const first = s.name.split(" ")[0];
+  if (patch.roomRole === "caretaker") return `${first} é admin do app: não pode ser líder de quarto nem receber crianças.`;
+  if (patch.team) return `${first} é admin do app: não entra em um time.`;
+  return null;
 }
 
 /** Full record — admin only (or the person themself). */
@@ -104,10 +119,24 @@ export function serializeStaffList(list: Staff[], scope: Scope) {
   return list.map((s) => serializeStaffFor(s, scope)).filter((x): x is NonNullable<typeof x> => x !== null);
 }
 
+/** Bedroom change: girls/boys wing wins; staff room / no room re-guesses from the name. */
+async function setStaffBedroom(id: string, name: string, bedroom: string | null, extra: Partial<StaffData>, c: Context<Env>) {
+  const sex = await resolveCamperSex({
+    name,
+    bedroomId: bedroom,
+    requested: null,
+    guessIfMissing: true,
+    signal: c.req.raw.signal,
+    userId: c.get("userId"),
+  });
+  return updateStaff(id, { ...extra, bedroom, sex });
+}
+
 function serialize(s: Staff) {
   return {
     id: s._id,
     name: s.name,
+    sex: s.sex,
     phone: s.phone,
     /** an ADMIN's own roster record: can't be deleted, deactivated or have the phone changed */
     admin: isAdminPhone(s.phone),
@@ -194,6 +223,13 @@ async function buildPatch(
     patch.roomRole = v as RoomRole;
   }
 
+  if (has("sex")) {
+    const v = body.sex;
+    if (v === undefined || v === null || v === "") patch.sex = null;
+    else if (v !== "F" && v !== "M") return { code: "SEX_INVALID", message: "Sexo inválido." };
+    else patch.sex = v;
+  }
+
   const multis: [("allergies" | "drugAllergies" | "healthIssues"), string][] = [
     ["allergies", "Alergias"],
     ["drugAllergies", "Alergia a medicamentos"],
@@ -267,13 +303,12 @@ staff.get("/:id/detail", requireRole("admin", "staff", "health_staff"), async (c
 
   const schedule = events
     .map((e) => {
-      // explicit assignment wins; otherwise a "for everyone" role of the event applies (active members only)
-      const a = e.assignments.find((x) => x.staffId === s._id);
-      const everyone = !a && s.active ? e.roles.map((id) => roleById.get(id)).find((r) => r?.forEveryone) : undefined;
-      const r = a ? roleById.get(a.roleId) : everyone;
-      if (!a && !everyone) return null;
-      /** the event's "for everyone" role — what the person falls back to when unassigned */
-      const fallback = e.roles.map((id) => roleById.get(id)).find((x) => x?.forEveryone);
+      // explicit escala wins; otherwise the função that falls on the person's POSITION (active members only)
+      const duty = dutyOf(e, s, roleById);
+      if (!duty) return null;
+      const { role: r, assignment: a } = duty;
+      /** what they'd fall back to here if the escala were removed (their position's função, if any) */
+      const fallback = s.active ? autoRoleFor(e, s.roomRole, roleById) : undefined;
       return {
         eventId: e._id,
         date: e.date,
@@ -283,7 +318,7 @@ staff.get("/:id/detail", requireRole("admin", "staff", "health_staff"), async (c
         emoji: e.emoji,
         role: r ? { id: r._id, name: r.name, emoji: r.emoji, instructions: r.instructions } : null,
         ...assignmentDetail(r, a, s, teamById),
-        /** true when this comes from a "for everyone" role rather than an explicit assignment */
+        /** true when the função came from the person's POSITION rather than an explicit escala */
         implicit: !a,
         defaultRole: fallback ? { id: fallback._id, name: fallback.name, emoji: fallback.emoji } : null,
       };
@@ -509,7 +544,17 @@ staff.post("/", async (c) => {
   const full = await bedroomFullMessage(data.bedroom, null);
   if (full) return fail(c, "BEDROOM_FULL", full, 409);
 
+  data.sex = await resolveCamperSex({
+    name: data.name,
+    bedroomId: data.bedroom,
+    requested: data.sex,
+    guessIfMissing: data.sex !== "F" && data.sex !== "M",
+    signal: c.req.raw.signal,
+    userId: c.get("userId"),
+  });
+
   const created = await insertStaff(data);
+  if (created.phone) void ensureLoginAccount(created.name, created.phone, "staff");
   publish("staff", "bedrooms");
   void syncWelcomes(); // welcome SMS with the app link — only if the team window is already open, never twice
   return c.json({ staff: serialize(created) }, 201);
@@ -530,6 +575,8 @@ staff.put("/:id", async (c) => {
   if (isAdminPhone(existing.phone)) {
     if (result.patch.phone !== undefined && result.patch.phone !== existing.phone) return fail(c, "ADMIN_LOCKED", "O celular de um admin não pode ser alterado por aqui.", 409);
     if (result.patch.active === false) return fail(c, "ADMIN_LOCKED", "Um admin não pode ser desativado.", 409);
+    const blocked = adminRosterBlock(existing, result.patch);
+    if (blocked) return fail(c, "ADMIN_LOCKED", blocked, 409);
   }
 
   if (result.patch.phone && result.patch.phone !== existing.phone) {
@@ -544,7 +591,27 @@ staff.put("/:id", async (c) => {
     if (full) return fail(c, "BEDROOM_FULL", full, 409);
   }
 
+  const name = result.patch.name ?? existing.name;
+  const bedroom = result.patch.bedroom !== undefined ? result.patch.bedroom : existing.bedroom;
+  const bedroomChanged = result.patch.bedroom !== undefined && result.patch.bedroom !== existing.bedroom;
+  const nameChanged = result.patch.name !== undefined && result.patch.name !== existing.name;
+  const sexTouched = result.patch.sex !== undefined;
+  if (bedroomChanged || nameChanged || sexTouched) {
+    const fromForm = result.patch.sex === "F" || result.patch.sex === "M" ? result.patch.sex : undefined;
+    result.patch.sex = await resolveCamperSex({
+      name,
+      bedroomId: bedroom,
+      requested: fromForm ?? (bedroomChanged || nameChanged ? null : existing.sex),
+      guessIfMissing: !fromForm && (bedroomChanged || nameChanged),
+      signal: c.req.raw.signal,
+      userId: c.get("userId"),
+    });
+  }
+
   const updated = await updateStaff(existing._id, result.patch);
+  if (updated?.phone && (result.patch.phone !== undefined || result.patch.name !== undefined)) {
+    void ensureLoginAccount(updated.name, updated.phone, "staff");
+  }
   // left the room, or stopped being a caretaker there → their kids are orphans now
   // (deactivation only removes app access / notifications — the kids stay with them)
   const lostKids = (updated!.bedroom !== existing.bedroom || updated!.roomRole !== "caretaker") && existing.roomRole === "caretaker";
@@ -584,12 +651,23 @@ staff.post("/:id/move", async (c) => {
   const other = typeof body.swapWith === "string" ? await findStaffById(body.swapWith) : typeof body.assignTo === "string" ? await findStaffById(body.assignTo) : null;
   const touched = new Set<string>();
 
+  // an admin's roster record is not a team profile: it never takes kids over
+  // ("bring" / "swap" would make the person a líder; "swap" / "assign" the other one)
+  for (const [who, becomes] of [
+    [me, kids === "bring" || kids === "swap"],
+    [other, kids === "swap" || kids === "assign"],
+  ] as const) {
+    if (!who || !becomes) continue;
+    const blocked = adminRosterBlock(who, { roomRole: "caretaker" });
+    if (blocked) return fail(c, "ADMIN_LOCKED", blocked, 409);
+  }
+
   if (kids === "swap") {
     if (!other || !target || other.bedroom !== target) return fail(c, "SWAP_INVALID", "Escolha alguém que durma no quarto de destino para trocar.", 409);
     const theirKids = await listCampers({ caretakerId: other._id });
     // capacities are unaffected (one person out, one in) — only the kids swap hands
-    await updateStaff(me._id, { bedroom: target, roomRole: "caretaker" });
-    await updateStaff(other._id, { bedroom: me.bedroom, roomRole: me.roomRole === "caretaker" ? "caretaker" : other.roomRole });
+    await setStaffBedroom(me._id, me.name, target, { roomRole: "caretaker" }, c);
+    await setStaffBedroom(other._id, other.name, me.bedroom, { roomRole: me.roomRole === "caretaker" ? "caretaker" : other.roomRole }, c);
     // kids stay in their rooms and get the caretaker who arrived
     await setCaretakerOf(myKids.map((k) => k._id), other._id);
     await setCaretakerOf(theirKids.map((k) => k._id), me._id);
@@ -601,7 +679,7 @@ staff.post("/:id/move", async (c) => {
     if (target !== me.bedroom) {
       const full = await bedroomFullMessage(target, me.bedroom);
       if (full) return fail(c, "BEDROOM_FULL", full, 409);
-      await updateStaff(me._id, { bedroom: target });
+      await setStaffBedroom(me._id, me.name, target, {}, c);
     }
     if (other.roomRole !== "caretaker") await updateStaff(other._id, { roomRole: "caretaker" });
     await reassignCampers(me._id, other._id);
@@ -613,13 +691,23 @@ staff.post("/:id/move", async (c) => {
     const [st, ca] = await Promise.all([countStaffPerBedroom(), countCampersPerBedroom()]);
     const occupied = (st.get(target) ?? 0) + (ca.get(target) ?? 0);
     if (room && occupied + 1 + myKids.length > bedroomCapacity(room)) return fail(c, "BEDROOM_FULL", `O quarto ${room.name} não tem lugar para você e ${myKids.length} crianças.`, 409);
-    await updateStaff(me._id, { bedroom: target, roomRole: "caretaker" });
-    await reassignCampers(me._id, me._id, { bedroom: target, bed: null });
-    for (const k of myKids) touched.add(k._id);
+    await setStaffBedroom(me._id, me.name, target, { roomRole: "caretaker" }, c);
+    for (const k of myKids) {
+      const sex = await resolveCamperSex({
+        name: k.name,
+        bedroomId: target,
+        requested: null,
+        guessIfMissing: true,
+        signal: c.req.raw.signal,
+        userId: c.get("userId"),
+      });
+      await updateCamper(k._id, { bedroom: target, bed: null, caretakerId: me._id, sex });
+      touched.add(k._id);
+    }
   } else {
     const full = await bedroomFullMessage(target, me.bedroom);
     if (full) return fail(c, "BEDROOM_FULL", full, 409);
-    await updateStaff(me._id, { bedroom: target });
+    await setStaffBedroom(me._id, me.name, target, {}, c);
     await reassignCampers(me._id, null);
     for (const k of myKids) touched.add(k._id);
     void notifyCaretakerChange(myKids, me, null);

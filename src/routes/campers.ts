@@ -10,9 +10,11 @@ import { FOREIGN_LOOKUP_ALERT_AT, FOREIGN_LOOKUP_BLOCK_AT, findStaffById, findSt
 import { CAMPER_CATEGORY_KEYS, PARENT_EDITABLE_FIELDS, type Camper, type CamperChangeLog, type CheckinKind, type ParentEditableField, type Role, type SessionUser } from "../types";
 import { formatCpf, normalizeBrazilPhone, titleCaseName } from "../utils";
 import { bedroomFullMessage, isInvalid, parseBedroom, parseMedications, parseMulti, parseSingle, parseTeam, parseText, parseTransport } from "./_validate";
-import { serializeStaffList } from "./staff";
+import { adminRosterBlock, serializeStaffList } from "./staff";
 import { camperVisibility, canParentEdit, canRunBusCheckin, canRunCheckin, resolveScope, type Scope } from "../services/scope";
 import { campInProgress, campPeriod } from "../services/camp";
+import { resolveCamperSex } from "../services/camperSex";
+import { ensureLoginAccount } from "../models/users";
 
 interface Env {
   Variables: {
@@ -276,6 +278,9 @@ async function caretakerConsistent(bedroom: string | null, caretakerId: string |
   if (!caretakerId) return null;
   const s = await findStaffById(caretakerId);
   if (!s) return "Líder não encontrado.";
+  // an admin is on the roster only for the room / transport / vest: never a líder
+  const adminBlocked = adminRosterBlock(s, { roomRole: "caretaker" });
+  if (adminBlocked) return adminBlocked;
   if (!bedroom || s.bedroom !== bedroom) return `${s.name.split(" ")[0]} não dorme neste quarto.`;
   if (s.roomRole !== "caretaker") return `${s.name.split(" ")[0]} é auxiliar neste quarto, não líder.`;
   return null;
@@ -545,7 +550,18 @@ campers.post("/", async (c) => {
   const bad = await caretakerConsistent(data.bedroom, data.caretakerId);
   if (bad) return fail(c, "CARETAKER_INVALID", bad, 409);
 
+  // girls/boys room wins; staff room / no room keeps the form's hidden GLM guess (or we guess here)
+  data.sex = await resolveCamperSex({
+    name: data.name,
+    bedroomId: data.bedroom,
+    requested: data.sex,
+    guessIfMissing: data.sex !== "F" && data.sex !== "M",
+    signal: c.req.raw.signal,
+    userId: c.get("userId"),
+  });
+
   const created = await insertCamper(data);
+  if (created.guardianPhone) void ensureLoginAccount(created.guardianName || created.name, created.guardianPhone, "parent");
   publish("campers", "bedrooms");
   void notifyCamperChange(null, created);
   return c.json({ camper: serializeCamper(created) }, 201);
@@ -574,7 +590,28 @@ campers.put("/:id", async (c) => {
     if (bad) return fail(c, "CARETAKER_INVALID", bad, 409);
   }
 
+  const name = result.patch.name ?? existing.name;
+  const bedroomChanged = result.patch.bedroom !== undefined && result.patch.bedroom !== existing.bedroom;
+  const nameChanged = result.patch.name !== undefined && result.patch.name !== existing.name;
+  const sexTouched = result.patch.sex !== undefined;
+  if (bedroomChanged || nameChanged || sexTouched) {
+    // girls/boys room always wins. Form's hidden GLM guess is kept when present;
+    // a staff-room move or a rename without a guess asks GLM from the name.
+    const fromForm = result.patch.sex === "F" || result.patch.sex === "M" ? result.patch.sex : undefined;
+    result.patch.sex = await resolveCamperSex({
+      name,
+      bedroomId: bedroom,
+      requested: fromForm ?? (bedroomChanged || nameChanged ? null : existing.sex),
+      guessIfMissing: !fromForm && (bedroomChanged || nameChanged),
+      signal: c.req.raw.signal,
+      userId: c.get("userId"),
+    });
+  }
+
   const updated = await updateCamper(existing._id, result.patch);
+  if (updated?.guardianPhone && (result.patch.guardianPhone !== undefined || result.patch.guardianName !== undefined)) {
+    void ensureLoginAccount(updated.guardianName || updated.name, updated.guardianPhone, "parent");
+  }
   publish("campers", "bedrooms");
   void notifyCamperChange(existing, updated);
   return c.json({ camper: serializeCamper(updated!) });

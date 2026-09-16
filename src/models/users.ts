@@ -1,6 +1,7 @@
 import { ObjectId } from "mongodb";
 import { getDb } from "../db";
-import type { PublicUser, User } from "../types";
+import type { PublicUser, Role, User } from "../types";
+import { titleCaseName } from "../utils";
 
 function toUser(doc: Record<string, unknown> | null): User | null {
   if (!doc) return null;
@@ -50,6 +51,56 @@ export async function resetParentPhotosNotice(): Promise<number> {
   const db = await getDb();
   const res = await db.collection("users").updateMany({ photosSmsSentAt: { $ne: null } }, { $set: { photosSmsSentAt: null } });
   return res.modifiedCount;
+}
+
+/**
+ * Login needs a `users` doc (OTP lives there). The roster / kids can exist
+ * without one — imports and the admin form never created accounts. Upsert by
+ * phone; `$addToSet` the role so a parent who joins the team keeps both.
+ */
+export async function ensureLoginAccount(name: string, phone: string, role: Role): Promise<{ created: boolean }> {
+  if (!phone) return { created: false };
+  const db = await getDb();
+  const now = new Date();
+  const res = await db.collection("users").updateOne(
+    { phone },
+    {
+      $setOnInsert: {
+        name: titleCaseName(name) || name,
+        phone,
+        prepDone: [],
+        welcomeSentAt: null,
+        createdAt: now,
+      },
+      $addToSet: { roles: role },
+      $set: { updatedAt: now },
+    },
+    { upsert: true },
+  );
+  return { created: res.upsertedCount === 1 };
+}
+
+/** Boot: a login account for every roster phone and every guardian phone. */
+export async function ensureRosterLogins(): Promise<{ staffPhones: number; staffCreated: number; guardianPhones: number; parentsCreated: number }> {
+  const db = await getDb();
+  const [team, kids] = await Promise.all([
+    db.collection("staff").find({ phone: { $type: "string" } }).project({ name: 1, phone: 1 }).toArray(),
+    db.collection("campers").find({ guardianPhone: { $type: "string" } }).project({ name: 1, guardianName: 1, guardianPhone: 1 }).toArray(),
+  ]);
+  let staffCreated = 0;
+  for (const s of team) {
+    const phone = s.phone as string;
+    if ((await ensureLoginAccount((s.name as string) ?? "", phone, "staff")).created) staffCreated++;
+  }
+  const seen = new Set<string>();
+  let parentsCreated = 0;
+  for (const k of kids) {
+    const phone = k.guardianPhone as string;
+    if (seen.has(phone)) continue;
+    seen.add(phone);
+    if ((await ensureLoginAccount((k.guardianName as string) || (k.name as string) || "", phone, "parent")).created) parentsCreated++;
+  }
+  return { staffPhones: team.length, staffCreated, guardianPhones: seen.size, parentsCreated };
 }
 
 /** A person is unique by phone — they may hold several roles at once. */

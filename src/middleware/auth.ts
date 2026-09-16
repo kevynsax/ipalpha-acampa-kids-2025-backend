@@ -1,10 +1,29 @@
 import { createMiddleware } from "hono/factory";
 import { findById, toPublicUser } from "../models/users";
+import { listCampersOfGuardian } from "../models/campers";
 import { revokeUserSessions, verifySessionToken } from "../services/session";
 import { getSettings, staffAccessOpen } from "../models/settings";
 import { findStaffByPhone } from "../models/staff";
 import { staffHasAccess } from "../services/scope";
-import type { Role, SessionUser } from "../types";
+import type { Role, SessionUser, User } from "../types";
+
+/**
+ * A live session whose profile the person may no longer enter with (tokens
+ * last days, the data changes under them):
+ *
+ *   - PARENT without a single kid enrolled — the enrolment was cancelled, or
+ *     the account merely carries a stale `roles: ["parent"]`.
+ *   - ADMIN entered as STAFF — an admin's roster record is only their room /
+ *     transport / vest, never a team profile (see services/roles.ts).
+ *
+ * Returns true when the session must be dropped (and drops it).
+ */
+export async function roleNoLongerValid(role: Role, user: Pick<User, "_id" | "phone" | "roles">): Promise<boolean> {
+  const invalid = role === "parent" ? (await listCampersOfGuardian(user.phone)).length === 0 : role === "staff" && user.roles.includes("admin");
+  if (!invalid) return false;
+  await revokeUserSessions(user._id);
+  return true;
+}
 
 /**
  * Ordinary team members lose their session the moment `staffAccessWindow`
@@ -61,6 +80,13 @@ export const requireAuth = createMiddleware<{
   if (await staffSessionExpired(payload.role, user.phone, user._id)) {
     return c.json(
       { error: { code: "UNAUTHORIZED", message: "O período de acesso da equipe terminou." } },
+      401,
+    );
+  }
+
+  if (await roleNoLongerValid(payload.role, user)) {
+    return c.json(
+      { error: { code: "UNAUTHORIZED", message: "Este perfil não está mais disponível para você. Entre novamente." } },
       401,
     );
   }

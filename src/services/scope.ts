@@ -5,6 +5,7 @@ import { findStaffByPhone } from "../models/staff";
 import { findByPhone } from "../models/users";
 import type { CampEvent, Camper, DocAudience, OccurrenceGroup, PrepAudience, Role, RoomRole, ScheduleRole, Settings, Staff } from "../types";
 import { campInProgress, campPeriod, parentWindowOf, parentWindowOpen, vestWindowOpen } from "./camp";
+import { autoRoleCovers } from "./schedule";
 
 /**
  * Data scope of a session — the ONE place that decides what a non-admin may
@@ -374,16 +375,17 @@ export function hideOwnBedroom(scope: Scope): boolean {
 /**
  * What a non-admin sees of an event: the event itself (everyone may know the
  * programme) with `roles` cut down to the ones that concern the viewer —
- * their explicit assignment, or the "for everyone" defaults when they have
- * none — and `assignments` reduced to their own entry. Other people's roles
- * and names never leave the server.
+ * their explicit assignment, or the funções that fall on their POSITION
+ * (`ScheduleRole.forRoomRoles`) when nobody escalou them — and `assignments`
+ * reduced to their own entry. Other people's roles and names never leave the
+ * server.
  */
 export function scopeEvent(scope: Scope, e: CampEvent, roleById: Map<string, ScheduleRole>): CampEvent {
   if (scope.all || scope.organizer) return e;
   // parents see the programme, never who does what
   if (isParent(scope)) return { ...e, roles: [], assignments: [] };
   const mine = scope.staffId ? e.assignments.find((a) => a.staffId === scope.staffId) : undefined;
-  const roles = mine ? e.roles.filter((id) => id === mine.roleId) : e.roles.filter((id) => roleById.get(id)?.forEveryone);
+  const roles = mine ? e.roles.filter((id) => id === mine.roleId) : e.roles.filter((id) => autoRoleCovers(roleById.get(id), scope.roomRole));
   return { ...e, roles, assignments: mine ? [mine] : [] };
 }
 

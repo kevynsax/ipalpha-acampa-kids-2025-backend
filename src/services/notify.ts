@@ -14,7 +14,7 @@ import { formatBrazilPhone, saoPauloWallClock, saoPauloWallClockToIso, todayInSa
 import { birthdayDuringCamp, campPeriod } from "./camp";
 import { comteleEnabled, comteleSendSms, resolveSmsTarget, type SmsAudience } from "./comtele";
 import { staffHasAccess } from "./scope";
-import { assignmentDetail, teamMap } from "./schedule";
+import { assignmentDetail, autoAudienceLabel, autoRoleCovers, autoRoleFor, isAutomatic, teamMap } from "./schedule";
 
 /**
  * Texts (SMS via Comtele) the team members concerned by a change, saying
@@ -541,17 +541,20 @@ interface Duty {
 
 /**
  * What each staff member does in the event: explicit assignment, else the
- * "for everyone" role (active only). A role whose detail is the person's team
- * takes its label from the staff record, so the text says the team.
+ * automatic role that covers their POSITION (líder / auxiliar / whole team;
+ * active only). A role whose detail is the person's team takes its label from
+ * the staff record, so the text says the team.
  */
 function dutiesOf(e: CampEvent | null, staff: Staff[], roleById: Map<string, ScheduleRole>, teamById: Map<string, Team>): Map<string, Duty> {
   const out = new Map<string, Duty>();
   if (!e) return out;
-  const everyone = e.roles.find((id) => roleById.get(id)?.forEveryone) ?? null;
   for (const s of staff) {
     const a = e.assignments.find((x) => x.staffId === s._id);
     if (a) out.set(s._id, { roleId: a.roleId, detail: assignmentDetail(roleById.get(a.roleId), a, s, teamById).detail });
-    else if (everyone && s.active) out.set(s._id, { roleId: everyone, detail: "" });
+    else if (s.active) {
+      const auto = autoRoleFor(e, s.roomRole, roleById);
+      if (auto) out.set(s._id, { roleId: auto._id, detail: "" });
+    }
   }
   return out;
 }
@@ -594,7 +597,7 @@ export async function notifyEventChange(before: CampEvent | null, after: CampEve
 /**
  * A role was edited → everyone who does it in some event (explicitly, or via
  * "for everyone"). Which switch applies depends on WHAT changed:
- *   name / forEveryone → roleChanges, instructions / preparation → contentChanges.
+ *   name / forRoomRoles → roleChanges, instructions / preparation → contentChanges.
  */
 export async function notifyRoleEdited(roleBefore: ScheduleRole, roleAfter: ScheduleRole, events: CampEvent[]): Promise<void> {
   try {
@@ -602,8 +605,13 @@ export async function notifyRoleEdited(roleBefore: ScheduleRole, roleAfter: Sche
     const n = settings.notifications;
     const items: Item[] = [];
     if (n.roleChanges && roleBefore.name !== roleAfter.name) items.push({ kind: "role", text: `sua função "${roleBefore.name}" agora se chama "${roleAfter.name}"` });
-    if (n.roleChanges && roleBefore.forEveryone !== roleAfter.forEveryone) {
-      items.push({ kind: "role", text: roleAfter.forEveryone ? `a função ${roleAfter.name} agora vale para todos: confira sua escala` : `a função ${roleAfter.name} não vale mais para todos: confira sua escala` });
+    if (n.roleChanges && roleBefore.forRoomRoles.join() !== roleAfter.forRoomRoles.join()) {
+      items.push({
+        kind: "role",
+        text: isAutomatic(roleAfter)
+          ? `a função ${roleAfter.name} agora vale para ${autoAudienceLabel(roleAfter)}: confira sua escala`
+          : `a função ${roleAfter.name} agora só vale para quem for escalado: confira sua escala`,
+      });
     }
     if (n.contentChanges && roleBefore.instructions !== roleAfter.instructions) items.push({ kind: "instructions", text: `instruções da função ${roleAfter.name} atualizadas` });
     if (n.contentChanges && roleBefore.preparation !== roleAfter.preparation) items.push({ kind: "preparation", text: `preparação da função ${roleAfter.name} atualizada` });
@@ -614,7 +622,8 @@ export async function notifyRoleEdited(roleBefore: ScheduleRole, roleAfter: Sche
     for (const s of staff) {
       const concerned = using.some((e) => {
         const a = e.assignments.find((x) => x.staffId === s._id);
-        return a ? a.roleId === roleAfter._id : roleAfter.forEveryone || roleBefore.forEveryone;
+        // automatic role: only the positions it covers (before or after the edit) are concerned
+        return a ? a.roleId === roleAfter._id : autoRoleCovers(roleAfter, s.roomRole) || autoRoleCovers(roleBefore, s.roomRole);
       });
       if (concerned) for (const i of items) enqueue(s, i.kind, i.text, settings);
     }

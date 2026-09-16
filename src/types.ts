@@ -191,6 +191,8 @@ export const MEDICATION_TIMES_MAX = 12;
 export interface Staff {
   _id: string;
   name: string;
+  /** "F" | "M" | null — from the room (girls/boys) or a GLM guess on the name; never collected on the form */
+  sex: CamperSex | null;
   /** E.164 — null while the person hasn't registered a phone yet */
   phone: string | null;
   /** inactive members are kept for history but hidden from the default lists */
@@ -299,7 +301,7 @@ export interface Camper {
   name: string;
   /** "YYYY-MM-DD" or null */
   birthDate: string | null;
-  /** "F" | "M" | null */
+  /** "F" | "M" | null — from the room (girls/boys) or a GLM guess on the name; never collected on the form */
   sex: CamperSex | null;
   cpf: string;
   rg: string;
@@ -528,12 +530,16 @@ export interface ScheduleRole {
    */
   preparation: string;
   /**
-   * When true this role applies to EVERY active staff member in the events
-   * that include it (e.g. "Cuidar das crianças", "Ajudar a arrumar o quarto"),
-   * except those explicitly assigned another role in that event. No
-   * per-person assignments are needed.
+   * POSITIONS this role falls on by itself, with nobody being scaled one by
+   * one: the link to a person is their `Staff.roomRole`. Both positions =
+   * the whole team ("Cuidar das crianças"), one = only the LÍDERES or only
+   * the AUXILIARES, `[]` = nobody automatically.
+   *
+   * This ADDS UP with the escala: a role may fall on the líderes AND carry a
+   * few extra people picked by hand (`CampEvent.assignments`). Whoever is
+   * explicitly scaled into another role of the event drops out of this one.
    */
-  forEveryone: boolean;
+  forRoomRoles: RoomRole[];
   /** whether an assignment of this role carries a per-person detail (team, base number, shift…) */
   hasDetail: boolean;
   /**

@@ -71,18 +71,31 @@ Copy `.env.example` to `.env` for local development. Production configuration an
 | GET | `/api/auth/me` | (Bearer token) | → `{ user }` |
 | POST | `/api/auth/role` | `{ role }` (Bearer token) | the SAME person switches profile (mãe que também é da equipe): revokes this session and issues a new one → `{ token, tokenExpiresAt, user }`. `ROLE_FORBIDDEN` when the role isn't among their available ones; the target role's access window still applies |
 
-**Available profiles** (`services/roles.ts#availableRolesOf`). `users.roles` is
-only what the account was created with, and it goes stale: the admin puts
-someone on the team roster, or enrols a kid naming them as guardian, without
-ever touching their account. So the `roles` sent to the client — and what
-`/api/auth/role` accepts — is the stored list **plus** what the data says: an
-ACTIVE `staff` record with that phone adds `staff`, at least one kid with that
-`guardianPhone` adds `parent`. `admin` and `health_staff` are never derived.
-The role a login LANDS on is still `pickActiveRole(users.roles)`.
 | POST | `/api/auth/logout` | (Bearer token) | revokes the session |
 | GET | `/health` | — | liveness check |
 
-Error responses carry machine-readable codes: `PHONE_INVALID`, `USER_NOT_FOUND`, `ROLE_NOT_ALLOWED` (phone exists but doesn't hold the selected role — includes `availableRoles`), `OTP_COOLDOWN`, `OTP_EXPIRED`, `OTP_INVALID` (with `attemptsLeft`), `ACCOUNT_FROZEN` (with `minutesLeft`), `UNAUTHORIZED`.
+**Available profiles** (`services/roles.ts#availableRolesOf`). `users.roles` is
+only what the account was created with, and it goes stale: the admin puts
+someone on the team roster, or enrols a kid naming them as guardian, without
+ever touching their account. So the profiles offered — the `roles` sent to the
+client, and what `/api/auth/role` accepts — come from the DATA:
+
+- **`parent` ⇔ at least one kid with that `guardianPhone`.** It is a fact, not
+  a grant: a stored `parent` with no kid enrolled is **dropped** (the mother of
+  last year's camper is not a responsible this year).
+- **`staff` ⇔ an ACTIVE `staff` record with that phone — except for an admin.**
+  Every admin is on the roster only so they have a room, a transport and a vest
+  (`models/staff#ensureAdminsOnRoster`); that record is never a team profile, so
+  an admin is never offered "Equipe".
+- `admin` and `health_staff` are never derived: they are granted.
+
+The role a login LANDS on is `pickActiveRole` over **that** list, so an admin
+always lands on admin. An account the data gives no profile at all gets
+`NO_PROFILE` (403) instead of an SMS. Live sessions are re-checked on every
+request and on the WebSocket upgrade (`middleware/auth#roleNoLongerValid`): a
+parent session without kids, or an admin's `staff` session, is revoked (401).
+
+Error responses carry machine-readable codes: `PHONE_INVALID`, `USER_NOT_FOUND`, `NO_PROFILE` (the phone has no profile at this year's camp), `ROLE_NOT_ALLOWED` (phone exists but doesn't hold the selected role — includes `availableRoles`), `OTP_COOLDOWN`, `OTP_EXPIRED`, `OTP_INVALID` (with `attemptsLeft`), `ACCOUNT_FROZEN` (with `minutesLeft`), `UNAUTHORIZED`.
 
 ## Realtime feed (WebSocket) 📡
 
@@ -169,8 +182,13 @@ Error codes: `BEDROOM_NOT_FOUND`, `NAME_INVALID`, `NAME_DUPLICATE` (409), `GROUP
 
 Two collections:
 
-- **`schedule_roles`** — funções staff fulfil. `forEveryone: true` marks a *default* role (e.g. "Cuidar das crianças"): it applies to every active staff member of the events that include it, except people explicitly assigned another role there — no per-person assignments needed.
-  Regular roles ("Supervisão da piscina", "Base"…).
+- **`schedule_roles`** — funções staff fulfil. **Who does one is decided in ways that ADD UP** (`services/schedule.ts`):
+  - **by position** — `forRoomRoles: RoomRole[]`, the positions that pick the função up on their own, linked by `Staff.roomRole` with no assignment at all: `["caretaker", "helper"]` = the whole team ("Cuidar das crianças"), `["caretaker"]` = only the Líderes, `[]` = nobody automatically.
+  - **by person** — `CampEvent.assignments`, scaled by hand, optionally with a detail.
+
+  So "os líderes + a Ana e o Pedro" is `forRoomRoles: ["caretaker"]` **plus** two assignments; "só a Ana" is `[]` plus one; "toda a equipe" is both positions. Moving somebody between positions re-does every event at once. One rule keeps it unambiguous: a person does ONE função per event — an explicit assignment always wins over every position link, and a função aimed at a single position wins over the whole-team one (`#autoRoleFor`). `#peopleInRole` returns both groups, tagged `via: "person" | "position"`.
+
+  Legacy documents hold a boolean `forEveryone`; it is read back as both positions (`true`) or none (`false`), and the write endpoints still accept it. No migration needed.
   `instructions` (what to do during the event) and `preparation` (what to
   bring / wear / prepare *before* the camp, e.g. "Inspeção: roupa verde estilo
   exército com boné") are HTML from the admin WYSIWYG, **sanitized
@@ -199,16 +217,16 @@ Errors: `STAFF_INVALID`, `ROLE_INVALID` (role must be one of the event's roles),
 | Method | Path | Who | Body |
 |---|---|---|---|
 | GET | `/api/schedule/roles` | admin, staff, health_staff | — (team: only the roles that appear in *their* scoped events) |
-| POST | `/api/schedule/roles` | admin | `{ name, emoji?, instructions?, preparation?, forEveryone?, hasDetail?, detailPlaceholder? }` |
+| POST | `/api/schedule/roles` | admin | `{ name, emoji?, instructions?, preparation?, forRoomRoles?, hasDetail?, detailPlaceholder? }` (legacy `forEveryone` still accepted) |
 | PUT | `/api/schedule/roles/:id` | admin | partial |
 | DELETE | `/api/schedule/roles/:id` | admin | 409 `ROLE_IN_USE` while referenced by an event |
-| GET | `/api/schedule/events` | admin, staff, health_staff | sorted by day, startTime. **Team scope** (`services/scope.ts#scopeEvent`): every event, but `roles` is cut to the viewer's own role (their assignment, else the `forEveryone` defaults) and `assignments` to their own entry — who else does what is never sent. Same for the realtime snapshot. |
+| GET | `/api/schedule/events` | admin, staff, health_staff | sorted by day, startTime. **Team scope** (`services/scope.ts#scopeEvent`): every event, but `roles` is cut to the viewer's own função (their assignment, else the ones falling on their `roomRole`) and `assignments` to their own entry — who else does what is never sent. Same for the realtime snapshot. |
 | POST | `/api/schedule/events` | admin | `{ date "YYYY-MM-DD", title, emoji?, startTime, endTime?, notes?, roles? }` |
 | PUT | `/api/schedule/events/:id` | admin | partial |
 | DELETE | `/api/schedule/events/:id` | admin | — |
 
 Error codes: `ROLE_NOT_FOUND`, `EVENT_NOT_FOUND`, `NAME_INVALID`, `NAME_DUPLICATE` (409, case-insensitive),
-`INSTRUCTIONS_INVALID`, `ROLE_IN_USE` (409), `DATE_INVALID`, `TITLE_INVALID`,
+`INSTRUCTIONS_INVALID`, `FOR_ROOM_ROLES_INVALID`, `ROLE_IN_USE` (409), `DATE_INVALID`, `TITLE_INVALID`,
 `START_TIME_INVALID`, `END_TIME_INVALID`, `NOTES_INVALID`, `ROLES_INVALID`.
 
 ## Campers (acampantes)
@@ -258,7 +276,7 @@ the response also carries `occupiedCampers` / `occupiedStaff`.
 
 | Method | Path | Returns |
 |---|---|---|
-| GET | `/api/staff/:id/detail` | `{ staff, bedroom, schedule: [{ eventId, date, startTime, endTime, title, emoji, role, detail, implicit, defaultRole }], campers, roommates }` — `implicit: true` entries come from a `forEveryone` role; `defaultRole` is the event's `forEveryone` role (or null) |
+| GET | `/api/staff/:id/detail` | `{ staff, bedroom, schedule: [{ eventId, date, startTime, endTime, title, emoji, role, detail, implicit, defaultRole }], campers, roommates }` — `implicit: true` entries came from the person's **position**, not an escala; `defaultRole` is the função that would fall on that position in the event (or null) |
 | GET | `/api/bedrooms/:id/detail` | `{ bedroom, campers, staff }` |
 
 ## Staff (equipe)
@@ -271,6 +289,16 @@ someone to a full room fails with 409 `BEDROOM_FULL`.
 `foodRestrictions` and `healthNotes` are free text (≤ 500 chars); `medications` is the same list as on campers.
 `roomRole` is `"caretaker"` (responsável: looks after specific kids) or
 `"helper"` (auxiliar, the default).
+
+**Admins on the roster.** Every admin account also has a `staff` record, but
+only so they have a room, a transport and a vest like everybody else
+(`models/staff#ensureAdminsOnRoster`, run at boot). That record is **not a team
+profile**: it can't be deleted, deactivated or have its phone changed, and it
+can never be a `caretaker`, hold a `team` or receive kids — attempts get 409
+`ADMIN_LOCKED` (`routes/staff#adminRosterBlock`, also enforced when a kid names
+a caretaker). Boot normalizes legacy records (back to `helper`, no team,
+orphaning kids they still carried). An admin never enters as "Equipe": see
+[Multi-role users](#multi-role-users).
 
 | Method | Path | Who | Body |
 |---|---|---|---|
@@ -671,6 +699,10 @@ is appended to the message.
 ## Multi-role users
 
 - Users are unique by **phone**; each user has a `roles: string[]` array.
-- At login the user picks which role to enter as; that role is passed on both
-  `/otp/request` and `/otp/verify`, validated against `user.roles`, and stored
-  as the session's active role (JWT + session doc).
+- The profiles a person may actually enter with come from the data, not from
+  that array — see [Available profiles](#endpoints)
+  (`services/roles#availableRolesOf`): `parent` only while a kid of theirs is
+  enrolled, `staff` only from an active roster record and never for an admin.
+- The login lands on the highest-privilege available profile and the session
+  stores it as the active role (JWT + session doc); the switcher
+  (`POST /api/auth/role`) accepts nothing outside that same list.

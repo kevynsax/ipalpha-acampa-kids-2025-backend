@@ -24,9 +24,10 @@ import {
 } from "../models/schedule";
 import { listStaff } from "../models/staff";
 import { listTeams } from "../models/teams";
-import { assignmentDetail, teamMap } from "../services/schedule";
+import { assignmentDetail, isAutomatic, peopleInRole, teamMap } from "../services/schedule";
 import { onEventDeleted } from "./gallery";
-import type { CampEvent, EventAssignment, Role, ScheduleRole, SessionUser } from "../types";
+import { ROOM_ROLES } from "../types";
+import type { CampEvent, EventAssignment, Role, RoomRole, ScheduleRole, SessionUser } from "../types";
 
 interface Env {
   Variables: {
@@ -78,7 +79,7 @@ export function serializeRole(r: ScheduleRole) {
     emoji: r.emoji,
     instructions: r.instructions,
     preparation: r.preparation,
-    forEveryone: r.forEveryone,
+    forRoomRoles: r.forRoomRoles,
     hasDetail: r.hasDetail,
     detailFromTeam: r.detailFromTeam,
     detailPlaceholder: r.detailPlaceholder,
@@ -145,19 +146,22 @@ schedule.get("/roles/:id/detail", ORGANIZER, async (c) => {
   const r = await findRoleById(c.req.param("id"));
   if (!r) return fail(c, "ROLE_NOT_FOUND", "Função não encontrada.", 404);
 
-  const [events, staff, teams] = await Promise.all([listEvents(), listStaff(), listTeams()]);
-  const active = staff.filter((s) => s.active);
+  const [events, roles, staff, teams] = await Promise.all([listEvents(), listRoles(), listStaff(), listTeams()]);
+  const roleById = new Map(roles.map((x) => [x._id, x]));
   const byId = new Map(staff.map((s) => [s._id, s]));
   const teams_ = teamMap(teams);
   const usedIn = events
     .filter((e) => e.roles.includes(r._id))
     .map((e) => {
-      const people = r.forEveryone
-        ? active.filter((s) => !e.assignments.some((a) => a.staffId === s._id)).map((s) => ({ staffId: s._id, name: s.name, detail: "", detailColor: "" }))
-        : e.assignments
-            .filter((a) => a.roleId === r._id)
-            .map((a) => ({ staffId: a.staffId, name: byId.get(a.staffId)?.name ?? "?", ...assignmentDetail(r, a, byId.get(a.staffId), teams_) }))
-            .sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
+      // both links at once: the people scaled by hand + the ones it falls on by position
+      const people = peopleInRole(e, r, staff, roleById)
+        .map(({ staff: s, via, assignment }) => ({
+          staffId: s._id,
+          name: s.name,
+          via,
+          ...assignmentDetail(r, assignment, byId.get(s._id), teams_),
+        }))
+        .sort((a, b) => (a.via === b.via ? a.name.localeCompare(b.name, "pt-BR") : a.via === "person" ? -1 : 1));
       return {
         eventId: e._id,
         date: e.date,
@@ -195,10 +199,17 @@ async function buildRolePatch(
     if (html === null) return { code: "PREPARATION_INVALID", message: "Preparação inválida ou muito longa." };
     patch.preparation = html;
   }
-  if (has("forEveryone")) {
-    const v = body.forEveryone ?? false;
-    if (typeof v !== "boolean") return { code: "FOR_EVERYONE_INVALID", message: "'Para toda a equipe' deve ser sim ou não." };
-    patch.forEveryone = v;
+  // the positions the função falls on by itself (both = toda a equipe, [] = só quem for escalado)
+  if (has("forRoomRoles") || has("forEveryone")) {
+    const legacy = body.forEveryone === true ? [...ROOM_ROLES] : body.forEveryone === false ? [] : undefined;
+    // on a create every field is expected: no position given = nobody automatically
+    const raw = body.forRoomRoles ?? legacy ?? (partial ? undefined : []);
+    if (raw !== undefined) {
+      if (!Array.isArray(raw) || raw.some((v) => !ROOM_ROLES.includes(v as RoomRole))) {
+        return { code: "FOR_ROOM_ROLES_INVALID", message: "Escolha líderes, auxiliares, os dois ou nenhum." };
+      }
+      patch.forRoomRoles = ROOM_ROLES.filter((r) => raw.includes(r));
+    }
   }
   if (has("hasDetail")) {
     const v = body.hasDetail ?? false;
@@ -219,20 +230,15 @@ async function buildRolePatch(
 }
 
 /**
- * Normalises the three detail flags so an impossible combination can never be
- * stored: a "for everyone" role has no per-person detail at all, and a
- * team-backed detail needs neither a typed value nor a hint.
+ * Normalises the detail flags so an impossible combination can never be
+ * stored. The POSITIONS are independent of them: a função that falls on the
+ * líderes may still take hand-picked people, and those people may carry a
+ * detail — only a detail with no source at all is dropped.
  */
 function normaliseDetailFlags(patch: Partial<ScheduleRoleData>, current?: ScheduleRole): void {
   const value = <K extends keyof ScheduleRoleData>(k: K): ScheduleRoleData[K] =>
     (patch[k] !== undefined ? patch[k] : current?.[k as keyof ScheduleRole]) as ScheduleRoleData[K];
 
-  if (value("forEveryone")) {
-    patch.hasDetail = false;
-    patch.detailFromTeam = false;
-    patch.detailPlaceholder = "";
-    return;
-  }
   if (!value("hasDetail")) {
     patch.detailFromTeam = false;
     patch.detailPlaceholder = "";
@@ -252,7 +258,7 @@ async function staffWithoutTeamIn(roleId: string): Promise<string[]> {
   return staff.filter((s) => ids.has(s._id) && !s.team).map((s) => s.name);
 }
 
-/** POST /api/schedule/roles  { name, emoji?, instructions?, preparation?, forEveryone?, hasDetail?, detailPlaceholder? } */
+/** POST /api/schedule/roles  { name, emoji?, instructions?, preparation?, forRoomRoles?, hasDetail?, detailPlaceholder? } */
 schedule.post("/roles", ORGANIZER, async (c) => {
   const body = await c.req.json<Record<string, unknown>>().catch(() => null);
   if (!body) return fail(c, "BODY_INVALID", "Corpo da requisição inválido.");

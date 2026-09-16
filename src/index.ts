@@ -4,7 +4,7 @@ import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { config } from "./config";
 import { getDb } from "./db";
-import { ensureIndexes, listAdmins, loadAdminPhones } from "./models/users";
+import { ensureIndexes, ensureRosterLogins, listAdmins, loadAdminPhones } from "./models/users";
 import { ensureCategoryIndexes } from "./models/categories";
 import { ensureTransportIndexes } from "./models/transports";
 import { ensureBedroomIndexes } from "./models/bedrooms";
@@ -111,11 +111,19 @@ await ensureTeamIndexes(); // also migrates the legacy "equipe" category into te
 await ensureScoreIndexes();
 await ensureGalleryIndexes();
 void backfillGalleryFaces();
-// every admin is on the team roster too (room, food restrictions, vest…); their record can't be deleted nor have the phone changed
+// every admin is on the team roster too (room, food restrictions, vest…); their record can't be deleted nor have the phone changed,
+// and it is never a team profile: no líder, no time, no kids
 {
   await loadAdminPhones();
-  const created = await ensureAdminsOnRoster((await listAdmins()).map((a) => ({ name: a.name, phone: a.phone })));
+  const { created, normalized, orphaned } = await ensureAdminsOnRoster((await listAdmins()).map((a) => ({ name: a.name, phone: a.phone })));
   if (created > 0) console.log(`👤 ${created} admin(s) added to the team roster`);
+  if (normalized > 0) console.log(`🔑 ${normalized} admin roster record(s) reset to auxiliar / no time${orphaned > 0 ? ` (${orphaned} kid(s) left without a líder)` : ""}`);
+}
+{
+  const n = await ensureRosterLogins();
+  console.log(
+    `👤 roster logins: staff ${n.staffCreated} created / ${n.staffPhones} phones, parents ${n.parentsCreated} created / ${n.guardianPhones} phones`,
+  );
 }
 console.log(`MongoDB connected → ${config.dbName}`);
 // re-arm the check-in window timers (they live in memory)

@@ -10,7 +10,7 @@ import { listTeams } from "../models/teams";
 import { getSettings } from "../models/settings";
 import { listAdmins } from "../models/users";
 import { bedroomCapacity } from "../types";
-import { assignmentDetail, teamMap } from "./schedule";
+import { assignmentDetail, autoAudienceLabel, isAutomatic, teamMap } from "./schedule";
 
 /**
  * Read-only "tools" the editor's AI helper may call when a request needs facts
@@ -138,7 +138,12 @@ export const AI_TOOLS: AiTool[] = [
                 const { detail } = assignmentDetail(r, a, staffById.get(a.staffId), teamById);
                 return detail ? `${who} (${detail})` : who;
               });
-            return { funcao: r ? `${r.emoji} ${r.name}`.trim() : rid, para_todos: r?.forEveryone || undefined, escalados: people.length ? people : undefined };
+            return {
+              funcao: r ? `${r.emoji} ${r.name}`.trim() : rid,
+              // vale automaticamente para uma posição E/OU tem gente escalada à mão
+              vale_para: r && isAutomatic(r) ? autoAudienceLabel(r) : undefined,
+              escalados: people.length ? people : undefined,
+            };
           }),
         }));
     },
@@ -151,7 +156,7 @@ export const AI_TOOLS: AiTool[] = [
     run: async () =>
       (await listRoles()).map((r) => ({
         funcao: `${r.emoji} ${r.name}`.trim(),
-        para_todos: r.forEveryone || undefined,
+        vale_para: isAutomatic(r) ? autoAudienceLabel(r) : undefined,
         detalhe: r.hasDetail ? (r.detailFromTeam ? "o time da pessoa" : r.detailPlaceholder || "sim") : undefined,
         instrucoes: textOf(r.instructions, 600) || undefined,
         preparacao: textOf(r.preparation, 400) || undefined,

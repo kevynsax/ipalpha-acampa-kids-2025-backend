@@ -12,6 +12,7 @@ import { IMAGE_MODELS, generateImage, isImageShape } from "../services/imageAi";
 import { describeStyleTokens } from "../services/htmlStyle";
 import { NOTES_MAX_CHARS, NOTES_MODES, sortCamperNotes, type CamperNotesFields, type NotesSubject } from "../services/camperNotesAi";
 import { FIELD_DEDUP_MODEL, dedupField, isDedupField } from "../services/fieldDedupAi";
+import { GUESS_SEX_MODEL, guessCamperSex } from "../services/guessCamperSexAi";
 import type { Role, SessionUser } from "../types";
 
 interface Env {
@@ -33,6 +34,7 @@ interface Env {
  *   POST /api/ai/transcribe  multipart { file } → { text } (voice message recorded in the chat, whisper)
  *   POST /api/ai/image    { description, shape?, model? } → { dataUrl, … } (illustration for the document)
  *   POST /api/ai/camper-notes { notes, current } → { fields, model } (sorts pasted observations into the camper form fields)
+ *   POST /api/ai/guess-sex    { name } → { sex } (F/M/null — hidden field on the new-camper form)
  *
  * Proxies the OpenAI-compatible gateway (AI_BASE_URL / AI_API_KEY) so the key
  * never reaches the browser. Same permission as uploading images: admin,
@@ -268,6 +270,7 @@ ai.use("/suggest", editorGuard);
 ai.use("/transcribe", editorGuard);
 ai.use("/image", editorGuard);
 ai.use("/dedup-field", editorGuard);
+ai.use("/guess-sex", editorGuard);
 // admin / organizer / medical for kids and staff; a parent may sort the notes of their own kid ("parent" subject)
 ai.use("/camper-notes", async (c, next) => {
   const body = (await c.req.raw.clone().json().catch(() => null)) as { subject?: unknown } | null;
@@ -354,6 +357,22 @@ ai.post("/dedup-field", async (c) => {
   const r = await dedupField(body.field, value, c.req.raw.signal);
   if (r.usage) void recordAiUsage({ at: new Date(), vendor: FIELD_DEDUP_MODEL.vendor, model: FIELD_DEDUP_MODEL.id, kind: "dedup_field", userId: c.get("userId"), ...r.usage, ok: true });
   return c.json({ value: r.value, changed: r.changed });
+});
+
+/**
+ * POST /api/ai/guess-sex { name } → { sex: "F" | "M" | null }
+ *
+ * Background fill of the hidden sex field on the camper form, from the kid's
+ * (Brazilian) first name. GLM 5.3 flash. Best-effort: any failure or a
+ * disabled gateway returns `sex: null` so the form never blocks.
+ */
+ai.post("/guess-sex", async (c) => {
+  const body = (await c.req.json().catch(() => null)) as { name?: unknown } | null;
+  const name = typeof body?.name === "string" ? body.name.trim().slice(0, 100) : "";
+  if (!name || !config.ai.apiKey) return c.json({ sex: null });
+  const r = await guessCamperSex(name, c.req.raw.signal);
+  if (r.usage) void recordAiUsage({ at: new Date(), vendor: GUESS_SEX_MODEL.vendor, model: GUESS_SEX_MODEL.id, kind: "guess_sex", userId: c.get("userId"), ...r.usage, ok: true });
+  return c.json({ sex: r.sex });
 });
 
 ai.post("/edit", async (c) => {

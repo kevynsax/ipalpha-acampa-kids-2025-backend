@@ -4,7 +4,7 @@ import { findById } from "../models/users";
 import { verifySessionToken } from "../services/session";
 import { addClient, clientCount, removeClient, type RealtimeClient } from "../services/realtime";
 import { loadCollections } from "../services/snapshot";
-import { staffSessionExpired } from "../middleware/auth";
+import { roleNoLongerValid, staffSessionExpired } from "../middleware/auth";
 
 /**
  * GET /api/realtime?token=<jwt>  →  WebSocket
@@ -22,7 +22,8 @@ realtime.get(
     const token = c.req.query("token") ?? "";
     const payload = token ? await verifySessionToken(token) : null;
     const user = payload ? await findById(payload.userId) : null;
-    const evicted = payload && user ? await staffSessionExpired(payload.role, user.phone, user._id) : false;
+    // window closed, or the profile itself is gone (parent with no kid, admin on a staff session)
+    const evicted = payload && user ? (await staffSessionExpired(payload.role, user.phone, user._id)) || (await roleNoLongerValid(payload.role, user)) : false;
 
     if (!payload || !user || evicted) {
       return {

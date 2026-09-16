@@ -1,14 +1,15 @@
 import { Hono } from "hono";
 import { config } from "../config";
-import { findByPhone, toPublicUser, updateUser } from "../models/users";
+import { ensureLoginAccount, findByPhone, toPublicUser, updateUser } from "../models/users";
 import { findStaffByPhone } from "../models/staff";
+import { listCampersOfGuardian } from "../models/campers";
 import { getSettings, staffAccessOpen } from "../models/settings";
 import { staffHasAccess } from "../services/scope";
 import { availableRolesOf } from "../services/roles";
 import { comteleEnabled, comteleSendSms, resolveSmsTarget } from "../services/comtele";
 import { generateLocalCode, hashCode, verifyLocalCode } from "../services/otp";
 import { createSession, revokeSession, verifySessionToken } from "../services/session";
-import type { CheckinWindow, PublicUser, Role, SessionUser } from "../types";
+import type { CheckinWindow, PublicUser, Role, SessionUser, User } from "../types";
 import { formatBrazilPhone, isRole, minutesBetween, normalizeBrazilPhone, pickActiveRole } from "../utils";
 import { requireAuth } from "../middleware/auth";
 
@@ -63,6 +64,18 @@ async function staffWindowError(phone: string, role: Role) {
 }
 
 /**
+ * The profile a login LANDS on: the highest-privilege one the person may
+ * ACTUALLY enter with (see services/roles#availableRolesOf) — an admin is
+ * always an admin, and a stored "parent" with no kid enrolled is not offered
+ * at all. Falls back to the stored list only when the data offers nothing, so
+ * the error the person gets is still about their own account.
+ */
+async function landingRole(user: User): Promise<{ role: Role; available: Role[] }> {
+  const available = await availableRolesOf(user);
+  return { role: pickActiveRole(available.length > 0 ? available : user.roles), available };
+}
+
+/**
  * The same person can hold multiple roles (parent + staff + admin).
  * Login flow: phone number only. The session's active role is picked
  * automatically as the highest-privilege role the person holds.
@@ -78,8 +91,15 @@ auth.post("/otp/request", async (c) => {
     );
   }
 
-  // look up the PERSON by phone (unique)
-  const user = await findByPhone(phone);
+  // look up the PERSON by phone (unique). Roster / guardian phones may not
+  // have a users doc yet (the admin form never created one) — provision it.
+  let user = await findByPhone(phone);
+  if (!user) {
+    const [member, kids] = await Promise.all([findStaffByPhone(phone), listCampersOfGuardian(phone)]);
+    if (member?.phone) await ensureLoginAccount(member.name, member.phone, "staff");
+    if (kids.length) await ensureLoginAccount(kids[0].guardianName || kids[0].name, phone, "parent");
+    user = await findByPhone(phone);
+  }
   if (!user) {
     return c.json(
       {
@@ -91,7 +111,15 @@ auth.post("/otp/request", async (c) => {
       404,
     );
   }
-  const role: Role = pickActiveRole(user.roles);
+  const { role, available } = await landingRole(user);
+  // the account exists but the data gives it no profile (e.g. an ex-responsible
+  // whose kid is not enrolled this year): say so instead of sending a useless code
+  if (available.length === 0) {
+    return c.json(
+      { error: { code: "NO_PROFILE", message: "Este telefone não tem nenhum perfil no acampamento deste ano." } },
+      403,
+    );
+  }
 
   // frozen account?
   if (user.frozenUntil && user.frozenUntil > new Date()) {
@@ -123,7 +151,7 @@ auth.post("/otp/request", async (c) => {
           success: true,
           phone,
           role,
-          roles: user.roles,
+          roles: available,
           expiresAt: user.otp.expiresAt.toISOString(),
           expireMinutes: config.otp.expireMinutes,
           delivery: user.otp.provider === "comtele" ? "sms" : "mock",
@@ -197,7 +225,7 @@ auth.post("/otp/request", async (c) => {
     success: true,
     phone,
     role,
-    roles: user.roles,
+    roles: available,
     expiresAt: expiresAt.toISOString(),
     expireMinutes: config.otp.expireMinutes,
     // "redirect": the code went to the admin's test phone (Settings → Testes), not to this number
@@ -231,7 +259,14 @@ auth.post("/otp/verify", async (c) => {
       404,
     );
   }
-  const role: Role = pickActiveRole(user.roles);
+  const { role, available } = await landingRole(user);
+  // the profile may have vanished between the request and the verify
+  if (available.length === 0) {
+    return c.json(
+      { error: { code: "NO_PROFILE", message: "Este telefone não tem nenhum perfil no acampamento deste ano." } },
+      403,
+    );
+  }
 
   // frozen?
   if (user.frozenUntil && user.frozenUntil > new Date()) {
@@ -320,8 +355,8 @@ auth.post("/otp/verify", async (c) => {
     success: true,
     token,
     tokenExpiresAt: session.expiresAt.toISOString(),
-    // `roles` is what the switcher offers: the stored ones PLUS the roster / guardian reality
-    user: { ...toPublicUser(user), roles: await availableRolesOf(user), activeRole: role },
+    // `roles` is what the switcher offers: the profiles the DATA gives this person
+    user: { ...toPublicUser(user), roles: available, activeRole: role },
   });
 });
 
