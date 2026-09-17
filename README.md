@@ -43,16 +43,14 @@ Copy `.env.example` to `.env` for local development. Production configuration an
 | `FACE_MIN_DETECTION_SCORE` | detections below this are ignored, both when indexing and when reading the reference (default `0.4`) |
 | `NOTIFY_COALESCE_SECONDS` | changes to the same person within this window become one SMS (default `20`) |
 | `AI_BASE_URL` / `AI_API_KEY` | OpenAI-compatible API used by the existing editor AI helpers |
-| `AI_ASSISTANT_BASE_URL` / `AI_ASSISTANT_API_KEY` | optional separate provider for the read-only camp assistant; when empty, it reuses `AI_BASE_URL` / `AI_API_KEY` |
-| `AI_ASSISTANT_MODEL` | tool-calling model for the admin/organizer camp assistant (default `gpt-6-astra`) |
-| `AI_LIVE_BASE_URL` / `AI_LIVE_API_KEY` | OpenAI **Live** API for the spoken, two-way assistant (`POST /v1/live/sessions`). An OpenAI-compatible gateway is not enough. **Empty key = the drawer stays text-only** |
+| `AI_LIVE_BASE_URL` / `AI_LIVE_API_KEY` | OpenAI **Live** API for the spoken, two-way assistant (`POST /v1/live/sessions`). An OpenAI-compatible gateway is not enough. **Empty key = the drawer shows as unavailable** |
 | `AI_LIVE_MODEL` | voice model that runs the conversation (default `gpt-live-1`) |
-| `AI_LIVE_VOICE` | the voice it answers in (default `marin`) |
+| `AI_LIVE_VOICE` | the voice it answers in (default `marin`; Brazilian Portuguese: `bossa` feminine or `tempo` masculine) |
 | `AI_LIVE_BACKEND_MODEL` | reasoning model GPT-Live delegates to, and the one that actually reads MongoDB (default `gpt-5.6-terra`) |
 
 ## Read-only camp assistant
 
-Admins and listed organizers see a live assistant button throughout the logged-in app. The browser sends questions to `POST /api/assistant/chat`; the backend keeps the API key private and lets the model query an explicit allowlist of application collections with read-only MongoDB tools.
+Admins and listed organizers see a live assistant button throughout the logged-in app. It opens a spoken, two-way conversation; the backend keeps the API key private and lets the model query an explicit allowlist of application collections with read-only MongoDB tools.
 
 - No insert, update, delete, `$out`, `$merge`, `$where`, server-side JavaScript or cross-collection `$lookup` is exposed.
 - `sessions` is never exposed. OTP internals, QR tokens, file bytes and gallery face embeddings are stripped.
@@ -61,10 +59,10 @@ Admins and listed organizers see a live assistant button throughout the logged-i
 
 ### Talking to it (GPT-Live)
 
-With `AI_LIVE_API_KEY` set, the drawer opens on a spoken conversation instead of a chat box. It is a real two-way call, not push-to-talk: both sides can speak at once and the person can cut the answer off mid-sentence.
+The full-screen focus view holds a spoken conversation. It is a real two-way call, not push-to-talk: both sides can speak at once and the person can cut the answer off mid-sentence. The assistant introduces itself when the session starts.
 
 - The browser holds the microphone and the speaker over WebRTC. `POST /api/assistant/live` trades its SDP offer for GPT-Live's answer, so the API key never reaches the client.
-- GPT-Live only runs the conversation. It delegates every question to the `AI_LIVE_BACKEND_MODEL` Responses model, which gets the same prompt and the same read-only MongoDB tools as the written chat.
+- GPT-Live only runs the conversation. It delegates every question to the `AI_LIVE_BACKEND_MODEL` Responses model, which gets the same prompt and the read-only MongoDB tools.
 - Tool calls come back down the browser's data channel and are executed by `POST /api/assistant/tool`, which re-checks the caller's session and role — the browser never touches Mongo.
 - Sessions are billed per minute, so closing the drawer hangs up.
 
@@ -714,7 +712,7 @@ carries details — the app is the source of truth:
 | `roleChanges` | a person is assigned / reassigned (role or detail) / removed in an event, the event's date or time changes, the event is deleted, or a role's name / instructions / "for everyone" flag changes | each person whose duty in that event changed (explicit assignment or "for everyone" default) |
 | `checkinConfirmation` | a team member's church check-in is recorded (`POST /api/staff/me/checkin` or the admin roll call `POST /api/staff/:id/checkin`) | that person — *"seu check-in foi feito com sucesso. Lembre-se de conferir as crianças do seu quarto no app."* Sent at once (not coalesced); undoing a check-in sends nothing |
 | `occurrences` | an occurrence is registered (`POST /api/occurrences`, by an admin or the medical team) | every admin account with a phone, except the one who registered it — names who registered and who is involved (never the description). Sent at once; admins are not gated by the team access window |
-| `busCheckin` | a kid's BUS check-in is recorded (`POST /api/campers/:id/checkin/bus`) | the kid's guardian — *"a Ana está a caminho de um fim de semana incrível para aprender sobre Jesus! Aproveite o fim de semana livre: vamos cuidar muito bem dela."* (gendered by `Camper.sex`). Sent at once; undo sends nothing |
+| `busCheckin` | a kid's BUS check-in is recorded (`POST /api/campers/:id/checkin/bus`) | the kid's guardian — *"a Ana está a caminho de um fim de semana incrível para aprender sobre Jesus! Aproveite o fim de semana livre: vamos cuidar muito bem dela."* (gendered by `Camper.sex`, falling back to `Camper.probableGender`). Sent at once; undo sends nothing |
 | `parentWelcome` | the parents' access window (`settings.parentAccessWindow`) is open — checked at boot, at the window edges, when the window / toggle is edited, hourly | every parent account with a kid and a phone, ONCE ever (`users.welcomeSentAt`, atomic claim) — *"a Ana está inscrita no Acampa Kids! Acompanhe tudo pelo app. Entre com o celular … em <app>"*. **Off by default.** Switching a welcome toggle on (this one or `enrolments`) texts everyone pending at once — the admin UI previews the count via `GET /api/settings/welcome-preview` and asks first |
 | `parentEdits` | a parent edited their kid's "Pontos de atenção" (`PUT /api/campers/:id/parent`) | medical field changed → medical team + every admin + the kid's caretaker; observations only → the caretaker. Sent at once |
 | `checkinReminder` | the instant `settings.checkinReminder.at` is reached (timer re-armed on every settings write and at boot, hourly safety net) | every active team member with a phone who has no check-in yet — *"chegou a hora do seu check-in!"*. **Nothing goes out while the date is unset**; sent ONCE per date (atomic claim on `sentAt`), picking a new date re-arms it. Not gated by the team access window |

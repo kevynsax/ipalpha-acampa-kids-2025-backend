@@ -3,6 +3,7 @@ import { getDb } from "../db";
 import type { CamperCheckin, CamperSex, Staff, VestStatus } from "../types";
 import { ROOM_ROLES } from "../types";
 import { toCheckin, toMedications } from "./campers";
+import { AI_REVIEW_MAX_ATTEMPTS, aiReviewDueFilter, aiReviewRetryAt } from "./aiReviewRetry";
 
 const COLLECTION = "staff";
 
@@ -16,8 +17,11 @@ function toStaff(doc: Record<string, unknown> | null): Staff | null {
     aiReviewError: (doc.aiReviewError as string) ?? "",
     aiReviewStartedAt: (doc.aiReviewStartedAt as Date) ?? null,
     aiReviewFinishedAt: (doc.aiReviewFinishedAt as Date) ?? null,
+    aiReviewAttempts: typeof doc.aiReviewAttempts === "number" ? doc.aiReviewAttempts : 0,
+    aiReviewNextRetryAt: (doc.aiReviewNextRetryAt as Date) ?? null,
     name: doc.name as string,
     sex: doc.sex === "F" || doc.sex === "M" ? (doc.sex as CamperSex) : null,
+    probableGender: doc.probableGender === "F" || doc.probableGender === "M" ? (doc.probableGender as CamperSex) : null,
     phone: (doc.phone as string) ?? null,
     active: (doc.active as boolean) ?? true,
     team: (doc.team as string) ?? null,
@@ -102,8 +106,8 @@ export async function claimStaffForAiReview(limit: number): Promise<Staff[]> {
   for (let i = 0; i < limit; i++) {
     const now = new Date();
     const doc = await db.collection(COLLECTION).findOneAndUpdate(
-      { aiReviewStatus: "pending" },
-      { $set: { aiReviewStatus: "processing", aiReviewStartedAt: now, aiReviewError: "", updatedAt: now } },
+      { $or: [{ aiReviewStatus: "pending" }, aiReviewDueFilter(now)] },
+      { $set: { aiReviewStatus: "processing", aiReviewStartedAt: now, aiReviewError: "", aiReviewNextRetryAt: null, updatedAt: now } },
       { sort: { createdAt: 1 }, returnDocument: "after" },
     );
     const staff = toStaff(doc as Record<string, unknown> | null);
@@ -113,10 +117,27 @@ export async function claimStaffForAiReview(limit: number): Promise<Staff[]> {
   return out;
 }
 
-export async function finishStaffAiReview(id: string, patch: Partial<StaffData>, error = ""): Promise<void> {
+/** finishes one staff review; returns the failed-attempt count (for retry logs) */
+export async function finishStaffAiReview(id: string, patch: Partial<StaffData>, error = ""): Promise<number> {
   const db = await getDb();
   const now = new Date();
-  await db.collection(COLLECTION).updateOne({ _id: new ObjectId(id) }, { $set: { ...patch, aiReviewStatus: error ? "error" : "reviewed", aiReviewError: error, aiReviewFinishedAt: now, updatedAt: now } });
+  if (!error) {
+    await db.collection(COLLECTION).updateOne({ _id: new ObjectId(id) }, { $set: { ...patch, aiReviewStatus: "reviewed", aiReviewError: "", aiReviewFinishedAt: now, aiReviewNextRetryAt: null, updatedAt: now } });
+    return 0;
+  }
+  const after = await db.collection(COLLECTION).findOneAndUpdate(
+    { _id: new ObjectId(id) },
+    { $set: { ...patch, aiReviewStatus: "error", aiReviewError: error, aiReviewFinishedAt: now, updatedAt: now }, $inc: { aiReviewAttempts: 1 } },
+    { returnDocument: "after" },
+  );
+  const attempts = typeof (after as Record<string, unknown> | null)?.aiReviewAttempts === "number"
+    ? (after as Record<string, unknown>).aiReviewAttempts as number
+    : 1;
+  await db.collection(COLLECTION).updateOne(
+    { _id: new ObjectId(id) },
+    { $set: { aiReviewNextRetryAt: attempts < AI_REVIEW_MAX_ATTEMPTS ? aiReviewRetryAt(attempts, now) : null, updatedAt: new Date() } },
+  );
+  return attempts;
 }
 
 export async function requeueStaleStaffAiReviews(staleMs = 15 * 60_000): Promise<number> {
@@ -299,7 +320,7 @@ export async function ensureAdminsOnRoster(admins: { name: string; phone: string
   for (const a of admins) {
     const existing = await findStaffByPhone(a.phone);
     if (!existing) {
-      await insertStaff({ name: a.name, sex: null, phone: a.phone, active: true, team: null, bedroom: null, roomRole: "helper", transportation: null, allergies: [], drugAllergies: [], foodRestrictions: "", healthIssues: [], medications: [], healthNotes: "" });
+      await insertStaff({ name: a.name, sex: null, probableGender: null, phone: a.phone, active: true, team: null, bedroom: null, roomRole: "helper", transportation: null, allergies: [], drugAllergies: [], foodRestrictions: "", healthIssues: [], medications: [], healthNotes: "" });
       created++;
     }
   }

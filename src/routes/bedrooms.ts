@@ -18,7 +18,7 @@ import { BEDROOM_GROUPS, bedroomCapacity, ROOM_ROLES, type Bedroom, type Bedroom
 import { serializeCamperList } from "./campers";
 import { serializeStaffList } from "./staff";
 import { canSeeBedroom, resolveScope } from "../services/scope";
-import { applyBedroomGroupToOccupants, resolveCamperSex } from "../services/camperSex";
+import { applyBedroomGroupToOccupants, resolveGender } from "../services/camperSex";
 import { notifyRoomsApplied, roomsAppliedMessages } from "../services/notify";
 import { getSettings } from "../models/settings";
 import { comteleEnabled } from "../services/comtele";
@@ -330,10 +330,10 @@ bedrooms.post("/apply", async (c) => {
     if (bedroom === s.bedroom && roomRole === s.roomRole) continue; // no-op
     if (roomRole !== s.roomRole) roleChanged = true;
     // girls/boys wing decides the sex; a staff room / no room re-guesses from the name
-    const sex = bedroom !== s.bedroom
-      ? await resolveCamperSex({ name: s.name, bedroomId: bedroom, requested: null, guessIfMissing: true, signal: c.req.raw.signal, userId: c.get("userId") })
+    const gender = bedroom !== s.bedroom
+      ? await resolveGender({ name: s.name, bedroomId: bedroom, requested: s.probableGender, guessIfMissing: true, signal: c.req.raw.signal, userId: c.get("userId") })
       : undefined;
-    await updateStaff(m.id, { bedroom, roomRole, ...(sex !== undefined ? { sex } : {}) });
+    await updateStaff(m.id, { bedroom, roomRole, ...(gender !== undefined ? { sex: gender.sex, probableGender: gender.probableGender } : {}) });
     staffApplied++;
   }
 
@@ -343,10 +343,10 @@ bedrooms.post("/apply", async (c) => {
     const bedroom = asRoom(m.bedroom);
     const caretakerId = asRoom(m.caretakerId);
     if (bedroom === k.bedroom && caretakerId === k.caretakerId) continue; // no-op
-    const sex = bedroom !== k.bedroom
-      ? await resolveCamperSex({ name: k.name, bedroomId: bedroom, requested: null, guessIfMissing: true, signal: c.req.raw.signal, userId: c.get("userId") })
+    const gender = bedroom !== k.bedroom
+      ? await resolveGender({ name: k.name, bedroomId: bedroom, requested: k.probableGender, guessIfMissing: true, signal: c.req.raw.signal, userId: c.get("userId") })
       : undefined;
-    await updateCamper(m.id, { bedroom, caretakerId, ...(bedroom !== k.bedroom ? { bed: null } : {}), ...(sex !== undefined ? { sex } : {}) });
+    await updateCamper(m.id, { bedroom, caretakerId, ...(bedroom !== k.bedroom ? { bed: null } : {}), ...(gender !== undefined ? { sex: gender.sex, probableGender: gender.probableGender } : {}) });
     campersApplied++;
   }
 

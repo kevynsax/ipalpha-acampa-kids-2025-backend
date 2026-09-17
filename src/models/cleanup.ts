@@ -246,6 +246,24 @@ export async function wipeNotices(): Promise<number> {
 }
 
 /**
+ * The import DICTIONARY cache (`camperImportDictionary`): the remembered
+ * spreadsheet-value → app-value mappings that both the staff and the camper
+ * imports reuse to skip re-mapping the same columns every year. SUPER ADMIN
+ * only — clearing it makes the next import start its mapping from scratch.
+ */
+export async function wipeImportCache(): Promise<number> {
+  const db = await getDb();
+  const { deletedCount } = await db.collection("camperImportDictionary").deleteMany({});
+  return deletedCount;
+}
+
+/** How many remembered mappings the import dictionary cache holds. */
+export async function countImportCache(): Promise<number> {
+  const db = await getDb();
+  return db.collection("camperImportDictionary").countDocuments({});
+}
+
+/**
  * How many "already sent" marks each of the two notification blocks holds.
  * These live on the people (and on the settings), not in the realtime
  * collections, so the page asks for them.

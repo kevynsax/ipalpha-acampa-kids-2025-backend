@@ -19,12 +19,19 @@ export async function sexFromBedroomId(bedroomId: string | null | undefined): Pr
   return sexFromGroup(room?.group);
 }
 
+export interface ResolvedGender {
+  /** from the bedroom wing, else the requested value; the room never writes a guess here */
+  sex: CamperSex | null;
+  /** the requested value, else a GLM guess on the name; internal, never shown */
+  probableGender: CamperSex | null;
+}
+
 /**
- * Bedroom wing wins when it has a sex. Otherwise the requested value (the
- * form's hidden GLM guess). If that's also missing and `guessIfMissing`, ask
- * GLM 5.3 flash from the name.
+ * Bedroom wing wins for `sex`. `probableGender` keeps the requested value
+ * (the form's hidden GLM guess) and, when the room has no wing and
+ * `guessIfMissing`, asks GLM 5.3 flash from the name.
  */
-export async function resolveCamperSex(opts: {
+export async function resolveGender(opts: {
   name: string;
   bedroomId: string | null | undefined;
   /** already-known wing — skip the bedroom lookup (used right after a group change) */
@@ -34,16 +41,69 @@ export async function resolveCamperSex(opts: {
   guessIfMissing?: boolean;
   signal?: AbortSignal;
   userId?: string;
-}): Promise<CamperSex | null> {
+}): Promise<ResolvedGender> {
   const fromRoom = opts.group !== undefined ? sexFromGroup(opts.group) : await sexFromBedroomId(opts.bedroomId);
-  if (fromRoom) return fromRoom;
-  if (opts.requested === "F" || opts.requested === "M") return opts.requested;
-  if (!opts.guessIfMissing || !opts.name.trim()) return null;
-  const r = await guessCamperSex(opts.name, opts.signal);
-  if (r.usage && opts.userId) {
-    void recordAiUsage({ at: new Date(), vendor: GUESS_SEX_MODEL.vendor, model: GUESS_SEX_MODEL.id, kind: "guess_sex", userId: opts.userId, ...r.usage, ok: true });
+  const requested = opts.requested === "F" || opts.requested === "M" ? opts.requested : null;
+  let probableGender = requested;
+  if (!probableGender && !fromRoom && opts.guessIfMissing && opts.name.trim()) {
+    const r = await guessCamperSex(opts.name, opts.signal);
+    if (r.usage && opts.userId) {
+      void recordAiUsage({ at: new Date(), vendor: GUESS_SEX_MODEL.vendor, model: GUESS_SEX_MODEL.id, kind: "guess_sex", userId: opts.userId, ...r.usage, ok: true });
+    }
+    probableGender = r.sex;
   }
-  return r.sex;
+  return { sex: fromRoom ?? requested, probableGender };
+}
+
+const validSex = (v: CamperSex | null | undefined): CamperSex | null => (v === "F" || v === "M" ? v : null);
+
+/**
+ * Shared write path (POST / PUT of campers and staff): decides the stored
+ * `sex` (room wins, else the sent value) and `probableGender` (sent value,
+ * else a GLM guess when the name or room changed and the room says nothing).
+ * Untouched records keep both existing values without spending model calls.
+ */
+export async function resolveWriteGender(opts: {
+  name: string;
+  bedroomId: string | null | undefined;
+  group?: BedroomGroup | null;
+  sexTouched: boolean;
+  sexValue: CamperSex | null | undefined;
+  guessTouched: boolean;
+  guessValue: CamperSex | null | undefined;
+  existingSex: CamperSex | null | undefined;
+  existingGuess: CamperSex | null | undefined;
+  nameOrRoomChanged: boolean;
+  signal?: AbortSignal;
+  userId?: string;
+}): Promise<ResolvedGender> {
+  const touched = opts.sexTouched || opts.guessTouched || opts.nameOrRoomChanged;
+  const sentSex = opts.sexTouched ? validSex(opts.sexValue) : null;
+  const sentGuess = opts.guessTouched ? validSex(opts.guessValue) : null;
+  const requestedSex = sentSex ?? (touched ? null : validSex(opts.existingSex));
+  const requestedGuess = sentGuess ?? (touched ? null : validSex(opts.existingGuess));
+  const g = await resolveGender({
+    name: opts.name,
+    bedroomId: opts.bedroomId,
+    group: opts.group,
+    requested: requestedSex ?? requestedGuess,
+    guessIfMissing: !(requestedSex ?? requestedGuess) && touched,
+    signal: opts.signal,
+    userId: opts.userId,
+  });
+  return { sex: g.sex, probableGender: requestedGuess ?? g.probableGender ?? validSex(opts.existingGuess) };
+}
+
+export async function resolveCamperSex(opts: {
+  name: string;
+  bedroomId: string | null | undefined;
+  group?: BedroomGroup | null;
+  requested: CamperSex | null | undefined;
+  guessIfMissing?: boolean;
+  signal?: AbortSignal;
+  userId?: string;
+}): Promise<CamperSex | null> {
+  return (await resolveGender(opts)).sex;
 }
 
 /** After a room's wing changes, rewrite every kid and team member sleeping there. */
@@ -58,7 +118,7 @@ export async function applyBedroomGroupToOccupants(
   let campers = 0;
   let staff = 0;
   for (const k of kids) {
-    const sex = await resolveCamperSex({
+    const g = await resolveGender({
       name: k.name,
       bedroomId,
       group,
@@ -67,12 +127,12 @@ export async function applyBedroomGroupToOccupants(
       signal: opts?.signal,
       userId: opts?.userId,
     });
-    if (sex === k.sex) continue;
-    await updateCamper(k._id, { sex });
+    if (g.sex === k.sex && g.probableGender === k.probableGender) continue;
+    await updateCamper(k._id, { sex: g.sex, probableGender: g.probableGender });
     campers++;
   }
   for (const s of occupants) {
-    const sex = await resolveCamperSex({
+    const g = await resolveGender({
       name: s.name,
       bedroomId,
       group,
@@ -81,8 +141,8 @@ export async function applyBedroomGroupToOccupants(
       signal: opts?.signal,
       userId: opts?.userId,
     });
-    if (sex === s.sex) continue;
-    await updateStaff(s._id, { sex });
+    if (g.sex === s.sex && g.probableGender === s.probableGender) continue;
+    await updateStaff(s._id, { sex: g.sex, probableGender: g.probableGender });
     staff++;
   }
   return { campers, staff };
@@ -103,6 +163,75 @@ export interface StaffSexEnsureResult {
   unknownNames: string[];
 }
 
+export interface CamperGenderEnsureResult {
+  total: number;
+  alreadySet: number;
+  fromSex: number;
+  guessed: number;
+  unknown: number;
+  updated: number;
+}
+
+/**
+ * Fill `campers.probableGender` when missing. The stored `sex` (room or an
+ * earlier guess) wins; otherwise a name guess. Best-effort: ambiguous names
+ * stay null for the next run.
+ */
+export async function ensureProbableGenderOnCampers(opts?: { signal?: AbortSignal }): Promise<CamperGenderEnsureResult> {
+  const campers = await listCampers();
+  const missing = campers.filter((k) => k.probableGender !== "F" && k.probableGender !== "M");
+  const result: CamperGenderEnsureResult = { total: campers.length, alreadySet: campers.length - missing.length, fromSex: 0, guessed: 0, unknown: 0, updated: 0 };
+  if (!missing.length) {
+    console.log(`👶 camper gender: ${result.alreadySet}/${result.total} already set`);
+    return result;
+  }
+  console.log(`👶 camper gender: filling ${missing.length} missing of ${campers.length}…`);
+  const planned = new Map<string, CamperSex>();
+  const needGuess: typeof missing = [];
+  for (const k of missing) {
+    if (k.sex === "F" || k.sex === "M") {
+      planned.set(k._id, k.sex);
+      result.fromSex++;
+    } else needGuess.push(k);
+  }
+  if (needGuess.length) {
+    const names = [...new Set(needGuess.map((k) => k.name.split(" ")[0]?.trim()).filter((n): n is string => !!n))];
+    const chunks = Array.from({ length: Math.ceil(names.length / 50) }, (_, i) => names.slice(i * 50, i * 50 + 50));
+    const guesses = new Map<string, CamperSex>();
+    const answers = await Promise.all(chunks.map((chunk) => guessIndividualNamesSex(chunk, opts?.signal)));
+    for (const answer of answers) {
+      for (const [name, sex] of Object.entries(answer)) if (sex) guesses.set(firstNameKey(name), sex);
+    }
+    for (const k of needGuess) {
+      const sex = guesses.get(firstNameKey(k.name));
+      if (sex) {
+        planned.set(k._id, sex);
+        result.guessed++;
+      }
+    }
+    for (const k of needGuess.filter((k) => !planned.has(k._id))) {
+      const r = await guessCamperSex(k.name, opts?.signal);
+      if (r.sex !== "F" && r.sex !== "M") {
+        result.unknown++;
+        continue;
+      }
+      planned.set(k._id, r.sex);
+      result.guessed++;
+    }
+  }
+  for (const k of missing) {
+    const sex = planned.get(k._id);
+    if (!sex) {
+      result.unknown++;
+      continue;
+    }
+    await updateCamper(k._id, { probableGender: sex });
+    result.updated++;
+  }
+  console.log(`👶 camper gender: ${result.alreadySet}/${result.total} already set · ${result.fromSex} from sex · ${result.guessed} guessed · ${result.unknown} unknown`);
+  return result;
+}
+
 function logStaffSexEnsure(r: StaffSexEnsureResult): void {
   const shown = r.unknownNames.slice(0, 8);
   const extra = r.unknownNames.length > shown.length ? ` +${r.unknownNames.length - shown.length}` : "";
@@ -117,7 +246,7 @@ function logStaffSexEnsure(r: StaffSexEnsureResult): void {
 export async function ensureProbablyGenreOnStaff(opts?: { signal?: AbortSignal }): Promise<StaffSexEnsureResult> {
   const [staff, bedrooms] = await Promise.all([listStaff({ includeDraft: true }), listBedrooms({ includeDraft: true })]);
   const rooms = new Map(bedrooms.map((b) => [b._id, b]));
-  const missing = staff.filter((s) => s.sex !== "F" && s.sex !== "M");
+  const missing = staff.filter((s) => (s.sex !== "F" && s.sex !== "M") || (s.probableGender !== "F" && s.probableGender !== "M"));
   const result: StaffSexEnsureResult = { total: staff.length, alreadySet: staff.length - missing.length, fromRoom: 0, guessed: 0, batchGuessed: 0, fallbackGuessed: 0, unknown: 0, updated: 0, unknownNames: [] };
   if (!missing.length) {
     logStaffSexEnsure(result);
@@ -173,7 +302,7 @@ export async function ensureProbablyGenreOnStaff(opts?: { signal?: AbortSignal }
     }
     if (fromRoomIds.has(s._id)) result.fromRoom++;
     else result.guessed++;
-    await updateStaff(s._id, { sex });
+    await updateStaff(s._id, fromRoomIds.has(s._id) ? { sex, probableGender: sex } : { probableGender: sex });
     result.updated++;
   }
   logStaffSexEnsure(result);

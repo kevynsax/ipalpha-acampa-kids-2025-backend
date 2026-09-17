@@ -51,6 +51,15 @@ export const config = {
     superAdminPhone: process.env.IMPORT_SUPER_ADMIN_PHONE ?? "+5561985891092",
   },
 
+  /**
+   * Background import worker → API callback. The worker POSTs per-record
+   * review results so the API can push a websocket event; the shared secret
+   * authenticates it (empty = the endpoint refuses everything).
+   */
+  worker: {
+    secret: process.env.WORKER_SECRET ?? "",
+  },
+
   /** Account that is guaranteed the top-level admin role on every boot. */
   superAdminPhone: process.env.SUPER_ADMIN_PHONE ?? "",
 
@@ -58,16 +67,11 @@ export const config = {
   ai: {
     baseUrl: aiBaseUrl,
     apiKey: aiApiKey,
-    /** Read-only camp assistant provider. Falls back to the editor gateway when not set separately. */
-    assistantBaseUrl: (process.env.AI_ASSISTANT_BASE_URL ?? aiBaseUrl).replace(/\/$/, ""),
-    assistantApiKey: process.env.AI_ASSISTANT_API_KEY ?? aiApiKey,
-    /** Must support OpenAI-compatible tool calling. */
-    assistantModel: process.env.AI_ASSISTANT_MODEL ?? "gpt-6-astra",
     /**
      * Two-way voice conversation with the assistant (GPT-Live, POST /v1/live/sessions).
      * GPT-Live owns the microphone and the speaker; it delegates every question to
      * the Responses model below, which is the one that calls the MongoDB tools.
-     * Empty key = the drawer stays text-only.
+     * Empty key = the assistant drawer shows as unavailable.
      */
     live: {
       baseUrl: (process.env.AI_LIVE_BASE_URL ?? "https://api.openai.com/v1").replace(/\/$/, ""),

@@ -38,13 +38,11 @@ try {
     const bytes = new Uint8Array(await readFile(path));
     const staff = /equipe|staff|volunt/i.test(basename(path));
     const importId = `dryrun-${randomUUID()}`;
-    const first = staff
-      ? await analyzeStaffImport({ data: bytes, fileName: basename(path), importId, mapOnly: true })
-      : await analyzeCamperImport({ data: bytes, fileName: basename(path), fileType: "text/csv", importId, mapOnly: true });
-    const mapping = Object.fromEntries(first.columns.map((c) => [c.source, c.target]));
+    // Single smart pass: the analysis now runs to the end whenever the
+    // identity columns were matched, exactly like the UI does.
     const result = staff
-      ? await analyzeStaffImport({ data: bytes, fileName: basename(path), importId, mapping })
-      : await analyzeCamperImport({ data: bytes, fileName: basename(path), fileType: "text/csv", importId, mapping });
+      ? await analyzeStaffImport({ data: bytes, fileName: basename(path), importId })
+      : await analyzeCamperImport({ data: bytes, fileName: basename(path), fileType: "text/csv", importId });
     const reviewKinds = Object.fromEntries([...new Set(result.reviews.map((r) => r.kind))].map((kind) => [kind, result.reviews.filter((r) => r.kind === kind).length]));
     const createdItemCounts = Object.fromEntries([...new Set(result.createdItems.map((item) => item.kind))].map((kind) => [kind, result.createdItems.filter((item) => item.kind === kind).length]));
     console.log(JSON.stringify({

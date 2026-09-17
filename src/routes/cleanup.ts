@@ -1,10 +1,14 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
+import { config } from "../config";
+import { normalizeBrazilPhone } from "../utils";
 import { requireAuth } from "../middleware/auth";
 import { requireAdmin } from "../middleware/roles";
 import { deleteFile } from "../models/files";
 import {
   CLEANUP_GROUPS,
   STAFF_KEEP_GROUPS,
+  countImportCache,
+  wipeImportCache,
   countNotificationMarks,
   resetCampSettings,
   wipeBedrooms,
@@ -105,7 +109,27 @@ async function wipe(group: CleanupGroup, keep: StaffKeepGroup[], roles: boolean)
 
 cleanup.use("*", requireAuth, requireAdmin);
 
+/** The deployment owner (SUPER_ADMIN_PHONE) — the only one who may wipe the import cache. */
+function isSuperAdmin(c: Context): boolean {
+  const phone = config.superAdminPhone ? normalizeBrazilPhone(config.superAdminPhone) : null;
+  return !!phone && c.get("user").phone === phone;
+}
+
 cleanup.get("/marks", async (c) => c.json(await countNotificationMarks()));
+
+/** SUPER ADMIN: how many remembered import mappings the cache holds. */
+cleanup.get("/import-cache", async (c) => {
+  if (!isSuperAdmin(c)) return c.json({ error: { code: "FORBIDDEN", message: "Só o dono da implantação pode ver isso." } }, 403);
+  return c.json({ count: await countImportCache() });
+});
+
+/** SUPER ADMIN: wipe the staff + camper import dictionary cache. */
+cleanup.post("/import-cache", async (c) => {
+  if (!isSuperAdmin(c)) return c.json({ error: { code: "FORBIDDEN", message: "Só o dono da implantação pode limpar o cache de importação." } }, 403);
+  const removed = await wipeImportCache();
+  console.log(`🧹 cleanup (import-cache) by ${c.get("user").name}: ${removed} mapping(s)`);
+  return c.json({ removed });
+});
 
 cleanup.post("/:group", async (c) => {
   const group = c.req.param("group");

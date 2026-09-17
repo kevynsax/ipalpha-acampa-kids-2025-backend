@@ -87,6 +87,21 @@ async function flush(): Promise<void> {
   }
 }
 
+/** targeted event, not a collection replace: one record's background review finished */
+export type AiReviewedKind = "camper" | "staff";
+export type AiReviewedStatus = "reviewed" | "error";
+
+/**
+ * Tells every connected client that one record's background AI review reached
+ * a terminal state. The payload carries only the record identity — clients
+ * re-read what they need (or ignore it; unknown types are skipped).
+ */
+export function emitAiReviewed(kind: AiReviewedKind, id: string, status: AiReviewedStatus, attempts: number): void {
+  if (clients.size === 0) return;
+  const payload = JSON.stringify({ type: "ai-review-done", at: new Date().toISOString(), data: { kind, id, status, attempts } });
+  for (const client of clients) safeSend(client, payload);
+}
+
 // ── staff access window: evict the ordinary team when it closes ─────────────
 
 /**

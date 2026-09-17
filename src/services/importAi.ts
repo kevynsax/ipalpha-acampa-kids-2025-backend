@@ -128,6 +128,7 @@ export async function mapImportColumns(
     `Você mapeia colunas de CSV/Excel para uma ficha de acampamento no Brasil. Use o nome da coluna e até 5 exemplos. Responda somente JSON {"mappings":[{"source":"...","target":"chave ou null","confidence":0-1}]}. Não force: target null se não houver campo claro. Campos possíveis: ${targets.map((t) => `${t.key}=${t.label} (sinônimos: ${t.aliases.join(", ")})`).join("; ")}.`,
     { columns },
     signal,
+    IMPORT_FAST_FALLBACKS,
   );
   const out: Record<string, { target: string | null; confidence: number }> = {};
   for (const m of answer?.mappings ?? []) {
@@ -137,19 +138,30 @@ export async function mapImportColumns(
   return out;
 }
 
-export async function dedupeImportValues(field: string, values: string[], signal?: AbortSignal): Promise<Record<string, string | boolean>> {
+/** Category fields whose cells can list several conditions at once — these are split into atomic items. */
+export const SPLIT_CATEGORY_FIELDS = ["allergies", "drugAllergies", "healthIssues"];
+
+export async function dedupeImportValues(field: string, values: string[], signal?: AbortSignal, split = false): Promise<Record<string, string | boolean | string[]>> {
   if (values.length === 0) return {};
   const bool = field === "neurodivergent";
-  const answer = await jsonCall<{ values?: { raw?: string; canonical?: string; boolean?: boolean }[] }>(
+  const splitPrompt = `Você normaliza valores da coluna "${field}" de uma planilha de acampamento. Cada célula pode listar VÁRIAS condições: divida em itens individuais (separados por vírgula, ponto e vírgula, barra, travessão ou "e") e agrupe grafias equivalentes de cada item em um texto canônico curto em português do Brasil, sem inventar fatos — por exemplo "Rinite, Asma e Picadas de Insetos" vira ["Rinite", "Asma", "Picada de inseto"]. Cada item deve ser um NOME CURTO (no máximo 4 palavras): se a célula for um texto narrativo, extraia só os nomes das condições citadas e ignore dosagens, instruções e recomendações — "Portador de valva aórtica bicúspide, com insuficiência discreta... Amoxil 500mg antes de procedimentos" vira ["Valva aórtica bicúspide"]. Nomes de medicamentos e substâncias específicas (Plasil, amoxicilina, ibuprofeno…) são itens válidos SOMENTE quando o texto afirma alergia, reação ou uso atual; menção condicional ou profilática ("caso necessidade", "se precisar", "profilaxia", "antes de procedimentos") NÃO vira item — fica nas observações. Apenas negações (não, nenhuma, sem alergia) ou texto que claramente não cita nenhuma alergia/condição viram lista vazia. Cada valor bruto deve aparecer uma vez na resposta, preservado exatamente. Responda JSON {"values":[{"raw":"...","items":["..."]}]}`;
+  const answer = await jsonCall<{ values?: { raw?: string; canonical?: string; boolean?: boolean; items?: string[] }[] }>(
     IMPORT_FAST_MODEL.id,
-    `Você deduplica valores de uma coluna de planilha de pessoas de um acampamento. Campo: ${field}. Cada valor bruto deve aparecer uma vez na resposta. ${bool ? "Classifique cada valor como booleano; vazio/ausência não vem nesta lista. TEA, autismo, TDAH e neurodivergências explícitas=true; negações=false." : "Agrupe grafias equivalentes e devolva um texto canônico curto em português do Brasil, sem inventar fatos."} Responda JSON {"values":[{"raw":"...",${bool ? '"boolean":true' : '"canonical":"..."'}}]}.`,
+    bool
+      ? `Você deduplica valores de uma coluna de planilha de pessoas de um acampamento. Campo: ${field}. Cada valor bruto deve aparecer uma vez na resposta. Classifique cada valor como booleano; vazio/ausência não vem nesta lista. TEA, autismo, TDAH e neurodivergências explícitas=true; negações=false. Responda JSON {"values":[{"raw":"...","boolean":true}]}.`
+      : split
+        ? splitPrompt
+        : `Você deduplica valores de uma coluna de planilha de pessoas de um acampamento. Campo: ${field}. Cada valor bruto deve aparecer uma vez na resposta. Agrupe grafias equivalentes e devolva um texto canônico curto em português do Brasil, sem inventar fatos. Responda JSON {"values":[{"raw":"...","canonical":"..."}]}.`,
     { values },
     signal,
+    IMPORT_FAST_FALLBACKS,
   );
-  const out: Record<string, string | boolean> = {};
+  const out: Record<string, string | boolean | string[]> = {};
   for (const item of answer?.values ?? []) {
     if (!item.raw || !values.includes(item.raw)) continue;
-    out[item.raw] = bool ? item.boolean === true : (item.canonical?.trim() || item.raw);
+    if (bool) out[item.raw] = item.boolean === true;
+    else if (split) out[item.raw] = [...new Set((item.items ?? []).map((v) => v?.trim()).filter((v): v is string => !!v && v.length <= 48))].slice(0, 6);
+    else out[item.raw] = item.canonical?.trim() || item.raw;
   }
   return out;
 }
@@ -187,6 +199,7 @@ export async function bestImportMatches(
       `Para cada texto bruto, encontre a opção existente equivalente. Considere erros, abreviações, acentos e ordem de palavras. Só escolha id se for realmente o mesmo item. Quando for uma condição real sem opção existente, sugira createName curto e claro em português do Brasil. Quando o texto negar a condição (não, nenhuma, sem alergia), for só observação livre ou não representar esta categoria, devolva id e createName null: nunca crie uma categoria para uma ausência. Preserve exatamente cada raw. JSON {"matches":[{"raw":"...","id":"id ou null","createName":"nome ou null"}]}.`,
       { kind, values: chunk, candidates },
       signal,
+      IMPORT_FAST_FALLBACKS,
     );
     const answer = await call();
     for (const match of answer?.matches ?? []) {
@@ -195,6 +208,33 @@ export async function bestImportMatches(
         id: typeof match.id === "string" && candidates.some((c) => c.id === match.id) ? match.id : null,
         createName: typeof match.createName === "string" ? match.createName.trim() : null,
       };
+    }
+  }
+  return out;
+}
+
+export type ImportCategoryBucket = "allergies" | "drugAllergies" | "healthIssues" | "none";
+
+/**
+ * A spreadsheet often pours everything into one "allergies" column. Before any
+ * option is matched or created, each atom is routed to the category it really
+ * belongs to: medications never stay in allergies, chronic conditions either.
+ */
+export async function classifyImportItems(items: string[], signal?: AbortSignal, sourceOf?: (item: string) => string | undefined): Promise<Record<string, ImportCategoryBucket>> {
+  const out: Record<string, ImportCategoryBucket> = {};
+  if (items.length === 0) return out;
+  const prompt = (chunk: string[]) => `Você classifica itens de saúde de fichas de acampamento. Para CADA item, escolha exatamente uma categoria:
+- "drugAllergies": alergia ou reação a MEDICAMENTO — nome de remédio (amoxicilina, ibuprofeno, paracetamol, plasil, dipirona, novalgina...) quando o item AFIRMA alergia/reação ("alergia a", "reação a", "urticária", "choque") OU quando vem de uma coluna de alergia (a coluna já afirma a alergia).
+- "healthIssues": condição de saúde ou crônica — asma, bronquite, cardiopatia, valva aórtica, terror noturno, TEA, epilepsia, diabetes...
+- "allergies": gatilho ou quadro alérgico ambiental, de contato ou alimentar — rinite, rinite alérgica, sinusite alérgica, dermatite, poeira, mofo, pólen, picada de inseto/formiga, pelo de animal, peixe, glúten, levedura.
+- "none": o resto — negações, observações livres, intolerâncias sem alergia E nome de remédio sozinho, sem palavra de alergia, vindo de coluna que não é de alergia (é menção de uso, profilaxia ou instrução — vai para as observações, nunca vira alergia).
+Regras: nome de medicamento JAMAIS é "allergies"; condição crônica não alérgica JAMAIS é "allergies"; rinite e demais quadros alérgicos SEMPRE são "allergies"; instrução de uso ou profilaxia ("caso necessidade", "se precisar", "antes de procedimentos") NUNCA é "drugAllergies". Preserve cada item exatamente como recebido. Responda JSON {"items":[{"item":"...","category":"..."}]} para todos os itens: ${JSON.stringify(sourceOf ? chunk.map((item) => ({ item, from: sourceOf(item) ?? "" })) : chunk)}`;
+  for (let from = 0; from < items.length; from += 25) {
+    const chunk = items.slice(from, from + 25);
+    const answer = await jsonCall<{ items?: { item?: string; category?: string }[] }>(IMPORT_FAST_MODEL.id, prompt(chunk), {}, signal, IMPORT_FAST_FALLBACKS);
+    for (const entry of answer?.items ?? []) {
+      if (!entry.item || !chunk.includes(entry.item)) continue;
+      if (entry.category === "allergies" || entry.category === "drugAllergies" || entry.category === "healthIssues" || entry.category === "none") out[entry.item] = entry.category;
     }
   }
   return out;
@@ -210,6 +250,7 @@ export async function matchLeaderWithAi(
     `Encontre qual membro da equipe é a mesma pessoa do nome bruto. Considere apelidos, sobrenomes omitidos e erros. Só responda id quando houver uma opção claramente melhor; em ambiguidade use null. JSON {"id":"id ou null"}.`,
     { raw, staff },
     signal,
+    IMPORT_FAST_FALLBACKS,
   );
   return typeof answer?.id === "string" && staff.some((s) => s.id === answer.id) ? answer.id : null;
 }
@@ -281,6 +322,7 @@ export async function askDateParser(samples: string[], signal?: AbortSignal): Pr
     `Crie o corpo de uma função JavaScript segura que recebe value e devolve uma data ISO YYYY-MM-DD ou null. Datas são de nascimento, priorize formato brasileiro dd/MM/yyyy. Não use eval, Function, require, import, rede, filesystem, timers ou variáveis externas. Responda JSON {"source":"..."}. O source será validado e guardado para auditoria; mantenha curto.`,
     { samples },
     signal,
+    [IMPORT_FAST_MODEL.id, ...IMPORT_FAST_FALLBACKS],
   );
   return typeof answer?.source === "string" ? answer.source.trim().slice(0, 4_000) : null;
 }

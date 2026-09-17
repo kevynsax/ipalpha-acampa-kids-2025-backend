@@ -34,19 +34,18 @@ committed YAML or frontend `VITE_*` variables.
 | `NOTIFY_COALESCE_SECONDS` | `20` |
 | `IMPORT_ADMIN_PHONE` | Admin E.164 phone notified when an AI import review takes over five minutes |
 | `IMPORT_SUPER_ADMIN_PHONE` | Super-admin E.164 phone for import error alerts; default `+5561985891092` |
+| `WORKER_SECRET` | Secret `acampa-2025-secrets`, key `worker-secret`; shared by the API and the import worker for `POST /api/worker/reviewed` (websocket event per reviewed record). **Required (not optional): pods fail to start without the key — patch the Secret before rolling out** |
+| `BACKEND_URL` | Worker only: `http://acampa-2025-backend:3000` (cluster-internal API address for the callback) |
 | `SUPER_ADMIN_PHONE` | E.164 phone guaranteed the top-level `admin` login role at API startup |
 | `AI_BASE_URL` | `https://ai-models.kevyn.com.br/v1` |
 | `AI_API_KEY` | Secret `acampa-2025-secrets`, key `ai-api-key`; optional, empty disables AI |
 | `AI_TRANSCRIBE_URL` | `https://whisper.kevyn.com.br/v1`; empty hides voice input |
 | `AI_TRANSCRIBE_MODEL` | `whisper-large-v3-turbo` |
 | `AI_TRANSCRIBE_KEY` | Optional Secret key `ai-transcribe-key`; leave absent if the speech endpoint needs no authentication |
-| `AI_ASSISTANT_BASE_URL` | `https://ai-models.kevyn.com.br/v1` (same gateway as the editor) |
-| `AI_ASSISTANT_API_KEY` | Optional Secret key `ai-assistant-api-key`; leave absent to reuse `AI_API_KEY` |
-| `AI_ASSISTANT_MODEL` | tool-calling model for the written camp assistant (`gpt-6-astra`) |
 | `AI_LIVE_BASE_URL` | `https://api.openai.com/v1` — GPT-Live needs OpenAI directly; the gateway has no `/v1/live` |
-| `AI_LIVE_API_KEY` | Secret `acampa-2025-secrets`, key `ai-live-api-key`; **optional**, empty leaves the assistant drawer text-only |
+| `AI_LIVE_API_KEY` | Secret `acampa-2025-secrets`, key `ai-live-api-key`; **optional**, empty disables the assistant drawer |
 | `AI_LIVE_MODEL` | voice model running the spoken conversation (`gpt-live-1`) |
-| `AI_LIVE_VOICE` | voice it answers in (`marin`) |
+| `AI_LIVE_VOICE` | voice it answers in (default `marin`; Brazilian Portuguese: `bossa` feminine or `tempo` masculine) |
 | `AI_LIVE_BACKEND_MODEL` | reasoning model GPT-Live delegates to, and the one that reads MongoDB (`gpt-5.6-terra`) |
 | `FACE_SERVICE_URL` | `http://acampa-2025-face:8000` (cluster-internal only). Empty disables the parents' photo search |
 | `FACE_MATCH_THRESHOLD` | `0.22`; low so parents find their kid (a few other children in the results is ok) |

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import * as XLSX from "xlsx";
-import { applyImportDelta, camperDataFromPreview, directImportField, extractImportNumber, isEmptyCategoryValue, parseSpreadsheet } from "./camperImport";
+import { applyCategoryChoices, applyImportDelta, camperDataFromPreview, camperIdentityKey, directImportField, extractImportNumber, isEmptyCategoryValue, isNarrativeCategoryText, narrativeOnlyAtoms, normalizeEmergencyContact, parseImportSex, parseSpreadsheet, splitCategoryText } from "./camperImport";
 import type { CamperImportReviewItem } from "../types";
 
 function book(rows: unknown[][]): Uint8Array {
@@ -46,6 +46,7 @@ describe("camper deterministic column mapping", () => {
     expect(directImportField("Série/ano escolar")?.key).toBe("schoolGrade");
     expect(directImportField("Carteirinha do convênio")?.key).toBe("insuranceCard");
     expect(directImportField("E-mail do responsável")?.key).toBe("guardianEmail");
+    expect(directImportField("Sexo (M ou F)")?.key).toBe("probableGender");
   });
 
   test("recognizes absence values without creating health categories", () => {
@@ -57,6 +58,21 @@ describe("camper deterministic column mapping", () => {
     expect(extractImportNumber("Ônibus 01 - azul")).toBe("1");
     expect(extractImportNumber("bus 1")).toBe("1");
     expect(extractImportNumber("Q0403")).toBe("403");
+  });
+
+  test("parses only explicit spreadsheet sex values", () => {
+    expect(parseImportSex("Feminino")).toBe("F");
+    expect(parseImportSex("M")).toBe("M");
+    expect(parseImportSex("menina")).toBe("F");
+    expect(parseImportSex("não informado")).toBeNull();
+    expect(parseImportSex("Alex")).toBeNull();
+  });
+
+  test("normalization helper remains deterministic for explicit uses", () => {
+    expect(normalizeEmergencyContact("Marcela/11999488182")).toBe("Marcela · (11) 99948-8182");
+    expect(normalizeEmergencyContact("'+55 (11) 99417-5791")).toBe("(11) 99417-5791");
+    expect(normalizeEmergencyContact("Bruna 11 984989876 André 11964762460")).toBe("Bruna · (11) 98498-9876 · André · (11) 96476-2460");
+    expect(normalizeEmergencyContact("Elaíde 11965636070/ Jailson 965214635")).toBe("Elaíde · (11) 96563-6070 · Jailson · (11) 96521-4635");
   });
 });
 
@@ -90,5 +106,83 @@ describe("camper import review delta", () => {
     const data = camperDataFromPreview({ row: 2, name: "Ana", birthDate: "2017-01-02", blocked: false }, "import-id");
     expect(data?.importId).toBe("import-id");
     expect(data?.aiReviewStatus).toBe("pending");
+  });
+
+  test("camper import keeps an uninformed bed position blank",()=>{
+    const data=camperDataFromPreview({row:2,name:"Ana",birthDate:"2017-01-02",blocked:false},"import-id");
+    expect(data?.bed).toBeNull();
+  });
+
+  test("camper import preserves the emergency field until background AI review",()=>{
+    const data=camperDataFromPreview({row:2,name:"Ana",birthDate:"2017-01-02",emergencyContact:"Marcela/11999488182",blocked:false},"import-id");
+    expect(data?.emergencyContact).toBe("Marcela/11999488182");
+  });
+
+  test("explicit spreadsheet sex is stored only as probableGender", () => {
+    const data = camperDataFromPreview({ row: 2, name: "Ana", birthDate: "2017-01-02", sex: null, probableGender: "F", blocked: false }, "import-id");
+    expect(data?.sex).toBeNull();
+    expect(data?.probableGender).toBe("F");
+  });
+
+  test("uses full name or single name plus birthdate as the deterministic duplicate key",()=>{
+    expect(camperIdentityKey("Ana Maria Silva","2017-01-02")).toBe("name:ana maria silva");
+    expect(camperIdentityKey("Ana","2017-01-02")).toBe("name-birth:ana:2017-01-02");
+    expect(camperIdentityKey("Ana",null)).toBeNull();
+  });
+
+  test("duplicate review choices update, keep or merge deterministically",()=>{
+    const duplicate=review({kind:"duplicate",existingId:"existing",existingData:{name:"Ana",birthDate:"2017-01-02",school:"Antiga"},incomingData:{name:"Ana",birthDate:"2017-01-02",school:"Nova",church:"IPAlpha"},mergedData:{name:"Ana",birthDate:"2017-01-02",school:"Nova",church:"IPAlpha"},mergeAvailable:true});
+    const row={row:2,name:"Ana",birthDate:"2017-01-02",guardianName:"Maria",guardianPhone:"+5511999999999",blocked:true};
+    expect(applyImportDelta([row],[duplicate],{"review-1":{value:"keep"}}).skipped[0]?.reason).toBe("Cadastro existente mantido");
+    const updated=applyImportDelta([row],[duplicate],{"review-1":{value:"update"}}).rows[0];
+    expect(updated.existingCamperId).toBe("existing");
+    expect(updated.blocked).toBe(false);
+    const merged=applyImportDelta([row],[duplicate],{"review-1":{value:"merge"}}).rows[0];
+    expect(merged.church).toBe("IPAlpha");
+    expect(merged.existingCamperId).toBe("existing");
+  });
+
+  test("declined category options become observations instead of selections", () => {
+    const [row] = applyCategoryChoices([{
+      row: 2,
+      allergies: ["keep", "decline"],
+      drugAllergies: [],
+      healthIssues: ["decline-health"],
+      bed: "decline-bed",
+      generalNotes: "Recado existente.",
+      categoryNotesById: {
+        decline: ["Alergias informadas: água gelada."],
+        "decline-health": ["Condições de saúde informadas: terror noturno."],
+        "decline-bed": ["Posição da cama informada: perto da porta."],
+      },
+    }], ["decline", "decline-health", "decline-bed"]);
+    expect(row.allergies).toEqual(["keep"]);
+    expect(row.healthIssues).toEqual([]);
+    expect(row.bed).toBeNull();
+    expect(row.generalNotes).toBe("Recado existente. Posição da cama informada: perto da porta. Alergias informadas: água gelada. Condições de saúde informadas: terror noturno.");
+    expect(row.categoryNotesById).toBeDefined();
+  });
+});
+
+describe("narrative health cells", () => {
+  const prophylaxis = "Portador de valva aórtica bicúspide, com insuficiência discreta e ectasia de aorta ascendente. Possui recomendação de antibioticoterapia profilática APENAS CASO NECESSIDADE de procedimentos cruentos: Amoxil (500mg/5ml) 17ml via oral 60 min antes de procedimentos.";
+  test("labels stay labels, narratives stay notes", () => {
+    expect(isNarrativeCategoryText("Rinite")).toBe(false);
+    expect(isNarrativeCategoryText("Rinite alérgica, poeira e mofo")).toBe(false);
+    expect(isNarrativeCategoryText(prophylaxis)).toBe(true);
+    expect(isNarrativeCategoryText("uma duas três quatro cinco seis sete oito nove dez onze doze treze quatorze quinze")).toBe(true);
+  });
+  test("a narrative cell never spawns category atoms", () => {
+    expect(splitCategoryText(prophylaxis)).toEqual([]);
+  });
+  test("only atoms seen exclusively in narratives are blocked", () => {
+    const blocked = narrativeOnlyAtoms([
+      ["Rinite, poeira", ["Rinite", "Poeira"]],
+      [prophylaxis, ["Valva aórtica bicúspide", "Amoxil"]],
+      ["Asma desde os 3 anos com uso de bombinha em crises frequentes e acompanhamento", ["Asma"]],
+      ["Asma", ["Asma"]],
+    ]);
+    expect([...blocked].sort()).toEqual(["Amoxil", "Valva aórtica bicúspide"]);
+    expect(narrativeOnlyAtoms([])).toEqual(new Set());
   });
 });

@@ -13,7 +13,7 @@ import { bedroomFullMessage, isInvalid, parseBedroom, parseMedications, parseMul
 import { serializeStaffList } from "./staff";
 import { camperVisibility, canParentEdit, canRunBusCheckin, canRunCheckin, resolveScope, type Scope } from "../services/scope";
 import { campInProgress, campPeriod } from "../services/camp";
-import { resolveCamperSex } from "../services/camperSex";
+import { resolveWriteGender } from "../services/camperSex";
 import { ensureLoginAccount } from "../models/users";
 
 interface Env {
@@ -44,6 +44,7 @@ export function serializeCamper(k: Camper) {
     name: k.name,
     birthDate: k.birthDate,
     sex: k.sex,
+    probableGender: k.probableGender,
     cpf: formatCpf(k.cpf),
     rg: k.rg,
     school: k.school,
@@ -182,6 +183,13 @@ async function buildPatch(
     if (v === undefined || v === null || v === "") patch.sex = null;
     else if (v !== "F" && v !== "M") return { code: "SEX_INVALID", message: "Sexo inválido." };
     else patch.sex = v;
+  }
+
+  if (has("probableGender")) {
+    const v = body.probableGender;
+    if (v === undefined || v === null || v === "") patch.probableGender = null;
+    else if (v !== "F" && v !== "M") return { code: "SEX_INVALID", message: "Sexo inválido." };
+    else patch.probableGender = v;
   }
 
   if (has("team")) {
@@ -603,14 +611,21 @@ campers.post("/", async (c) => {
   if (bad) return fail(c, "CARETAKER_INVALID", bad, 409);
 
   // girls/boys room wins; staff room / no room keeps the form's hidden GLM guess (or we guess here)
-  data.sex = await resolveCamperSex({
+  const gender = await resolveWriteGender({
     name: data.name,
     bedroomId: data.bedroom,
-    requested: data.sex,
-    guessIfMissing: data.sex !== "F" && data.sex !== "M",
+    sexTouched: true,
+    sexValue: data.sex,
+    guessTouched: data.probableGender !== undefined,
+    guessValue: data.probableGender,
+    existingSex: null,
+    existingGuess: null,
+    nameOrRoomChanged: true,
     signal: c.req.raw.signal,
     userId: c.get("userId"),
   });
+  data.sex = gender.sex;
+  data.probableGender = gender.probableGender;
 
   const created = await insertCamper(data);
   if (created.guardianPhone) void ensureLoginAccount(created.guardianName || created.name, created.guardianPhone, "parent");
@@ -646,18 +661,24 @@ campers.put("/:id", async (c) => {
   const bedroomChanged = result.patch.bedroom !== undefined && result.patch.bedroom !== existing.bedroom;
   const nameChanged = result.patch.name !== undefined && result.patch.name !== existing.name;
   const sexTouched = result.patch.sex !== undefined;
-  if (bedroomChanged || nameChanged || sexTouched) {
+  if (bedroomChanged || nameChanged || sexTouched || result.patch.probableGender !== undefined) {
     // girls/boys room always wins. Form's hidden GLM guess is kept when present;
     // a staff-room move or a rename without a guess asks GLM from the name.
-    const fromForm = result.patch.sex === "F" || result.patch.sex === "M" ? result.patch.sex : undefined;
-    result.patch.sex = await resolveCamperSex({
+    const gender = await resolveWriteGender({
       name,
       bedroomId: bedroom,
-      requested: fromForm ?? (bedroomChanged || nameChanged ? null : existing.sex),
-      guessIfMissing: !fromForm && (bedroomChanged || nameChanged),
+      sexTouched,
+      sexValue: result.patch.sex,
+      guessTouched: result.patch.probableGender !== undefined,
+      guessValue: result.patch.probableGender,
+      existingSex: existing.sex,
+      existingGuess: existing.probableGender,
+      nameOrRoomChanged: bedroomChanged || nameChanged,
       signal: c.req.raw.signal,
       userId: c.get("userId"),
     });
+    result.patch.sex = gender.sex;
+    result.patch.probableGender = gender.probableGender;
   }
 
   const updated = await updateCamper(existing._id, result.patch);

@@ -43,7 +43,30 @@ const COLLECTIONS: Record<string, AssistantCollection> = {
   sms_usage: { description: "Métricas de envio de SMS." },
 };
 
+/**
+ * Who is asking. `all` (admin / organizer) reaches every collection below;
+ * `medical` (a member of the medical team) is limited to the campers and the
+ * reference data needed to READ their health — never staff, accounts,
+ * settings, occurrences, audit logs, scores, photos or imports.
+ */
+export type AssistantAudience = "all" | "medical";
+
+const MEDICAL_COLLECTIONS: readonly string[] = ["campers", "bedrooms", "teams", "transports", "categories", "medicationDoses"];
+
+function collectionsFor(audience: AssistantAudience): Record<string, AssistantCollection> {
+  if (audience === "all") return COLLECTIONS;
+  return Object.fromEntries(MEDICAL_COLLECTIONS.map((name) => [name, COLLECTIONS[name]]));
+}
+
 const NO_ARGS = { type: "object", properties: {}, additionalProperties: false };
+const NAVIGATION_DESTINATIONS = [
+  "home", "campers", "camper", "staff", "staff_member", "bedrooms", "bedroom", "buses",
+  "schedule", "event", "schedule_roles", "preparation", "instructions", "instruction",
+  "occurrences", "medications", "checkin", "scoreboard", "scoreboard_team", "scoreboard_event",
+  "gallery", "profile", "settings", "general_settings", "trials", "categories", "cleanup", "teams",
+  "preparation_settings", "instructions_settings", "checkin_settings", "organizers", "game_organizers",
+  "medical_staff", "vest_helpers", "photographers", "contacts", "notifications", "seeds", "about",
+] as const;
 const MAX_ROWS = 200;
 const MAX_RESULT_CHARS = 120_000;
 const MAX_TIME_MS = 8_000;
@@ -60,9 +83,9 @@ export interface AssistantTool {
   run: (args: Record<string, unknown>) => Promise<unknown>;
 }
 
-function collectionOf(value: unknown): { name: string; config: AssistantCollection } {
+function collectionOf(value: unknown, allowed: Record<string, AssistantCollection>): { name: string; config: AssistantCollection } {
   const name = typeof value === "string" ? value : "";
-  const config = COLLECTIONS[name];
+  const config = allowed[name];
   if (!config) throw new Error(`Coleção não permitida: ${name || "(vazia)"}`);
   return { name, config };
 }
@@ -143,14 +166,17 @@ function compactResult(value: unknown): unknown {
   return { truncated: true, message: "Resultado grande demais. Refine o filtro ou o agrupamento.", preview: json.slice(0, MAX_RESULT_CHARS) };
 }
 
-export const ASSISTANT_TOOLS: AssistantTool[] = [
+/** The read-only tools this session may call — scoped to the audience's collections. */
+export function buildAssistantTools(audience: AssistantAudience): AssistantTool[] {
+  const allowed = collectionsFor(audience);
+  return [
   {
     name: "list_collections",
     description: "Lista todas as coleções de dados do aplicativo que o assistente pode consultar, com quantidade e campos disponíveis. Use primeiro quando não souber onde está uma informação.",
     parameters: NO_ARGS,
     run: async () => {
       const db = await getDb();
-      return Promise.all(Object.entries(COLLECTIONS).map(async ([name, config]) => {
+      return Promise.all(Object.entries(allowed).map(async ([name, config]) => {
         const [count, sample] = await Promise.all([
           db.collection(name).estimatedDocumentCount(),
           db.collection(name).findOne({}, { projection: safeProjection(config, {}) }),
@@ -165,7 +191,7 @@ export const ASSISTANT_TOOLS: AssistantTool[] = [
     parameters: {
       type: "object",
       properties: {
-        collection: { type: "string", enum: Object.keys(COLLECTIONS) },
+        collection: { type: "string", enum: Object.keys(allowed) },
         filter: { type: "object", description: "Filtro MongoDB. Ex.: {\"bedroom\":\"id\"}, {\"checkin\":null}, {\"name\":{\"$regex\":\"Ana\",\"$options\":\"i\"}}", additionalProperties: true },
         projection: { type: "object", description: "Campos a incluir (1) ou excluir (0).", additionalProperties: { type: "integer", enum: [0, 1] } },
         sort: { type: "object", description: "Ordenação por campo: 1 crescente, -1 decrescente.", additionalProperties: { type: "integer", enum: [-1, 1] } },
@@ -175,7 +201,7 @@ export const ASSISTANT_TOOLS: AssistantTool[] = [
       additionalProperties: false,
     },
     run: async (args) => {
-      const { name, config } = collectionOf(args.collection);
+      const { name, config } = collectionOf(args.collection, allowed);
       const filter = args.filter && typeof args.filter === "object" && !Array.isArray(args.filter) ? args.filter : {};
       assertSafe(filter, "filter");
       assertNoHiddenReferences(filter, config);
@@ -198,14 +224,14 @@ export const ASSISTANT_TOOLS: AssistantTool[] = [
     parameters: {
       type: "object",
       properties: {
-        collection: { type: "string", enum: Object.keys(COLLECTIONS) },
+        collection: { type: "string", enum: Object.keys(allowed) },
         pipeline: { type: "array", minItems: 1, maxItems: 12, items: { type: "object", additionalProperties: true } },
       },
       required: ["collection", "pipeline"],
       additionalProperties: false,
     },
     run: async (args) => {
-      const { name, config } = collectionOf(args.collection);
+      const { name, config } = collectionOf(args.collection, allowed);
       if (!Array.isArray(args.pipeline) || !args.pipeline.length || args.pipeline.length > 12) throw new Error("Pipeline inválido.");
       for (const stage of args.pipeline) {
         if (!stage || typeof stage !== "object" || Array.isArray(stage)) throw new Error("Estágio inválido.");
@@ -222,19 +248,37 @@ export const ASSISTANT_TOOLS: AssistantTool[] = [
       return compactResult({ collection: name, rows: sanitize(rows, new Set(config.hiddenFields)) });
     },
   },
-];
-
-export function assistantToolSpecs() {
-  return ASSISTANT_TOOLS.map((tool) => ({ type: "function", function: { name: tool.name, description: tool.description, parameters: tool.parameters } }));
+  ];
 }
 
-/** Same tools in the flat Responses-API shape, for the model GPT-Live delegates to. */
-export function assistantResponsesToolSpecs() {
-  return ASSISTANT_TOOLS.map((tool) => ({ type: "function", name: tool.name, description: tool.description, parameters: tool.parameters }));
+export function assistantToolSpecs(audience: AssistantAudience) {
+  return buildAssistantTools(audience).map((tool) => ({ type: "function", function: { name: tool.name, description: tool.description, parameters: tool.parameters } }));
 }
 
-export async function runAssistantTool(name: string, rawArgs: string): Promise<string> {
-  const tool = ASSISTANT_TOOLS.find((item) => item.name === name);
+/** Same tools in the flat Responses-API shape, plus one client-side, read-only navigation action. */
+export function assistantResponsesToolSpecs(audience: AssistantAudience) {
+  return [
+    ...buildAssistantTools(audience).map((tool) => ({ type: "function", name: tool.name, description: tool.description, parameters: tool.parameters })),
+    {
+      type: "function",
+      name: "navigate_app",
+      description: "Abre uma página, menu ou ficha já existente no frontend do Acampa Kids. Use diretamente quando a pessoa pedir para abrir, mostrar ou ir a uma tela. Isto apenas navega: nunca cria, edita, salva, marca, registra, exclui ou altera dados. Para fichas, informe record_id quando já o souber; caso contrário passe em name o nome como foi ouvido. O frontend tolera pequenas diferenças de transcrição, como Kevin/Kevyn. Não consulte read_collection apenas para resolver o nome antes de navegar.",
+      parameters: {
+        type: "object",
+        properties: {
+          destination: { type: "string", enum: NAVIGATION_DESTINATIONS },
+          record_id: { type: "string", description: "ID existente do acampante, membro da equipe, quarto, evento, documento ou time." },
+          name: { type: "string", description: "Nome ou título para localizar a ficha quando o ID não estiver disponível." },
+        },
+        required: ["destination"],
+        additionalProperties: false,
+      },
+    },
+  ];
+}
+
+export async function runAssistantTool(audience: AssistantAudience, name: string, rawArgs: string): Promise<string> {
+  const tool = buildAssistantTools(audience).find((item) => item.name === name);
   if (!tool) return JSON.stringify({ error: `Ferramenta desconhecida: ${name}` });
   let args: Record<string, unknown> = {};
   try {

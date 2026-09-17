@@ -44,14 +44,16 @@ import aiRoutes from "./routes/ai";
 import assistantRoutes from "./routes/assistant";
 import cleanupRoutes from "./routes/cleanup";
 import seedsRoutes from "./routes/seeds";
+import wizardRoutes from "./routes/wizard";
 import camperImportRoutes from "./routes/camperImports";
 import staffImportRoutes from "./routes/staffImports";
+import workerRoutes from "./routes/worker";
 import { comteleEnabled } from "./services/comtele";
 import { publish, rearmWindows, scheduleBirthdayNotices, scheduleCheckinReminder } from "./services/realtime";
 import { sendBirthdayNotices, sendCheckinReminder, syncParentWelcomes, syncWelcomes } from "./services/notify";
 import { getSettings } from "./models/settings";
 import { backfillGalleryFaces } from "./services/galleryFaces";
-import { ensureProbablyGenreOnStaff } from "./services/camperSex";
+import { ensureProbableGenderOnCampers, ensureProbablyGenreOnStaff } from "./services/camperSex";
 import { normalizeBrazilPhone } from "./utils";
 
 const app = new Hono();
@@ -79,9 +81,12 @@ app.route("/api/schedule", scheduleRoutes);
 app.route("/api/campers", camperRoutes);
 app.route("/api/camper-imports", camperImportRoutes);
 app.route("/api/staff-imports", staffImportRoutes);
+// background import worker callbacks (shared WORKER_SECRET, not a user session)
+app.route("/api/worker", workerRoutes);
 app.route("/api/settings", settingsRoutes);
 app.route("/api/cleanup", cleanupRoutes);
 app.route("/api/seeds", seedsRoutes);
+app.route("/api/wizard", wizardRoutes);
 app.route("/api/preparation", preparationRoutes);
 app.route("/api/instructions", instructionRoutes);
 app.route("/api/occurrences", occurrenceRoutes);
@@ -155,6 +160,11 @@ void ensureProbablyGenreOnStaff()
     if (r.updated > 0) publish("staff");
   })
   .catch((err) => console.error("staff sex backfill failed", err));
+void ensureProbableGenderOnCampers()
+  .then((r) => {
+    if (r.updated > 0) publish("campers");
+  })
+  .catch((err) => console.error("camper gender backfill failed", err));
 console.log(`MongoDB connected → ${config.dbName}`);
 // re-arm the check-in window timers (they live in memory)
 {

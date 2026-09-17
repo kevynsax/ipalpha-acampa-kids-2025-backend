@@ -3,7 +3,8 @@ import { createHash } from "node:crypto";
 import { requireAuth } from "../middleware/auth";
 import { requireManager } from "../middleware/roles";
 import { claimCamperImport, findCamperImport, insertCamperImport, markImportDictionaryPublished, updateCamperImport, upsertImportDictionary } from "../models/camperImports";
-import { analyzeCamperImport, applyImportDelta, createLeaderFromReview, IMPORT_FILE_MAX_BYTES, IMPORT_FIELDS, insertImportCampers, publishImportDrafts } from "../services/camperImport";
+import { analyzeCamperImport, applyCategoryChoices, applyImportDelta, createLeaderFromReview, discardImportCategoryOptions, IMPORT_FILE_MAX_BYTES, IMPORT_FIELDS, insertImportCampers, publishImportDrafts } from "../services/camperImport";
+import { getImportProgress, setImportProgress } from "../services/importProgress";
 import { publish } from "../services/realtime";
 import type { CamperImportReviewItem, Role, SessionUser } from "../types";
 
@@ -51,6 +52,7 @@ imports.post("/analyze", async (c) => {
   if (!(file instanceof File)) return fail(c, "FILE_REQUIRED", "Escolha um arquivo CSV ou Excel.");
   if (file.size > IMPORT_FILE_MAX_BYTES) return fail(c, "FILE_TOO_LARGE", "A planilha pode ter no máximo 12 MB.");
   const mappingRaw = typeof body?.mapping === "string" ? body.mapping : "";
+  const progressId = typeof body?.progress === "string" ? body.progress.slice(0, 64) : "";
   let mapping: Record<string, string | null> | undefined;
   try {
     mapping = mappingRaw ? JSON.parse(mappingRaw) as Record<string, string | null> : undefined;
@@ -74,7 +76,7 @@ imports.post("/analyze", async (c) => {
     error: "",
   });
   try {
-    const analysis = await analyzeCamperImport({ data, fileName: file.name, fileType: file.type, importId: record._id, mapping, mapOnly: mapping === undefined, signal: c.req.raw.signal });
+    const analysis = await analyzeCamperImport({ data, fileName: file.name, fileType: file.type, importId: record._id, mapping, signal: c.req.raw.signal, onProgress: progressId ? (key, pct) => setImportProgress(progressId, key, pct) : undefined });
     record = (await updateCamperImport(record._id, {
       status: analysis.status,
       columns: analysis.columns,
@@ -91,6 +93,7 @@ imports.post("/analyze", async (c) => {
     }))!;
     // Persist partial knowledge even on mapping/date panic; draft stays hidden from normal system flows.
     await upsertImportDictionary(analysis.dictionaries, record._id);
+    setImportProgress(progressId, "done", 100);
     return c.json({ import: serialize(record) });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Não foi possível ler a planilha.";
@@ -98,6 +101,8 @@ imports.post("/analyze", async (c) => {
     return fail(c, "IMPORT_FAILED", message);
   }
 });
+
+imports.get("/progress/:token", (c) => c.json({ progress: getImportProgress(c.req.param("token")) }));
 
 imports.get("/:id", async (c) => {
   const record = await findCamperImport(c.req.param("id"));
@@ -139,10 +144,21 @@ imports.post("/:id/apply", async (c) => {
   const data = new Uint8Array(await file.arrayBuffer());
   if (record.fileHash && sha256(data) !== record.fileHash) return fail(c, "FILE_CHANGED", "A planilha mudou desde a prévia. Analise o novo arquivo antes de aplicar.", 409);
   let delta: Record<string, { value?: string; skip?: boolean }> = {};
-  try { delta = typeof body?.delta === "string" ? JSON.parse(body.delta) : {}; }
+  let declinedCategoryIds: string[] = [];
+  let duplicateChoice:"update"|"keep"|"merge"|""="";
+  try {
+    delta = typeof body?.delta === "string" ? JSON.parse(body.delta) : {};
+    const parsed = typeof body?.declinedCategoryIds === "string" ? JSON.parse(body.declinedCategoryIds) : [];
+    declinedCategoryIds = Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : [];
+    duplicateChoice=body?.duplicateChoice==="update"||body?.duplicateChoice==="keep"||body?.duplicateChoice==="merge"?body.duplicateChoice:"";
+  }
   catch { return fail(c, "DELTA_INVALID", "As correções da revisão são inválidas."); }
+  const allowedCategoryIds = new Set(record.createdItems.filter((item) => item.kind === "categoryOption").map((item) => item.id));
+  declinedCategoryIds = [...new Set(declinedCategoryIds.filter((id) => allowedCategoryIds.has(id)))];
   const camperReviews = record.reviews as CamperImportReviewItem[];
-  const { rows, skipped: reviewSkipped } = applyImportDelta(record.preview, camperReviews, delta);
+  if(duplicateChoice)for(const review of camperReviews)if(review.kind==="duplicate"&&!delta[review.id]?.value)delta[review.id]={...delta[review.id],value:duplicateChoice};
+  const chosenPreview = applyCategoryChoices(record.preview, declinedCategoryIds);
+  const { rows, skipped: reviewSkipped } = applyImportDelta(chosenPreview, camperReviews, delta);
   if (!(await claimCamperImport(record._id))) return fail(c, "IMPORT_ALREADY_APPLIED", "Esta importação já está em andamento ou foi aplicada.", 409);
   try {
     const result = await insertImportCampers(rows, record._id);
@@ -154,6 +170,7 @@ imports.post("/:id/apply", async (c) => {
     const skipped = [...skippedByRow.values()];
     const reviews: CamperImportReviewItem[] = camperReviews.map((r) => ({ ...r, value: delta[r.id]?.value ?? r.value, skip: delta[r.id]?.skip ?? r.skip, resolved: true }));
     const updated = (await updateCamperImport(record._id, { status: "completed", dryRun: false, reviews, skipped, finishedAt, error: "" }))!;
+    await discardImportCategoryOptions(record._id, declinedCategoryIds);
     await Promise.all([markImportDictionaryPublished(record._id), publishImportDrafts(record._id)]);
     publish("campers", "bedrooms", "staff", "teams", "transports", "categories");
     return c.json({ import: serialize(updated), inserted: result.inserted, skipped: skipped.length });

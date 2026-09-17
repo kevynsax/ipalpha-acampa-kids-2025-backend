@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { applyStaffDelta, directStaffField, staffDataFromPreview } from "./staffImport";
+import { applyStaffCategoryChoices, applyStaffDelta, directStaffField, normalizeStaffFreeText, parseStaffImportSex, staffDataFromPreview } from "./staffImport";
 import type { StaffImportReviewItem } from "../types";
 
 const item = (patch: Partial<StaffImportReviewItem>): StaffImportReviewItem => ({ id:"r1",row:2,kind:"phone",field:"phone",memberName:"Ana",original:"",value:"",skip:false,resolved:false,...patch });
@@ -21,16 +21,42 @@ describe("staff import review delta",()=>{
     expect(data.roomRole).toBe("helper");
     expect(data.aiReviewStatus).toBeNull();
   });
-  test("preview sex is persisted on apply",()=>{
-    expect(staffDataFromPreview({name:"Ana",sex:"F"},"import-1").sex).toBe("F");
-    expect(staffDataFromPreview({name:"João",sex:"M"},"import-1").sex).toBe("M");
-    expect(staffDataFromPreview({name:"Alex"},"import-1").sex).toBeNull();
+  test("spreadsheet sex is persisted only as probable gender",()=>{
+    const data=staffDataFromPreview({name:"Ana",sex:null,probableGender:"F"},"import-1");
+    expect(data.sex).toBeNull();
+    expect(data.probableGender).toBe("F");
+  });
+  test("parses only explicit staff sex values",()=>{
+    expect(parseStaffImportSex("Feminino")).toBe("F");
+    expect(parseStaffImportSex("menina")).toBe("F");
+    expect(parseStaffImportSex("MASCULINO")).toBe("M");
+    expect(parseStaffImportSex("João")).toBeNull();
+    expect(parseStaffImportSex("provavelmente F")).toBeNull();
+  });
+  test("keeps imported free text untouched for the background AI pass",()=>{
+    expect(normalizeStaffFreeText(" Marcela/11999488182 ")).toBe("Marcela/11999488182");
+    expect(normalizeStaffFreeText("Bruna 11 984989876 André 11964762460")).toBe("Bruna 11 984989876 André 11964762460");
+  });
+  test("declined staff category options move their raw wording to observations",()=>{
+    const [row]=applyStaffCategoryChoices([{name:"Ana",allergies:["a","keep"],drugAllergies:["d"],healthIssues:[],healthNotes:"Já existia.",categoryNotesById:{a:["Alergias informadas: castanha."],d:["Alergias a medicamentos informadas: dipirona."]}}],["a","d"]);
+    expect(row.allergies).toEqual(["keep"]);
+    expect(row.drugAllergies).toEqual([]);
+    expect(row.healthNotes).toBe("Já existia. Alergias informadas: castanha. Alergias a medicamentos informadas: dipirona.");
+  });
+  test("staff duplicate choices use the phone-matched registry",()=>{
+    const duplicate=item({kind:"duplicate",existingId:"old",existingData:{name:"Ana",phone:"+5511999999999",healthNotes:"Atual"},incomingData:{name:"Ana Nova",phone:"+5511999999999",healthNotes:"Planilha"},mergedData:{name:"Ana Nova",phone:"+5511999999999",healthNotes:"Planilha"},mergeAvailable:true});
+    expect(applyStaffDelta([{row:2,name:"Ana Nova",phone:"+5511999999999",blocked:true}],[duplicate],{r1:{value:"keep"}})[0]?.skipReason).toBe("Cadastro existente mantido");
+    const updated=applyStaffDelta([{row:2,name:"Ana Nova",phone:"+5511999999999",blocked:true}],[duplicate],{r1:{value:"update"}})[0];
+    expect(updated.existingStaffId).toBe("old");expect(updated.blocked).toBe(false);
+    const merged=applyStaffDelta([{row:2,name:"Ana Nova",phone:"+5511999999999",blocked:true}],[duplicate],{r1:{value:"merge"}})[0];
+    expect(merged.existingStaffId).toBe("old");expect(merged.healthNotes).toBe("Planilha");
   });
   test("maps adversarial staff headers deterministically",()=>{
     expect(directStaffField("Quem vai servir?")?.key).toBe("name");
     expect(directStaffField("Qual alojamento?")?.key).toBe("bedroom");
     expect(directStaffField("Remédio que dá alergia")?.key).toBe("drugAllergies");
     expect(directStaffField("Está participando?")?.key).toBe("active");
+    expect(directStaffField("Gênero")?.key).toBe("probableGender");
     expect(directStaffField("Alergias (alimentar, tópica ou de medicamentos)")?.key).toBe("healthNotes");
   });
   test("never leaves the same imported phone on two rows",()=>{

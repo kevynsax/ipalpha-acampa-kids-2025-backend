@@ -16,7 +16,7 @@ import type { AiVendor } from "../routes/ai";
  *
  *   "live"  — the admin form (`POST /api/ai/camper-notes`). Runs on paste /
  *             blur while the user watches, and the Save button only waits 8 s.
- *             Speed matters: Opus 5 → Grok 4.5 → GPT 5.6, low reasoning.
+ *             Speed matters: Opus 5 → GPT 5.6 Terra → Grok 4.5, low reasoning.
  *             Rules favour "when in doubt leave it in generalNotes" so a fast
  *             answer never mis-files a fact the admin wouldn't notice.
  *
@@ -41,8 +41,14 @@ export interface NotesModel {
 export interface NotesModeConfig {
   /** in order: first is the default, the rest are fallbacks */
   models: NotesModel[];
-  /** how much the model may think; "low" keeps the form snappy, "high" is for the offline import */
-  reasoningEffort: "low" | "medium" | "high";
+  /** how much the model may think; "xhigh" is the ceiling on /chat/completions ("max" needs the Responses API) */
+  reasoningEffort: "low" | "medium" | "high" | "xhigh";
+  /**
+   * "fast" buys ~2.5x output tokens/s at premium rates, so the form can afford
+   * high reasoning. Only OpenAI and Anthropic offer it, and each spells it
+   * differently — see `callNotesModel`. Omitted = standard speed.
+   */
+  speed?: "fast";
   /** one model may take this long before we move to the next */
   timeoutMs: number;
 }
@@ -51,17 +57,19 @@ export const NOTES_MODES: Record<NotesMode, NotesModeConfig> = {
   live: {
     models: [
       { id: "claude-opus-5", label: "Opus 5", vendor: "anthropic" },
+      { id: "gpt-5.6-terra", label: "GPT 5.6 Terra", vendor: "openai" },
       { id: "grok-4.5", label: "Grok 4.5", vendor: "xai" },
-      { id: "gpt-5.6-luna", label: "GPT 5.6", vendor: "openai" },
     ],
     reasoningEffort: "low",
+    speed: "fast",
     timeoutMs: 40_000,
   },
   bulk: {
     models: [
       { id: "grok-4.6", label: "Grok 4.6", vendor: "xai" },
       { id: "claude-fable-5-1", label: "Fable 5.1", vendor: "anthropic" },
-      { id: "gpt-5.6-luna", label: "GPT 5.6", vendor: "openai" },
+      { id: "gpt-5.6-sol", label: "GPT 5.6 Sol", vendor: "openai" },
+      { id: "glm-5.3", label: "GLM 5.3", vendor: "zhipu" },
     ],
     reasoningEffort: "high",
     timeoutMs: 180_000,
@@ -231,6 +239,7 @@ const GUIDE: { needs: FieldKey[]; line: string }[] = [
   { needs: ["foodRestrictions"], line: `- "Come pouco", "seletivo", "vegetariano", "não come carne", "sem lactose" → "foodRestrictions".` },
   { needs: ["weightKg", "insurance"], line: `- "Peso: 30kg | Convênio médico: Amil (carteirinha 1234)" → "weightKg", "insurance", "insuranceCard"; nada disso fica em "generalNotes".` },
   { needs: ["medications"], line: `- "Medicação de uso diário: Atentah 25mg pela manhã, Depakene 5ml à noite" → um item em "medications" por remédio, com os horários traduzidos.` },
+  { needs: ["medications"], line: `- "Profilaxia com antibiótico caso necessidade / antes de procedimentos" → "medications" (asNeeded, com a instrução) + "healthNotes". Instrução de uso ou profilaxia NUNCA é "drugAllergies": alergia só com a palavra dos pais ("alergia a", "reação", "não pode tomar").` },
   { needs: ["emergencyContact"], line: `- Quem chamar e telefone → "emergencyContact". Nome do responsável principal sem telefone novo → fica em "generalNotes" só se houver pendência.` },
   { needs: ["guardianName", "emergencyContact"], line: `- Nome/telefone/CPF/e-mail do PAI ou MÃE que inscreveu → "guardianName"/"guardianPhone"/"guardianCpf"/"guardianEmail". Quem chamar EM EMERGÊNCIA → "emergencyContact". São campos diferentes.` },
   { needs: ["school", "church"], line: `- "Estuda no Colégio X, 5º ano | Igreja Batista | Convidado por Fulano" → "school", "schoolGrade", "church", "invitedBy"; nada disso fica em "generalNotes".` },
@@ -262,7 +271,7 @@ ${[...guide, ...extra].join("\n")}`;
 /** rules every mode enforces (numbered so the mode-specific ones can continue the list); `leftover` is the box the text came from */
 function commonRules(leftover: "generalNotes" | "healthNotes"): string {
   return `1. Você só MOVE informação: NÃO invente, NÃO acrescente e NÃO complete nada. Só use o que está no texto e nos campos atuais. Nada de doses, horários, nomes, telefones, resumos, explicações ou valores padrão que não estão escritos. NÃO dê nomes de diagnóstico que os pais não escreveram ("vira dormindo" não é sonambulismo; "faz xixi na cama" fica assim, não vira "enurese" a menos que esteja escrito).
-2. Cada informação aparece UMA vez, no campo mais específico. Depois de mover uma informação, ela NÃO fica em "${leftover}". Uma condição marcada em "healthIssues" ou um remédio descrito em "medications" (com sua instrução de crise) NÃO é repetido em "healthNotes"; lá fica só o que não coube ("asma controlada há 1 ano", "cardiopatia: insuficiência da válvula pulmonar").
+2. Cada informação aparece UMA vez, no campo mais específico. Depois de mover uma informação, ela NÃO fica em "${leftover}". Uma condição marcada em "healthIssues" ou um remédio descrito em "medications" (com sua instrução de crise) NÃO é repetido em "healthNotes"; lá fica só o que não coube ("asma controlada há 1 ano", "cardiopatia: insuficiência da válvula pulmonar"). Antes de responder, releia as sobras frase por frase contra os CAMPOS ATUAIS: fato já coberto por qualquer campo (atual ou novo), mesmo dito com outras palavras, sai das sobras.
 3. Os campos que você devolve SUBSTITUEM os atuais: repita o conteúdo que já existe neles (listas e textos) e acrescente o novo. Nunca remova o que já está lá; nunca duplique um item já presente. Para listas, a união; para textos, o atual e o novo em linhas/frases separadas. EXCEÇÃO: se o texto das observações CONTRADIZ um valor atual (peso, convênio, carteirinha, telefone), o valor das observações prevalece — é a informação mais recente, e o valor antigo é descartado.
 4. Normalize a escrita do que vai para os campos: corrija ortografia e acentuação, iniciais maiúsculas em nomes próprios, remova CAIXA ALTA, emojis e repetições ("NOAHHHHHH Ribeiro" → "Noah Ribeiro"). Mantenha o sentido e os fatos exatos (doses, quantidades, nomes de remédios). O que SOBRA em "${leftover}" fica escrito como estava: mesmas frases e palavras, só sem os trechos que foram movidos — não reescreva, não resuma, não reorganize.
 5. Português do Brasil. Sem comentários, sem markdown, sem cercas de código: responda SOMENTE o objeto JSON.`;
@@ -500,12 +509,60 @@ function mergeText(current: string, next: string, max: number, sep: "\n" | " / "
   return out.join(sep).slice(0, max);
 }
 
+/** normalized keys of everything already filed (except one leftover), so repeats can be cut from that leftover */
+function filedKeys(f: CamperNotesFields, lists: Record<"allergies" | "drugAllergies" | "healthIssues", OptionList>, except: "generalNotes" | "healthNotes"): Set<string> {
+  const keys = new Set<string>();
+  const add = (v: unknown) => {
+    const segs = typeof v === "string" ? v.split("\n").map((x) => x.trim()).filter(Boolean) : [];
+    for (const s of segs) {
+      const k = dedupeKey(s);
+      if (k) keys.add(k);
+    }
+  };
+  const label = (list: OptionList, id: string) => list.byId.get(id) ?? "";
+  for (const id of f.allergies) add(label(lists.allergies, id));
+  for (const id of f.drugAllergies) add(label(lists.drugAllergies, id));
+  for (const id of f.healthIssues) add(label(lists.healthIssues, id));
+  for (const m of f.medications) { add(m.name); add(m.dose); add(m.notes); }
+  add(f.foodRestrictions);
+  if (except !== "healthNotes") add(f.healthNotes);
+  add(f.bedroomPreference);
+  add(f.emergencyContact);
+  if (f.weightKg != null) add(String(f.weightKg));
+  add(f.insurance);
+  add(f.insuranceCard);
+  add(f.cpf);
+  add(f.rg);
+  add(f.school);
+  add(f.schoolGrade);
+  add(f.church);
+  add(f.invitedBy);
+  add(f.guardianName);
+  add(f.guardianPhone);
+  add(f.guardianCpf);
+  add(f.guardianEmail);
+  if (except !== "generalNotes") add(f.generalNotes);
+  return keys;
+}
+
+/** drops leftover lines that say exactly what another field already holds ("Asma desde os 3 anos" stays: it adds facts) */
+function dropFiledLines(leftover: string, filed: Set<string>): string {
+  return leftover
+    .split("\n")
+    .map((x) => x.trim())
+    .filter((line) => line && !filed.has(dedupeKey(line)))
+    .join("\n");
+}
+
 export function normalizeNotesAnswer(raw: unknown, input: CamperNotesInput, lists: Record<"allergies" | "drugAllergies" | "healthIssues", OptionList>): CamperNotesFields {
   const a = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const subject = input.subject ?? "camper";
   // the leftover box IS the text being sorted: never merge its old content back
   const cur = { ...input.current, [LEFTOVER_FIELD[subject]]: "" };
   const out = normalizeAll(a, cur, lists);
+  // a fact already filed must not linger in the leftovers, even reworded identically by the model
+  out.generalNotes = dropFiledLines(out.generalNotes, filedKeys(out, lists, "generalNotes"));
+  out.healthNotes = dropFiledLines(out.healthNotes, filedKeys(out, lists, "healthNotes"));
   // fields the subject doesn't have never leave the server (the model was told not to use them; belt and braces)
   const blank: CamperNotesFields = { allergies: [], drugAllergies: [], healthIssues: [], neurodivergent: false, medications: [], foodRestrictions: "", healthNotes: "", bedroomPreference: "", emergencyContact: "", weightKg: null, insurance: "", insuranceCard: "", cpf: "", rg: "", school: "", schoolGrade: "", church: "", invitedBy: "", guardianName: "", guardianPhone: "", guardianCpf: "", guardianEmail: "", generalNotes: "" };
   const allowed = new Set(SUBJECT_FIELDS[subject]);
@@ -551,6 +608,9 @@ function normalizeAll(a: Record<string, unknown>, cur: Partial<CamperNotesFields
 
 // ── gateway call ───────────────────────────────────────────────────────
 
+/** fast mode on the Messages API is still behind a beta flag */
+const ANTHROPIC_FAST_BETA = "fast-mode-2026-02-01";
+
 export interface RawNotesCall {
   ok: boolean;
   json?: unknown;
@@ -561,10 +621,10 @@ export interface RawNotesCall {
 
 /** one model, one shot: returns the parsed JSON object or an error */
 export async function callNotesModel(
-  modelId: string,
+  model: NotesModel,
   system: string,
   user: string,
-  opts: { signal?: AbortSignal; reasoningEffort: NotesModeConfig["reasoningEffort"]; timeoutMs: number },
+  opts: { signal?: AbortSignal; reasoningEffort: NotesModeConfig["reasoningEffort"]; speed?: NotesModeConfig["speed"]; timeoutMs: number },
 ): Promise<RawNotesCall> {
   const { signal } = opts;
   const started = Date.now();
@@ -574,14 +634,24 @@ export async function callNotesModel(
   signal?.addEventListener("abort", onAbort);
   const usage = { promptTokens: 0, completionTokens: 0 };
   try {
+    // xAI and the rest 400 on the speed flags, so only the two vendors that have one get it
+    const fast = opts.speed === "fast";
+    const fastOpenai = fast && model.vendor === "openai";
+    const fastAnthropic = fast && model.vendor === "anthropic";
     const res = await fetch(`${config.ai.baseUrl}/chat/completions`, {
       method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${config.ai.apiKey}` },
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${config.ai.apiKey}`,
+        ...(fastAnthropic ? { "anthropic-beta": ANTHROPIC_FAST_BETA } : {}),
+      },
       body: JSON.stringify({
-        model: modelId,
+        model: model.id,
         temperature: 0,
         // live: the form waits on this, keep it short; bulk: nobody waits, think it through
         reasoning_effort: opts.reasoningEffort,
+        ...(fastOpenai ? { service_tier: "fast" } : {}),
+        ...(fastAnthropic ? { speed: "fast" } : {}),
         response_format: { type: "json_object" },
         messages: [
           { role: "system", content: system },
@@ -623,7 +693,7 @@ export async function callNotesModel(
  * Runs the mode's model chain (first that answers wins); `null` when every
  * model failed or the caller cancelled.
  *
- *   mode "live" (default) — form: Opus 5 → Grok 4.5 → GPT 5.6, low effort, 40 s each.
+ *   mode "live" (default) — form: Opus 5 → GPT 5.6 Terra → Grok 4.5, low effort, 40 s each.
  *   mode "bulk"           — import script: Grok 4.6 → Fable 5.1 → GPT 5.6, high effort, 3 min each.
  *
  * `opts.models` overrides the chain (the prompt lab uses it to run one model at a time).
@@ -640,7 +710,7 @@ export async function sortCamperNotes(
   const failed: string[] = [];
   for (const m of opts.models ?? cfg.models) {
     if (opts.signal?.aborted) return null;
-    const r = await callNotesModel(m.id, system, user, { signal: opts.signal, reasoningEffort: cfg.reasoningEffort, timeoutMs: cfg.timeoutMs });
+    const r = await callNotesModel(m, system, user, { signal: opts.signal, reasoningEffort: cfg.reasoningEffort, speed: cfg.speed, timeoutMs: cfg.timeoutMs });
     opts.onAttempt?.(m.id, r);
     if (r.ok) return { fields: normalizeNotesAnswer(r.json, input, lists), model: m.id, vendor: m.vendor, usage: r.usage, failed };
     if (r.error === "cancelled") return null;

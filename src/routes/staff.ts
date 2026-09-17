@@ -23,7 +23,7 @@ import {
 } from "../models/staff";
 import { logCheckin } from "../models/campers";
 import { bedroomCapacity, ROOM_ROLES, STAFF_CATEGORY_KEYS, type Role, type RoomRole, type SessionUser, type Staff } from "../types";
-import { resolveCamperSex } from "../services/camperSex";
+import { resolveGender, resolveWriteGender } from "../services/camperSex";
 import { canHandleVests, hideOwnBedroom, resolveScope, staffVisibility, type Scope } from "../services/scope";
 import { bedroomFullMessage, isInvalid, parseBedroom, parseMedications, parseMulti, parseTeam, parseText, parseTransport } from "./_validate";
 import { listTeams } from "../models/teams";
@@ -107,15 +107,16 @@ export function serializeStaffList(list: Staff[], scope: Scope) {
 
 /** Bedroom change: girls/boys wing wins; staff room / no room re-guesses from the name. */
 async function setStaffBedroom(id: string, name: string, bedroom: string | null, extra: Partial<StaffData>, c: Context<Env>) {
-  const sex = await resolveCamperSex({
+  const existing = await findStaffById(id);
+  const gender = await resolveGender({
     name,
     bedroomId: bedroom,
-    requested: null,
+    requested: existing?.probableGender ?? null,
     guessIfMissing: true,
     signal: c.req.raw.signal,
     userId: c.get("userId"),
   });
-  return updateStaff(id, { ...extra, bedroom, sex });
+  return updateStaff(id, { ...extra, bedroom, sex: gender.sex, probableGender: gender.probableGender });
 }
 
 function serialize(s: Staff) {
@@ -123,6 +124,7 @@ function serialize(s: Staff) {
     id: s._id,
     name: s.name,
     sex: s.sex,
+    probableGender: s.probableGender,
     phone: s.phone,
     /** an ADMIN's own roster record: can't be deleted, deactivated or have the phone changed */
     admin: isAdminPhone(s.phone),
@@ -220,6 +222,13 @@ async function buildPatch(
     if (v === undefined || v === null || v === "") patch.sex = null;
     else if (v !== "F" && v !== "M") return { code: "SEX_INVALID", message: "Sexo inválido." };
     else patch.sex = v;
+  }
+
+  if (has("probableGender")) {
+    const v = body.probableGender;
+    if (v === undefined || v === null || v === "") patch.probableGender = null;
+    else if (v !== "F" && v !== "M") return { code: "SEX_INVALID", message: "Sexo inválido." };
+    else patch.probableGender = v;
   }
 
   const multis: [("allergies" | "drugAllergies" | "healthIssues"), string][] = [
@@ -536,14 +545,21 @@ staff.post("/", async (c) => {
   const full = await bedroomFullMessage(data.bedroom, null);
   if (full) return fail(c, "BEDROOM_FULL", full, 409);
 
-  data.sex = await resolveCamperSex({
+  const gender = await resolveWriteGender({
     name: data.name,
     bedroomId: data.bedroom,
-    requested: data.sex,
-    guessIfMissing: data.sex !== "F" && data.sex !== "M",
+    sexTouched: true,
+    sexValue: data.sex,
+    guessTouched: data.probableGender !== undefined,
+    guessValue: data.probableGender,
+    existingSex: null,
+    existingGuess: null,
+    nameOrRoomChanged: true,
     signal: c.req.raw.signal,
     userId: c.get("userId"),
   });
+  data.sex = gender.sex;
+  data.probableGender = gender.probableGender;
 
   const created = await insertStaff(data);
   if (created.phone) void ensureLoginAccount(created.name, created.phone, "staff");
@@ -586,16 +602,22 @@ staff.put("/:id", async (c) => {
   const bedroomChanged = result.patch.bedroom !== undefined && result.patch.bedroom !== existing.bedroom;
   const nameChanged = result.patch.name !== undefined && result.patch.name !== existing.name;
   const sexTouched = result.patch.sex !== undefined;
-  if (bedroomChanged || nameChanged || sexTouched) {
-    const fromForm = result.patch.sex === "F" || result.patch.sex === "M" ? result.patch.sex : undefined;
-    result.patch.sex = await resolveCamperSex({
+  if (bedroomChanged || nameChanged || sexTouched || result.patch.probableGender !== undefined) {
+    const gender = await resolveWriteGender({
       name,
       bedroomId: bedroom,
-      requested: fromForm ?? (bedroomChanged || nameChanged ? null : existing.sex),
-      guessIfMissing: !fromForm && (bedroomChanged || nameChanged),
+      sexTouched,
+      sexValue: result.patch.sex,
+      guessTouched: result.patch.probableGender !== undefined,
+      guessValue: result.patch.probableGender,
+      existingSex: existing.sex,
+      existingGuess: existing.probableGender,
+      nameOrRoomChanged: bedroomChanged || nameChanged,
       signal: c.req.raw.signal,
       userId: c.get("userId"),
     });
+    result.patch.sex = gender.sex;
+    result.patch.probableGender = gender.probableGender;
   }
 
   const updated = await updateStaff(existing._id, result.patch);
@@ -672,15 +694,15 @@ staff.post("/:id/move", async (c) => {
     if (room && occupied + 1 + myKids.length > bedroomCapacity(room)) return fail(c, "BEDROOM_FULL", `O quarto ${room.name} não tem lugar para você e ${myKids.length} crianças.`, 409);
     await setStaffBedroom(me._id, me.name, target, { roomRole: "caretaker" }, c);
     for (const k of myKids) {
-      const sex = await resolveCamperSex({
+      const gender = await resolveGender({
         name: k.name,
         bedroomId: target,
-        requested: null,
+        requested: k.probableGender,
         guessIfMissing: true,
         signal: c.req.raw.signal,
         userId: c.get("userId"),
       });
-      await updateCamper(k._id, { bedroom: target, bed: null, caretakerId: me._id, sex });
+      await updateCamper(k._id, { bedroom: target, bed: null, caretakerId: me._id, sex: gender.sex, probableGender: gender.probableGender });
       touched.add(k._id);
     }
   } else {

@@ -2,6 +2,7 @@ import { ObjectId } from "mongodb";
 import { getDb } from "../db";
 import type { Camper, CamperAiReviewStatus, CamperChangeLog, CamperCheckin, CamperSex, CheckinKind, CheckinLog, Medication } from "../types";
 import { formatCpf } from "../utils";
+import { AI_REVIEW_MAX_ATTEMPTS, aiReviewDueFilter, aiReviewRetryAt } from "./aiReviewRetry";
 
 const LOG_COLLECTION = "checkinLog";
 /** every edit a PARENT made to their kid (append-only) */
@@ -17,6 +18,7 @@ function toCamper(doc: Record<string, unknown> | null): Camper | null {
     name: doc.name as string,
     birthDate: (doc.birthDate as string) ?? null,
     sex: doc.sex === "F" || doc.sex === "M" ? (doc.sex as CamperSex) : null,
+    probableGender: doc.probableGender === "F" || doc.probableGender === "M" ? (doc.probableGender as CamperSex) : null,
     cpf: formatCpf(s("cpf")),
     rg: s("rg"),
     school: s("school"),
@@ -56,6 +58,8 @@ function toCamper(doc: Record<string, unknown> | null): Camper | null {
     aiReviewError: s("aiReviewError"),
     aiReviewStartedAt: (doc.aiReviewStartedAt as Date) ?? null,
     aiReviewFinishedAt: (doc.aiReviewFinishedAt as Date) ?? null,
+    aiReviewAttempts: typeof doc.aiReviewAttempts === "number" ? doc.aiReviewAttempts : 0,
+    aiReviewNextRetryAt: (doc.aiReviewNextRetryAt as Date) ?? null,
     createdAt: doc.createdAt as Date,
     updatedAt: doc.updatedAt as Date,
   };
@@ -226,15 +230,15 @@ export async function listCamperChanges(camperId: string): Promise<CamperChangeL
   return docs.map((d) => ({ ...(d as unknown as CamperChangeLog), _id: (d._id as ObjectId).toString() }));
 }
 
-/** Claims the next imported campers for one worker batch. */
+/** Claims the next imported campers for one worker batch: fresh pendings plus error retries whose cooldown expired. */
 export async function claimCampersForAiReview(limit = 15): Promise<Camper[]> {
   const db = await getDb();
   const out: Camper[] = [];
   const now = new Date();
   for (let i = 0; i < limit; i++) {
     const doc = await db.collection(COLLECTION).findOneAndUpdate(
-      { aiReviewStatus: "pending" },
-      { $set: { aiReviewStatus: "processing", aiReviewStartedAt: now, aiReviewError: "", updatedAt: now } },
+      { $or: [{ aiReviewStatus: "pending" }, aiReviewDueFilter(now)] },
+      { $set: { aiReviewStatus: "processing", aiReviewStartedAt: now, aiReviewError: "", aiReviewNextRetryAt: null, updatedAt: now } },
       { sort: { createdAt: 1 }, returnDocument: "after" },
     );
     const camper = toCamper(doc as Record<string, unknown> | null);
@@ -255,13 +259,31 @@ export async function requeueStaleAiReviews(staleMs = 10 * 60_000): Promise<numb
 }
 
 export async function finishCamperAiReview(id: string, patch: Partial<CamperData>, error?: string): Promise<Camper | null> {
+  const db = await getDb();
   const now = new Date();
-  return updateCamper(id, {
-    ...patch,
-    aiReviewStatus: error ? "error" : "reviewed",
-    aiReviewError: error ?? "",
-    aiReviewFinishedAt: now,
-  });
+  if (!error) {
+    return updateCamper(id, {
+      ...patch,
+      aiReviewStatus: "reviewed",
+      aiReviewError: "",
+      aiReviewFinishedAt: now,
+      aiReviewNextRetryAt: null,
+    });
+  }
+  const after = await db.collection(COLLECTION).findOneAndUpdate(
+    { _id: new ObjectId(id) },
+    { $set: { ...patch, aiReviewStatus: "error", aiReviewError: error, aiReviewFinishedAt: now, updatedAt: now }, $inc: { aiReviewAttempts: 1 } },
+    { returnDocument: "after" },
+  );
+  const attempts = typeof (after as Record<string, unknown> | null)?.aiReviewAttempts === "number"
+    ? (after as Record<string, unknown>).aiReviewAttempts as number
+    : 1;
+  // each failure waits twice as long as the previous one; past 5 tries the record stays in error for a human
+  await db.collection(COLLECTION).updateOne(
+    { _id: new ObjectId(id) },
+    { $set: { aiReviewNextRetryAt: attempts < AI_REVIEW_MAX_ATTEMPTS ? aiReviewRetryAt(attempts, now) : null, updatedAt: new Date() } },
+  );
+  return toCamper({ ...((after as unknown as Record<string, unknown>) ?? {}), aiReviewNextRetryAt: attempts < AI_REVIEW_MAX_ATTEMPTS ? aiReviewRetryAt(attempts, now) : null });
 }
 
 /** Every kid whose guardian phone is `phone` (a parent may have several kids enrolled). */

@@ -7,7 +7,7 @@ export interface AiUsageEntry {
   vendor: string;
   model: string;
   /** AI feature that made the request, including the read-only admin/organizer data assistant. */
-  kind: "edit" | "suggest" | "image" | "camper_notes" | "dedup_field" | "guess_sex" | "assistant_chat" | "assistant_voice";
+  kind: "edit" | "suggest" | "image" | "camper_notes" | "normalize_observations" | "dedup_field" | "guess_sex" | "assistant_chat" | "assistant_voice";
   userId: string;
   promptTokens: number;
   completionTokens: number;

@@ -286,10 +286,11 @@ export async function sendCheckinReminder(): Promise<void> {
 export const BIRTHDAY_SMS_TIME = "07:45";
 
 /** "João, hoje é aniversário da Ana (8 anos), do quarto 103! 🎂 Vamos fazer o dia dela especial." */
-export function composeBirthdaySms(toName: string, kid: Pick<Camper, "name" | "sex" | "birthDate">, room: string | null, day: string): string {
+export function composeBirthdaySms(toName: string, kid: Pick<Camper, "name" | "sex" | "probableGender" | "birthDate">, room: string | null, day: string): string {
   const age = kid.birthDate ? Number(day.slice(0, 4)) - Number(kid.birthDate.slice(0, 4)) : null;
-  const of = kid.sex === "F" ? "da" : "do";
-  const pron = kid.sex === "F" ? "dela" : "dele";
+  const fem = (kid.sex ?? kid.probableGender) === "F";
+  const of = fem ? "da" : "do";
+  const pron = fem ? "dela" : "dele";
   const build = (withAge: boolean) =>
     `${config.comtele.prefix}: ${first(toName)}, hoje é aniversário ${of} ${first(kid.name)}${withAge && age ? ` (${age} anos)` : ""}${room ? `, do quarto ${room}` : ""}! 🎂 Vamos fazer o dia ${pron} especial.`;
   const msg = build(true);
@@ -863,9 +864,10 @@ export async function notifyPhotosPublished(count: number): Promise<void> {
  * cuidar muito bem dela." — gendered by the kid's `sex` ("dele" / "dela").
  * Exported so the admin panel shows the exact text.
  */
-export function composeBusCheckinSms(kid: Pick<Camper, "name" | "sex" | "guardianName">): string {
-  const article = kid.sex === "F" ? "a" : "o";
-  const pron = kid.sex === "F" ? "dela" : "dele";
+export function composeBusCheckinSms(kid: Pick<Camper, "name" | "sex" | "probableGender" | "guardianName">): string {
+  const fem = (kid.sex ?? kid.probableGender) === "F";
+  const article = fem ? "a" : "o";
+  const pron = fem ? "dela" : "dele";
   const to = first(kid.guardianName || "");
   const build = (greet: string) => `${config.comtele.prefix}: ${greet}${article} ${first(kid.name)} está a caminho de um fim de semana incrível para aprender sobre Jesus! Aproveite o fim de semana livre: vamos cuidar muito bem ${pron}.`;
   const msg = build(to ? `${to}, ` : "");
@@ -891,24 +893,25 @@ export async function notifyBusCheckin(kid: Camper): Promise<void> {
 // ── parents: welcome (app link) ──────────────────────────────────────────────
 
 /** "Maria, a Ana está inscrita no Acampa Kids! Acompanhe tudo pelo app. Entre com o celular (11) 9… em <app>" */
-export function composeParentWelcomeSms(parent: { name: string; phone: string }, kids: Pick<Camper, "name" | "sex">[]): string {
+export function composeParentWelcomeSms(parent: { name: string; phone: string }, kids: Pick<Camper, "name" | "sex" | "probableGender">[]): string {
   const names = kids.map((k) => first(k.name));
+  const fem = (k: Pick<Camper, "sex" | "probableGender">) => (k.sex ?? k.probableGender) === "F";
   const who =
     kids.length === 0
       ? "sua criança está inscrita"
       : kids.length === 1
-        ? `${kids[0].sex === "F" ? "a" : "o"} ${names[0]} está inscrit${kids[0].sex === "F" ? "a" : "o"}`
-        : `${names.slice(0, -1).join(", ")} e ${names[names.length - 1]} estão inscrit${kids.every((k) => k.sex === "F") ? "as" : "os"}`;
+        ? `${fem(kids[0]) ? "a" : "o"} ${names[0]} está inscrit${fem(kids[0]) ? "a" : "o"}`
+        : `${names.slice(0, -1).join(", ")} e ${names[names.length - 1]} estão inscrit${kids.every(fem) ? "as" : "os"}`;
   const build = (w: string, p: string) => `${config.comtele.prefix}: ${first(parent.name)}, ${w} no Acampa Kids! Acompanhe tudo pelo app.${p ? ` Entre com o celular ${p}` : " Entre"} em ${appLink()}`;
   for (const msg of [build(who, formatBrazilPhone(parent.phone)), build(who, ""), build("sua criança está inscrita", "")]) if (msg.length <= SMS_MAX) return msg;
   return build("sua criança está inscrita", "");
 }
 
 /** the parents who would be welcomed right now: parent role, a phone, never welcomed (the window is checked by the caller) */
-async function pendingParentWelcomes(): Promise<{ id: string; name: string; phone: string; kids: Pick<Camper, "name" | "sex">[] }[]> {
+async function pendingParentWelcomes(): Promise<{ id: string; name: string; phone: string; kids: Pick<Camper, "name" | "sex" | "probableGender">[] }[]> {
   const [parents, kids] = await Promise.all([listParents(), listCampers()]);
-  const kidsOf = new Map<string, Pick<Camper, "name" | "sex">[]>();
-  for (const k of kids) if (k.guardianPhone) kidsOf.set(k.guardianPhone, [...(kidsOf.get(k.guardianPhone) ?? []), { name: k.name, sex: k.sex }]);
+  const kidsOf = new Map<string, Pick<Camper, "name" | "sex" | "probableGender">[]>();
+  for (const k of kids) if (k.guardianPhone) kidsOf.set(k.guardianPhone, [...(kidsOf.get(k.guardianPhone) ?? []), { name: k.name, sex: k.sex, probableGender: k.probableGender }]);
   return parents.filter((p) => !p.welcomeSentAt && p.phone && kidsOf.has(p.phone)).map((p) => ({ id: p._id, name: p.name, phone: p.phone, kids: kidsOf.get(p.phone)! }));
 }
 

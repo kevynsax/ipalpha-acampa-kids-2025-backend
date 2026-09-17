@@ -209,9 +209,15 @@ export interface Staff {
   aiReviewError?: string;
   aiReviewStartedAt?: Date | null;
   aiReviewFinishedAt?: Date | null;
+  /** failed AI-review tries; retries stop at AI_REVIEW_MAX_ATTEMPTS */
+  aiReviewAttempts?: number;
+  /** when a failed review may be retried (cooldown); null when due now */
+  aiReviewNextRetryAt?: Date | null;
   name: string;
-  /** "F" | "M" | null — from the room (girls/boys) or a GLM guess on the name; never collected on the form */
+  /** "F" | "M" | null — from the room (girls/boys); never collected on the form */
   sex: CamperSex | null;
+  /** "F" | "M" | null — GLM guess on the name; internal, never shown; icon + ordering fallback when the room has no wing */
+  probableGender: CamperSex | null;
   /** E.164 — null while the person hasn't registered a phone yet */
   phone: string | null;
   /** inactive members are kept for history but hidden from the default lists */
@@ -323,8 +329,10 @@ export interface Camper {
   name: string;
   /** "YYYY-MM-DD" or null */
   birthDate: string | null;
-  /** "F" | "M" | null — from the room (girls/boys) or a GLM guess on the name; never collected on the form */
+  /** "F" | "M" | null — from the room (girls/boys); never collected on the form */
   sex: CamperSex | null;
+  /** "F" | "M" | null — GLM guess on the name; internal, never shown; icon + ordering fallback when the room has no wing */
+  probableGender: CamperSex | null;
   cpf: string;
   rg: string;
   school: string;
@@ -388,6 +396,10 @@ export interface Camper {
   aiReviewError: string;
   aiReviewStartedAt: Date | null;
   aiReviewFinishedAt: Date | null;
+  /** failed AI-review tries; retries stop at AI_REVIEW_MAX_ATTEMPTS */
+  aiReviewAttempts?: number;
+  /** when a failed review may be retried (cooldown); null when due now */
+  aiReviewNextRetryAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -409,7 +421,7 @@ export interface CamperImportDictionaryEntry {
 }
 
 export type CamperImportStatus = "needs_mapping" | "analyzing" | "panic" | "review" | "ready" | "importing" | "completed" | "error";
-export type CamperImportReviewKind = "leader" | "date" | "guardianName" | "phone" | "cpf" | "email";
+export type CamperImportReviewKind = "leader" | "date" | "guardianName" | "phone" | "cpf" | "email" | "duplicate";
 
 export interface CamperImportReviewItem {
   id: string;
@@ -428,6 +440,13 @@ export interface CamperImportReviewItem {
   /** A grouped review (notably one missing leader) can affect several spreadsheet rows. */
   affectedRows?: number[];
   options?: { id: string; label: string }[];
+  /** Existing registry record matched by the deterministic camper identity key. */
+  existingId?: string;
+  existingData?: Record<string, unknown>;
+  incomingData?: Record<string, unknown>;
+  mergedData?: Record<string, unknown>;
+  /** True when the two versions have complementary information to combine. */
+  mergeAvailable?: boolean;
 }
 
 export type StaffImportReviewKind = "phone" | "duplicate" | "bedroom" | "roomRole" | "inactive";
@@ -446,6 +465,10 @@ export interface StaffImportReviewItem {
   existingName?: string;
   existingPhone?: string | null;
   options?: { id: string; label: string }[];
+  existingData?: Record<string, unknown>;
+  incomingData?: Record<string, unknown>;
+  mergedData?: Record<string, unknown>;
+  mergeAvailable?: boolean;
 }
 
 export type RoomRole = "caretaker" | "helper";
