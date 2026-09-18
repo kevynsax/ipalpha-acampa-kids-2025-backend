@@ -13,12 +13,17 @@ export interface OtpState {
   attempts: number;
 }
 
+/** UI + SMS language for this account — refreshed from the device on every login. */
+export type AppLocale = "pt" | "en" | "es" | "fr";
+
 export interface User {
   _id: string;
   name: string;
   phone: string; // E.164, e.g. +5511981234567 (always Brazilian mobile)
   /** the SAME person can hold multiple roles (e.g. parent + staff + admin) */
   roles: Role[];
+  /** last device language seen at login — SMS and UI follow this */
+  locale: AppLocale;
   createdAt: Date;
   updatedAt: Date;
   otp?: OtpState;
@@ -36,6 +41,7 @@ export interface PublicUser {
   name: string;
   phone: string;
   roles: Role[];
+  locale: AppLocale;
 }
 
 /** PublicUser + the role chosen at login (the "active" one for this session) */
@@ -220,6 +226,8 @@ export interface Staff {
   probableGender: CamperSex | null;
   /** E.164 — null while the person hasn't registered a phone yet */
   phone: string | null;
+  /** optional — notification emails; null/empty = skip email, never block login */
+  email: string | null;
   /** inactive members are kept for history but hidden from the default lists */
   active: boolean;
   /** id of a Team document (not a category) */

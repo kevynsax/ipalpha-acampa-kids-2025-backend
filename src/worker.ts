@@ -8,7 +8,6 @@ import { recordAiUsage } from "./models/aiUsage";
 import { sortCamperNotes, type RawNotesCall } from "./services/camperNotesAi";
 import { normalizeCamperObservations } from "./services/observationNormalizeAi";
 import { comteleEnabled, comteleSendSms } from "./services/comtele";
-import { publish } from "./services/realtime";
 
 const POLL_MS = 10_000;
 const BATCH = 15;
@@ -213,13 +212,16 @@ async function notifyFinishedImports(importIds: string[]): Promise<void> {
     const patch: Parameters<typeof updateCamperImport>[1] = {};
     log("notify", `import "${record.fileName}" (${importId}) — review finished: ${total - errors}/${total} ok, ${errors} error(s)`);
     if (slowReview && config.imports.adminPhone && !record.finishedSmsSentAt) {
-      const sent = await comteleSendSms(config.imports.adminPhone, `AcampaKids: a revisão por IA da importação ${record.fileName} terminou. ${total - errors}/${total} ${record.subject === "staff" ? "membros" : "crianças"} revisados.`);
+      const { sms } = await import("./i18n");
+      const subject = record.subject === "staff" ? "membros" : "crianças";
+      const sent = await comteleSendSms(config.imports.adminPhone, sms("pt", "importFinished", { file: record.fileName, ok: total - errors, total, subject }));
       log("notify", `import "${record.fileName}" — finished SMS ${sent.ok ? "sent" : "FAILED"}`);
       if (sent.ok) patch.finishedSmsSentAt = new Date();
       else notificationFailed = true;
     }
     if (errorRate > .1 && config.imports.superAdminPhone && !record.errorSmsSentAt) {
-      const sent = await comteleSendSms(config.imports.superAdminPhone, `AcampaKids: a revisão por IA de ${record.fileName} teve ${errors}/${total} erros. Verifique o worker.`);
+      const { sms } = await import("./i18n");
+      const sent = await comteleSendSms(config.imports.superAdminPhone, sms("pt", "importErrors", { file: record.fileName, errors, total }));
       log("notify", `import "${record.fileName}" — error-rate SMS ${sent.ok ? "sent" : "FAILED"}`);
       if (sent.ok) patch.errorSmsSentAt = new Date();
       else notificationFailed = true;
@@ -252,8 +254,7 @@ async function loop(): Promise<never> {
     idlePolls = 0;
     log("batch", `claimed ${campers.length} camper(s) + ${staff.length} staff review(s)`);
     await Promise.all([...campers.map(reviewOne), ...staff.map(reviewStaffOne)]);
-    log("batch", `finished ${campers.length} camper(s) + ${staff.length} staff review(s) — publishing`);
-    publish("campers", "staff");
+    log("batch", `finished ${campers.length} camper(s) + ${staff.length} staff review(s)`);
     await notifyFinishedImports([...campers, ...staff].map((x) => x.importId ?? ""));
   }
 }

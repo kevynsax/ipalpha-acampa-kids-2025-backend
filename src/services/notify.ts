@@ -1,18 +1,35 @@
-import { config } from "../config";
+import { appLink, localeForPhone, parentFieldLabel, sms, smsPrefix, type Locale } from "../i18n";
 import { findBedroomById, listBedrooms } from "../models/bedrooms";
-import { claimBirthdayNotice, countCampersPerBedroom, listCampers } from "../models/campers";
+import { claimBirthdayNotice, listCampers, listCampersOfGuardian } from "../models/campers";
+import { listCategories } from "../models/categories";
 import { findTransportById } from "../models/transports";
 import { transportLabel as transportLabelOf } from "../routes/transports";
 import { listRoles } from "../models/schedule";
 import { claimCheckinReminder, getSettings, staffAccessOpen } from "../models/settings";
-import { claimStaffPhotosNotice, claimStaffWelcome, findStaffById, listStaff } from "../models/staff";
+import { claimStaffPhotosNotice, claimStaffWelcome, findStaffById, findStaffByPhone, listStaff } from "../models/staff";
 import { findTeamById, listTeams } from "../models/teams";
 import { claimParentPhotosNotice, claimParentWelcome, listAdmins, listParents } from "../models/users";
-import { PARENT_FIELD_LABEL, PREP_AUDIENCES } from "../types";
+import { PREP_AUDIENCES } from "../types";
 import type { Bedroom, CampEvent, Camper, CamperChangeLog, DocAudience, InstructionDoc, Occurrence, PrepAudience, PrepSection, RoomRole, ScheduleRole, Settings, Staff, Team } from "../types";
 import { formatBrazilPhone, saoPauloWallClock, saoPauloWallClockToIso, todayInSaoPaulo } from "../utils";
 import { birthdayDuringCamp, campPeriod } from "./camp";
 import { comteleEnabled, comteleSendSms, resolveSmsTarget, type SmsAudience } from "./comtele";
+import {
+  accessWindowLabel,
+  birthdayEmail,
+  busCheckinEmail,
+  checkinEmail,
+  instructionEmail,
+  occurrenceEmail,
+  parentEditEmail,
+  parentPrepEmail,
+  parentWelcomeEmail,
+  prepEmail,
+  roleDocEmail,
+  roomsAppliedEmail,
+  staffWelcomeEmail,
+} from "./emails";
+import { sendMail } from "./mail";
 import { staffHasAccess } from "./scope";
 import { assignmentDetail, autoAudienceLabel, autoRoleCovers, autoRoleFor, isAutomatic, teamMap } from "./schedule";
 
@@ -60,6 +77,7 @@ interface Pending {
   to: { name: string; phone: string | null };
   gate: { kind: "staff"; staffId: string } | { kind: "parent" };
   items: Item[];
+  locale: Locale;
 }
 
 /** one SMS segment — longer texts are split and billed as several */
@@ -76,10 +94,10 @@ function gateOpen(gate: Pending["gate"], settings: Settings): boolean {
   return gate.kind === "staff" ? staffHasAccess(gate.staffId, settings) : staffAccessOpen(settings.parentAccessWindow);
 }
 
-function push(key: string, to: Pending["to"], gate: Pending["gate"], kind: NotifyKind, text: string, settings: Settings): void {
+function push(key: string, to: Pending["to"], gate: Pending["gate"], kind: NotifyKind, text: string, settings: Settings, locale: Locale): void {
   if (!to.phone) return;
   if (!gateOpen(gate, settings)) return;
-  const p = queue.get(key) ?? { to, gate, items: [] };
+  const p = queue.get(key) ?? { to, gate, items: [], locale };
   if (!p.items.some((i) => i.text === text)) p.items.push({ kind, text }); // same change twice (double save) → once
   queue.set(key, p);
   if (!timer) {
@@ -90,13 +108,15 @@ function push(key: string, to: Pending["to"], gate: Pending["gate"], kind: Notif
   }
 }
 
-function enqueue(staff: Staff, kind: NotifyKind, text: string, settings: Settings): void {
-  push(`staff:${staff._id}`, staff, { kind: "staff", staffId: staff._id }, kind, text, settings);
+async function enqueue(staff: Staff, kind: NotifyKind, text: string, settings: Settings): Promise<void> {
+  const locale = await localeForPhone(staff.phone);
+  push(`staff:${staff._id}`, staff, { kind: "staff", staffId: staff._id }, kind, text, settings, locale);
 }
 
 /** a PARENT (users doc with the parent role) — only inside the parents' access window */
-function enqueueParent(parent: { _id: string; name: string; phone: string | null }, kind: NotifyKind, text: string, settings: Settings): void {
-  push(`parent:${parent._id}`, parent, { kind: "parent" }, kind, text, settings);
+async function enqueueParent(parent: { _id: string; name: string; phone: string | null; locale?: Locale }, kind: NotifyKind, text: string, settings: Settings): Promise<void> {
+  const locale = parent.locale ?? (await localeForPhone(parent.phone));
+  push(`parent:${parent._id}`, parent, { kind: "parent" }, kind, text, settings, locale);
 }
 
 function first(name: string): string {
@@ -105,30 +125,27 @@ function first(name: string): string {
 
 // ── text helpers ─────────────────────────────────────────────────────────────
 
-/** "2026-09-12" → "sáb 12/09" — same voice as frontend speakDaySlash */
-export function shortDate(iso: string): string {
+const DATE_LOCALE: Record<Locale, string> = { pt: "pt-BR", en: "en-US", es: "es-ES", fr: "fr-FR" };
+
+/** "2026-09-12" → "sáb 12/09" — weekday voice follows the recipient's language */
+export function shortDate(iso: string, locale: Locale = "pt"): string {
   const [y, m, d] = iso.split("-").map(Number);
   if (!y || !m || !d) return iso;
-  const wd = new Intl.DateTimeFormat("pt-BR", { weekday: "short", timeZone: "UTC" })
+  const wd = new Intl.DateTimeFormat(DATE_LOCALE[locale], { weekday: "short", timeZone: "UTC" })
     .format(new Date(Date.UTC(y, m - 1, d)))
     .replace(".", "");
   return `${wd} ${String(d).padStart(2, "0")}/${String(m).padStart(2, "0")}`;
 }
 
 /** "sáb 12/09 14:00 Piscina" */
-function eventLabel(e: CampEvent): string {
-  return `${shortDate(e.date)} ${e.startTime} ${e.title}`;
+function eventLabel(e: CampEvent, locale: Locale = "pt"): string {
+  return `${shortDate(e.date, locale)} ${e.startTime} ${e.title}`;
 }
 
 /** "Monitor (Base 3)" */
-function dutyLabel(roleId: string, detail: string, roleById: Map<string, ScheduleRole>): string {
-  const name = roleById.get(roleId)?.name ?? "outra função";
+function dutyLabel(roleId: string, detail: string, roleById: Map<string, ScheduleRole>, locale: Locale = "pt"): string {
+  const name = roleById.get(roleId)?.name ?? sms(locale, "otherRole");
   return detail ? `${name} (${detail})` : name;
-}
-
-/** the link the SMS points at — the bare word "app" when no APP_URL is configured */
-function appLink(): string {
-  return config.appUrl || "app";
 }
 
 function clip(s: string, max: number): string {
@@ -146,16 +163,62 @@ async function transportLabel(id: string | null): Promise<string | null> {
   return t ? transportLabelOf(t) : null;
 }
 
+function staffEmailOf(staff: Pick<Staff, "email">): string {
+  return staff.email?.trim() || "";
+}
+
+async function parentEmailOf(phone: string | null | undefined, fallback = ""): Promise<string> {
+  if (fallback.trim()) return fallback.trim().toLowerCase();
+  if (!phone) return "";
+  const kids = await listCampersOfGuardian(phone);
+  return kids.find((k) => k.guardianEmail)?.guardianEmail?.trim().toLowerCase() || "";
+}
+
+async function adminEmailOf(admin: { phone: string | null }): Promise<string> {
+  if (!admin.phone) return "";
+  const staff = await findStaffByPhone(admin.phone);
+  return staff?.email?.trim() || "";
+}
+
+async function optionLabelOf(): Promise<(id: string) => string> {
+  const cats = await listCategories();
+  const map = new Map<string, string>();
+  for (const c of cats) for (const o of c.options) map.set(o.id, o.label);
+  return (id) => map.get(id) || id;
+}
+
+async function parentContactsForEmail(): Promise<{ title: string; name: string; phone: string | null }[]> {
+  const settings = await getSettings();
+  if (!settings.parentContacts.length) return [];
+  const staff = await listStaff({ active: true });
+  const byId = new Map(staff.map((s) => [s._id, s]));
+  return settings.parentContacts.flatMap((c) => {
+    const s = byId.get(c.staffId);
+    return s ? [{ title: c.title, name: s.name, phone: s.phone }] : [];
+  });
+}
+
+async function mail(to: string, mail: { subject: string; html: string; text: string } | null, label: string): Promise<void> {
+  if (!to || !mail) return;
+  const res = await sendMail(to, mail.subject, mail.html, mail.text);
+  if (res.ok) console.log(`✉️  [NOTIFY · MAIL${res.mocked ? " · DEV MOCK" : ""}] ${to} (${label})`);
+}
+
 /**
  * The SMS text — one line, packed into a single segment: as many change
  * lines as fit, then "+N mudanças" for the rest, and the app link.
  */
-export function composeSms(p: Pick<Pending, "to" | "items">): string {
-  const head = `${config.comtele.prefix}: ${first(p.to.name)}, `;
+export function composeSms(p: Pick<Pending, "to" | "items" | "locale">): string {
+  const locale = p.locale ?? "pt";
+  const head = `${smsPrefix()}: ${first(p.to.name)}, `;
   const texts = p.items.map((i) => i.text);
+  const link = appLink();
 
   const render = (shown: string[], rest: number): string => {
-    const tail = rest > 0 ? ` +${rest} mudança${rest > 1 ? "s" : ""}. Veja em ${appLink()}` : `. ${appLink()}`;
+    const tail =
+      rest > 0
+        ? sms(locale, rest > 1 ? "coalesceTailMany" : "coalesceTail", { rest, link })
+        : sms(locale, "coalesceLink", { link });
     return `${head}${shown.join("; ")}${tail}`;
   };
 
@@ -215,14 +278,21 @@ export async function flushNotifications(): Promise<void> {
  * The confirmation text — a receipt plus what the person needs next: their
  * room (and how many kids are in it) and their vehicle.
  */
-export function composeCheckinSms(staff: Staff, ctx: { room?: string | null; kids?: number; bus?: string | null } = {}): string {
+export function composeCheckinSms(staff: Staff, ctx: { room?: string | null; kids?: number; bus?: string | null } = {}, locale: Locale = "pt"): string {
   const parts: string[] = [];
-  if (ctx.room) parts.push(`Seu quarto: ${ctx.room}${ctx.kids !== undefined ? ` (${ctx.kids} crianças)` : ""}`);
-  if (ctx.bus) parts.push(`Transporte: ${ctx.bus}`);
+  if (ctx.room) {
+    parts.push(
+      ctx.kids !== undefined
+        ? sms(locale, "checkinRoomKids", { room: ctx.room, kids: ctx.kids })
+        : sms(locale, "checkinRoom", { room: ctx.room }),
+    );
+  }
+  if (ctx.bus) parts.push(sms(locale, "checkinBus", { bus: ctx.bus }));
   const info = parts.length ? ` ${parts.join(". ")}.` : "";
-  const msg = `${config.comtele.prefix}: ${first(staff.name)}, check-in feito!${info} Confira as crianças do seu quarto em ${appLink()}`;
+  const vars = { prefix: smsPrefix(), name: first(staff.name), info, link: appLink() };
+  const msg = sms(locale, "checkinDone", vars);
   if (msg.length <= SMS_MAX) return msg;
-  return `${config.comtele.prefix}: ${first(staff.name)}, check-in feito!${info} ${appLink()}`;
+  return sms(locale, "checkinDoneShort", vars);
 }
 
 /**
@@ -232,17 +302,21 @@ export function composeCheckinSms(staff: Staff, ctx: { room?: string | null; kid
  */
 export async function notifyCheckin(staff: Staff): Promise<void> {
   try {
-    if (!staff.phone) return;
+    if (!staff.phone && !staff.email) return;
     const settings = await getSettings();
     if (!settings.notifications.checkinConfirmation) return;
     if (!staffHasAccess(staff._id, settings)) return;
-    const [room, bus, counts] = await Promise.all([
+    const [room, bus, kidsList] = await Promise.all([
       settings.kidsRoomsDraft ? null : bedroomName(staff.bedroom),
       transportLabel(staff.transportation),
-      staff.bedroom && !settings.kidsRoomsDraft ? countCampersPerBedroom() : null,
+      staff.bedroom && !settings.kidsRoomsDraft ? listCampers({ bedroom: staff.bedroom }) : Promise.resolve([] as Camper[]),
     ]);
-    const kids = counts && staff.bedroom ? (counts.get(staff.bedroom) ?? 0) : undefined;
-    await deliver(staff, composeCheckinSms(staff, { room, kids, bus }), "checkin");
+    const kids = kidsList.length || undefined;
+    if (staff.phone) {
+      const locale = await localeForPhone(staff.phone);
+      await deliver(staff, composeCheckinSms(staff, { room, kids, bus }, locale), "checkin");
+    }
+    await mail(staffEmailOf(staff), checkinEmail(staff, { room, bus, kids: kidsList.map((k) => ({ name: k.name })) }), "checkin");
   } catch (err) {
     console.error("notify: check-in confirmation failed", err);
   }
@@ -251,8 +325,8 @@ export async function notifyCheckin(staff: Staff): Promise<void> {
 // ── check-in reminder → whole team ───────────────────────────────────────────────────
 
 /** "João, chegou a hora do seu check-in! Faça em <app>" */
-export function composeCheckinReminderSms(staff: Staff): string {
-  return `${config.comtele.prefix}: ${first(staff.name)}, chegou a hora do seu check-in! Ao chegar na igreja, faça o check-in em ${appLink()}`;
+export function composeCheckinReminderSms(staff: Staff, locale: Locale = "pt"): string {
+  return sms(locale, "checkinReminder", { prefix: smsPrefix(), name: first(staff.name), link: appLink() });
 }
 
 /**
@@ -274,7 +348,7 @@ export async function sendCheckinReminder(): Promise<void> {
     if (!(await claimCheckinReminder(at))) return;
     const team = (await listStaff({ active: true })).filter((s) => s.phone && !s.checkin);
     console.log(`📲 check-in reminder scheduled for ${at.toISOString()} → texting ${team.length} team members`);
-    for (const s of team) await deliver(s, composeCheckinReminderSms(s), "checkin-reminder");
+    for (const s of team) await deliver(s, composeCheckinReminderSms(s, await localeForPhone(s.phone)), "checkin-reminder");
   } catch (err) {
     console.error("notify: check-in reminder failed", err);
   }
@@ -286,13 +360,21 @@ export async function sendCheckinReminder(): Promise<void> {
 export const BIRTHDAY_SMS_TIME = "07:45";
 
 /** "João, hoje é aniversário da Ana (8 anos), do quarto 103! 🎂 Vamos fazer o dia dela especial." */
-export function composeBirthdaySms(toName: string, kid: Pick<Camper, "name" | "sex" | "probableGender" | "birthDate">, room: string | null, day: string): string {
+export function composeBirthdaySms(toName: string, kid: Pick<Camper, "name" | "sex" | "probableGender" | "birthDate">, room: string | null, day: string, locale: Locale = "pt"): string {
   const age = kid.birthDate ? Number(day.slice(0, 4)) - Number(kid.birthDate.slice(0, 4)) : null;
   const fem = (kid.sex ?? kid.probableGender) === "F";
-  const of = fem ? "da" : "do";
-  const pron = fem ? "dela" : "dele";
+  const of = sms(locale, fem ? "ofHer" : "ofHim");
+  const pron = sms(locale, fem ? "her" : "him");
   const build = (withAge: boolean) =>
-    `${config.comtele.prefix}: ${first(toName)}, hoje é aniversário ${of} ${first(kid.name)}${withAge && age ? ` (${age} anos)` : ""}${room ? `, do quarto ${room}` : ""}! 🎂 Vamos fazer o dia ${pron} especial.`;
+    sms(locale, "birthday", {
+      prefix: smsPrefix(),
+      name: first(toName),
+      of: of ? `${of} ` : "",
+      kid: first(kid.name),
+      age: withAge && age ? sms(locale, "birthdayAge", { years: age }) : "",
+      room: room ? sms(locale, "birthdayRoom", { room }) : "",
+      pron,
+    });
   const msg = build(true);
   return msg.length <= SMS_MAX ? msg : build(false);
 }
@@ -325,13 +407,19 @@ export async function sendBirthdayNotices(now = new Date()): Promise<void> {
     if (now < birthdaySmsDue(today)) return;
     const kids = (await listCampers()).filter((k) => k.bedroom && birthdayDuringCamp(k.birthDate, period) === today);
     if (kids.length === 0) return;
-    const staff = (await listStaff({ active: true })).filter((s) => s.phone && s.bedroom);
+    const staff = (await listStaff({ active: true })).filter((s) => s.bedroom);
+    const allKids = await listCampers();
     for (const kid of kids) {
       if (!(await claimBirthdayNotice(kid._id, today))) continue;
       const room = await bedroomName(kid.bedroom);
       const team = staff.filter((s) => s.bedroom === kid.bedroom && staffHasAccess(s._id, settings));
-      console.log(`🎂 birthday of ${kid.name} today → texting ${team.length} team members of room ${room ?? kid.bedroom}`);
-      for (const s of team) await deliver(s, composeBirthdaySms(s.name, kid, room, today), "birthday");
+      const roomKids = allKids.filter((k) => k.bedroom === kid.bedroom).map((k) => k.name);
+      const roomStaff = team.map((s) => s.name);
+      console.log(`🎂 birthday of ${kid.name} today → texting ${team.filter((s) => s.phone).length} team members of room ${room ?? kid.bedroom}`);
+      for (const s of team) {
+        if (s.phone) await deliver(s, composeBirthdaySms(s.name, kid, room, today, await localeForPhone(s.phone)), "birthday");
+        await mail(staffEmailOf(s), birthdayEmail(s.name, kid, room, today, roomKids, roomStaff), "birthday");
+      }
     }
   } catch (err) {
     console.error("notify: birthday notices failed", err);
@@ -344,10 +432,18 @@ export async function sendBirthdayNotices(now = new Date()): Promise<void> {
  * The parent-edit text — who edited what on which kid, then the app link.
  * The values stay in the app (they may be long and sensitive).
  */
-export function composeParentEditSms(toName: string, kid: Camper, entry: Pick<CamperChangeLog, "byName" | "medical" | "changes">): string {
-  const fields = [...new Set(entry.changes.map((x) => PARENT_FIELD_LABEL[x.field]))];
-  const what = entry.medical ? "dados médicos" : "observações";
-  const build = (list: string) => `${config.comtele.prefix}: ${first(toName)}, ${first(entry.byName)} alterou ${what} de ${first(kid.name)}${list ? ` (${list})` : ""}. Veja em ${appLink()}`;
+export function composeParentEditSms(toName: string, kid: Camper, entry: Pick<CamperChangeLog, "byName" | "medical" | "changes">, locale: Locale = "pt"): string {
+  const fields = [...new Set(entry.changes.map((x) => parentFieldLabel(locale, x.field)))];
+  const key = entry.medical ? "parentEditMedical" : "parentEditNotes";
+  const build = (list: string) =>
+    sms(locale, key, {
+      prefix: smsPrefix(),
+      name: first(toName),
+      by: first(entry.byName),
+      kid: first(kid.name),
+      list: list ? ` (${list})` : "",
+      link: appLink(),
+    });
   const msg = build(fields.join(", "));
   return msg.length <= SMS_MAX ? msg : build("");
 }
@@ -364,10 +460,18 @@ export async function notifyParentEdit(kid: Camper, entry: Pick<CamperChangeLog,
     const settings = await getSettings();
     if (!settings.notifications.parentEdits) return;
     const sent = new Set<string>();
-    const send = async (to: { _id: string; name: string; phone: string | null }, label: string) => {
-      if (!to.phone || sent.has(to.phone)) return;
-      sent.add(to.phone);
-      await deliver(to, composeParentEditSms(to.name, kid, entry), label);
+    const mailed = new Set<string>();
+    const labelOf = await optionLabelOf();
+    const send = async (to: { _id: string; name: string; phone: string | null; email?: string | null }, label: string) => {
+      if (to.phone && !sent.has(to.phone)) {
+        sent.add(to.phone);
+        await deliver(to, composeParentEditSms(to.name, kid, entry, await localeForPhone(to.phone)), label);
+      }
+      const address = to.email?.trim() || (to.phone ? await adminEmailOf(to) : "");
+      if (address && !mailed.has(address)) {
+        mailed.add(address);
+        await mail(address, parentEditEmail(to.name, kid, entry, labelOf), label);
+      }
     };
     const caretaker = kid.caretakerId ? await findStaffById(kid.caretakerId) : null;
     if (caretaker?.active && staffHasAccess(caretaker._id, settings)) await send(caretaker, "parent-edit");
@@ -383,9 +487,9 @@ export async function notifyParentEdit(kid: Camper, entry: Pick<CamperChangeLog,
 // ── occurrence registered → admins ─────────────────────────────────────────────────────
 
 /** "Maria e João" / "Maria, João +2" — first names of the people involved */
-function peopleLabel(people: { name: string }[]): string {
+function peopleLabel(people: { name: string }[], locale: Locale = "pt"): string {
   const names = people.map((p) => first(p.name));
-  if (names.length <= 2) return names.join(" e ");
+  if (names.length <= 2) return names.join(sms(locale, "and"));
   return `${names.slice(0, 2).join(", ")} +${names.length - 2}`;
 }
 
@@ -393,9 +497,20 @@ function peopleLabel(people: { name: string }[]): string {
  * The occurrence text — who registered it and who is involved, then the app
  * link. The description stays in the app (it may be long and sensitive).
  */
-export function composeOccurrenceSms(adminName: string, o: Occurrence): string {
-  const who = [o.campers.length ? `criança${o.campers.length > 1 ? "s" : ""} ${peopleLabel(o.campers)}` : "", o.staff.length ? `equipe ${peopleLabel(o.staff)}` : ""].filter(Boolean).join(" e ");
-  const build = (w: string) => `${config.comtele.prefix}: ${first(adminName)}, nova ocorrência registrada por ${first(o.createdByName)}${w ? ` (${w})` : ""}. Veja em ${appLink()}`;
+export function composeOccurrenceSms(adminName: string, o: Occurrence, locale: Locale = "pt"): string {
+  const campers = o.campers.length
+    ? `${sms(locale, o.campers.length > 1 ? "camperPlural" : "camperSingular")} ${peopleLabel(o.campers, locale)}`
+    : "";
+  const team = o.staff.length ? `${sms(locale, "staffTeam")} ${peopleLabel(o.staff, locale)}` : "";
+  const who = [campers, team].filter(Boolean).join(sms(locale, "and"));
+  const build = (w: string) =>
+    sms(locale, "occurrence", {
+      prefix: smsPrefix(),
+      name: first(adminName),
+      by: first(o.createdByName),
+      who: w ? ` (${w})` : "",
+      link: appLink(),
+    });
   const msg = build(who);
   return msg.length <= SMS_MAX ? msg : build("");
 }
@@ -410,8 +525,9 @@ export async function notifyOccurrence(o: Occurrence): Promise<void> {
     const settings = await getSettings();
     if (!settings.notifications.occurrences) return;
     for (const admin of await listAdmins()) {
-      if (!admin.phone || admin._id === o.createdByUserId) continue;
-      await deliver(admin, composeOccurrenceSms(admin.name, o), "occurrence");
+      if (admin._id === o.createdByUserId) continue;
+      if (admin.phone) await deliver(admin, composeOccurrenceSms(admin.name, o, await localeForPhone(admin.phone)), "occurrence");
+      await mail(await adminEmailOf(admin), occurrenceEmail(admin.name, o), "occurrence");
     }
   } catch (err) {
     console.error("notify: occurrence failed", err);
@@ -424,11 +540,19 @@ export async function notifyOccurrence(o: Occurrence): Promise<void> {
  * (this is a security alert, not an occurrence). Once per streak until the
  * admin zeroes the counter in Settings → Geral.
  */
-export function composeForeignLookupSms(adminName: string, staffName: string, count: number, kidNames: string[]): string {
+export function composeForeignLookupSms(adminName: string, staffName: string, count: number, kidNames: string[], locale: Locale = "pt"): string {
   const kids = kidNames.slice(0, 3).map(first).join(", ");
   const extra = kidNames.length > 3 ? ` +${kidNames.length - 3}` : "";
+  const key = count === 1 ? "foreignLookup" : "foreignLookupPlural";
   const build = (list: string) =>
-    `${config.comtele.prefix}: ${first(adminName)}, ${first(staffName)} leu ${count} criança${count === 1 ? "" : "s"} fora do escopo${list ? ` (${list}${extra})` : ""}. Veja em ${appLink()}`;
+    sms(locale, key, {
+      prefix: smsPrefix(),
+      name: first(adminName),
+      staff: first(staffName),
+      count,
+      list: list ? ` (${list}${extra})` : "",
+      link: appLink(),
+    });
   const msg = build(kids);
   return msg.length <= SMS_MAX ? msg : build("");
 }
@@ -437,7 +561,7 @@ export async function notifyForeignLookupAlert(staff: Pick<Staff, "_id" | "name"
   try {
     for (const admin of await listAdmins()) {
       if (!admin.phone) continue;
-      await deliver(admin, composeForeignLookupSms(admin.name, staff.name, count, kidNames), "foreign-lookup");
+      await deliver(admin, composeForeignLookupSms(admin.name, staff.name, count, kidNames, await localeForPhone(admin.phone)), "foreign-lookup");
     }
   } catch (err) {
     console.error("notify: foreign-lookup alert failed", err);
@@ -468,10 +592,19 @@ export async function notifyCamperChange(before: Camper | null, after: Camper | 
 
     const kid = (after ?? before)!;
     const [lost, got] = await Promise.all([from ? findStaffById(from) : null, to ? findStaffById(to) : null]);
-    if (lost?.active) enqueue(lost, "bedroom", `${first(kid.name)} não está mais sob seus cuidados${got ? ` (agora com ${first(got.name)})` : ""}`, settings);
+    if (lost?.active) {
+      const locale = await localeForPhone(lost.phone);
+      const text = got
+        ? sms(locale, "kidLostTo", { kid: first(kid.name), to: first(got.name) })
+        : sms(locale, "kidLost", { kid: first(kid.name) });
+      await enqueue(lost, "bedroom", text, settings);
+    }
     if (got?.active && after) {
-      const [room, n] = await Promise.all([bedroomName(after.bedroom), countKidsOf(got._id)]);
-      enqueue(got, "bedroom", `${first(after.name)}${room ? ` (quarto ${room})` : ""} passou a ser sua responsabilidade (agora ${n} criança${n === 1 ? "" : "s"} com você)`, settings);
+      const [room, n, locale] = await Promise.all([bedroomName(after.bedroom), countKidsOf(got._id), localeForPhone(got.phone)]);
+      const text = room
+        ? sms(locale, "kidGainedRoom", { kid: first(after.name), room, n, s: n === 1 ? "" : "s" })
+        : sms(locale, "kidGained", { kid: first(after.name), n });
+      await enqueue(got, "bedroom", text, settings);
     }
   } catch (err) {
     console.error("notify: camper change failed", err);
@@ -488,12 +621,24 @@ export async function notifyCaretakerChange(kids: Camper[], from: Staff, to: Sta
     if (kids.length === 0) return;
     const settings = await getSettings();
     if (!settings.notifications.bedroomChanges || settings.kidsRoomsDraft) return;
-    const names = peopleLabel(kids);
     const n = kids.length;
-    if (from.active) enqueue(from, "bedroom", `${names} não ${n === 1 ? "está" : "estão"} mais sob seus cuidados${to ? ` (agora com ${first(to.name)})` : ""}`, settings);
+    if (from.active) {
+      const locale = await localeForPhone(from.phone);
+      const names = peopleLabel(kids, locale);
+      const verb = n === 1 ? (locale === "en" ? "is" : locale === "fr" ? "est" : "está") : (locale === "en" ? "are" : locale === "fr" ? "sont" : "estão");
+      const text = to
+        ? sms(locale, "kidsLostTo", { names, verb, to: first(to.name) })
+        : sms(locale, "kidsLost", { names, verb });
+      await enqueue(from, "bedroom", text, settings);
+    }
     if (to?.active) {
-      const room = await bedroomName(kids[0].bedroom);
-      enqueue(to, "bedroom", `${names} ${n === 1 ? "passou" : "passaram"} a ser sua responsabilidade${room ? ` (quarto ${room})` : ""}`, settings);
+      const [room, locale] = await Promise.all([bedroomName(kids[0].bedroom), localeForPhone(to.phone)]);
+      const names = peopleLabel(kids, locale);
+      const verb = n === 1 ? (locale === "en" ? "is" : locale === "fr" ? "passe" : "passou") : (locale === "en" ? "are" : locale === "fr" ? "passent" : "passaram");
+      const text = room
+        ? sms(locale, "kidsGainedRoom", { names, verb, room })
+        : sms(locale, "kidsGained", { names, verb });
+      await enqueue(to, "bedroom", text, settings);
     }
   } catch (err) {
     console.error("notify: caretaker change failed", err);
@@ -512,21 +657,22 @@ export async function notifyStaffChange(before: Staff, after: Staff): Promise<vo
     if (!after.active || !after.phone) return;
     const settings = await getSettings();
     if (!settings.notifications.staffChanges) return;
+    const locale = await localeForPhone(after.phone);
     if (before.bedroom !== after.bedroom && !settings.kidsRoomsDraft) {
       const room = await bedroomName(after.bedroom);
-      enqueue(after, "myRoom", room ? `seu quarto agora é o ${room}` : "você saiu do seu quarto", settings);
+      await enqueue(after, "myRoom", room ? sms(locale, "myRoomNow", { room }) : sms(locale, "myRoomNone"), settings);
     }
     if (before.roomRole !== after.roomRole) {
-      const text = after.roomRole === "caretaker" ? "agora você é LÍDER de crianças no seu quarto (veja quais no app)" : "agora você é AUXILIAR no seu quarto (sem crianças próprias)";
-      enqueue(after, "myRoomRole", text, settings);
+      const text = after.roomRole === "caretaker" ? sms(locale, "myRoomRoleCaretaker") : sms(locale, "myRoomRoleHelper");
+      await enqueue(after, "myRoomRole", text, settings);
     }
     if (before.team !== after.team) {
       const team = after.team ? (await findTeamById(after.team))?.name ?? null : null;
-      enqueue(after, "myTeam", team ? `seu time agora é ${team}` : "você saiu do seu time", settings);
+      await enqueue(after, "myTeam", team ? sms(locale, "myTeamNow", { team }) : sms(locale, "myTeamNone"), settings);
     }
     if (before.transportation !== after.transportation) {
       const bus = await transportLabel(after.transportation);
-      enqueue(after, "myBus", bus ? `seu transporte agora é ${bus}` : "você ficou sem transporte definido", settings);
+      await enqueue(after, "myBus", bus ? sms(locale, "myBusNow", { bus }) : sms(locale, "myBusNone"), settings);
     }
   } catch (err) {
     console.error("notify: staff change failed", err);
@@ -547,8 +693,8 @@ export interface RoomsPersonChange {
 }
 
 /** "Maria e João" / "Maria, João +2" — first names of a list of names */
-function namesLabel(names: string[]): string {
-  return peopleLabel(names.map((name) => ({ name })));
+function namesLabel(names: string[], locale: Locale = "pt"): string {
+  return peopleLabel(names.map((name) => ({ name })), locale);
 }
 
 /**
@@ -557,27 +703,42 @@ function namesLabel(names: string[]): string {
  * packed into a single segment. Falls back from names to counts when the
  * detailed version does not fit.
  */
-export function composeRoomsAppliedSms(p: RoomsPersonChange): string {
+export function composeRoomsAppliedSms(p: RoomsPersonChange, locale: Locale = "pt"): string {
   const facts: string[] = [];
-  if (p.room) facts.push(p.room.after ? `seu quarto agora é o ${p.room.after}` : "você ficou sem quarto");
-  if (p.role) facts.push(p.role === "caretaker" ? "agora você é LÍDER de crianças no seu quarto" : "agora você é AUXILIAR no seu quarto (sem crianças próprias)");
+  if (p.room) facts.push(p.room.after ? sms(locale, "myRoomNow", { room: p.room.after }) : sms(locale, "myRoomNone"));
+  if (p.role) facts.push(p.role === "caretaker" ? sms(locale, "myRoomRoleCaretaker") : sms(locale, "myRoomRoleHelper"));
   const g = p.kids?.gained ?? [];
   const l = p.kids?.lost ?? [];
+  const be = (n: number) => (n === 1 ? (locale === "en" ? "is" : locale === "fr" ? "est" : "está") : locale === "en" ? "are" : locale === "fr" ? "sont" : "estão");
   const detailed = () => {
-    if (g.length && l.length) return `${namesLabel(g)} ${g.length === 1 ? "está" : "estão"} sob seus cuidados; ${namesLabel(l)} não ${l.length === 1 ? "está mais com você" : "estão mais com você"}`;
-    if (g.length) return `${namesLabel(g)} ${g.length === 1 ? "está" : "estão"} sob seus cuidados`;
-    if (l.length) return `${namesLabel(l)} não ${l.length === 1 ? "está" : "estão"} mais sob seus cuidados`;
-    if (p.kids?.sameAfterMove) return "as crianças são as mesmas";
+    if (g.length && l.length) {
+      return sms(locale, "roomsKidsGainedLost", {
+        gained: namesLabel(g, locale),
+        gVerb: be(g.length),
+        lost: namesLabel(l, locale),
+        lVerb: be(l.length),
+      });
+    }
+    if (g.length) return sms(locale, "roomsKidsGained", { gained: namesLabel(g, locale), gVerb: be(g.length) });
+    if (l.length) return sms(locale, "roomsKidsLost", { lost: namesLabel(l, locale), lVerb: be(l.length) });
+    if (p.kids?.sameAfterMove) return sms(locale, "roomsKidsSame");
     return null;
   };
   const counted = () => {
-    if (g.length && l.length) return `você ganhou ${g.length} e perdeu ${l.length} ${g.length + l.length === 1 ? "criança" : "crianças"}`;
-    if (g.length) return `você ganhou ${g.length} ${g.length === 1 ? "criança nova" : "crianças novas"}`;
-    if (l.length) return `você perdeu ${l.length} ${l.length === 1 ? "criança" : "crianças"}`;    if (p.kids?.sameAfterMove) return "as crianças são as mesmas";
+    if (g.length && l.length) {
+      return sms(locale, "roomsKidsCountGainLose", {
+        g: g.length,
+        l: l.length,
+        kids: sms(locale, g.length + l.length === 1 ? "childSingular" : "childPlural"),
+      });
+    }
+    if (g.length) return sms(locale, "roomsKidsCountGain", { g: g.length, kids: sms(locale, g.length === 1 ? "childNewSingular" : "childNewPlural") });
+    if (l.length) return sms(locale, "roomsKidsCountLose", { l: l.length, kids: sms(locale, l.length === 1 ? "childSingular" : "childPlural") });
+    if (p.kids?.sameAfterMove) return sms(locale, "roomsKidsSame");
     return null;
   };
   const render = (kids: string | null) =>
-    `${config.comtele.prefix}: ${first(p.name)}, ${[...facts, kids].filter(Boolean).join("; ")}. Veja em ${appLink()}`;
+    `${smsPrefix()}: ${first(p.name)}, ${[...facts, kids].filter(Boolean).join("; ")}. ${sms(locale, "seeIn", { link: appLink() })}`;
   for (const kids of [detailed(), counted(), null]) {
     const msg = render(kids);
     if (msg.length <= SMS_MAX) return msg;
@@ -599,6 +760,7 @@ export interface RoomsAppliedMessage {
   staffId: string;
   name: string;
   text: string;
+  change: RoomsPersonChange;
 }
 
 /**
@@ -655,7 +817,7 @@ export function roomsAppliedMessages(
     if (showRoom) change.room = { after: roomName(s.bedroom) };
     if (showRole) change.role = s.roomRole;
     if (showKids) change.kids = { gained: gained.map((k) => k.name), lost: lost.map((k) => k.name), sameAfterMove };
-    out.push({ staffId: s._id, name: s.name, text: composeRoomsAppliedSms(change) });
+    out.push({ staffId: s._id, name: s.name, text: composeRoomsAppliedSms(change), change });
   }
   return out;
 }
@@ -670,7 +832,9 @@ export async function notifyRoomsApplied(
     const staffById = new Map(after.staff.map((s) => [s._id, s]));
     for (const m of roomsAppliedMessages(before, after, settings, rooms)) {
       const s = staffById.get(m.staffId);
-      if (s) await deliver(s, m.text, "rooms-apply");
+      if (!s) continue;
+      if (s.phone) await deliver(s, composeRoomsAppliedSms(m.change, await localeForPhone(s.phone)), "rooms-apply");
+      await mail(staffEmailOf(s), roomsAppliedEmail(s.name, m.change), "rooms-apply");
     }
   } catch (err) {
     console.error("notify: rooms apply failed", err);
@@ -721,18 +885,18 @@ export async function notifyEventChange(before: CampEvent | null, after: CampEve
     const prev = dutiesOf(before, staff, roleById, teamById);
     const next = dutiesOf(after, staff, roleById, teamById);
     const moved = !!before && !!after && (before.date !== after.date || before.startTime !== after.startTime || before.endTime !== after.endTime);
-    const duty = (d: Duty) => dutyLabel(d.roleId, d.detail, roleById);
-
     for (const s of staff) {
       const a = prev.get(s._id);
       const b = next.get(s._id);
+      const locale = await localeForPhone(s.phone);
+      const duty = (d: Duty) => dutyLabel(d.roleId, d.detail, roleById, locale);
       let text: string | null = null;
-      if (b && !a) text = `${eventLabel(after!)}: você é ${duty(b)}`;
-      else if (a && !b && !after) text = `${eventLabel(before!)} foi cancelado`;
-      else if (a && !b) text = `${eventLabel(after ?? before!)}: você saiu da escala`;
-      else if (a && b && (a.roleId !== b.roleId || a.detail !== b.detail)) text = `${eventLabel(after!)}: agora você é ${duty(b)}`;
-      else if (b && moved) text = `${before!.title} mudou para ${shortDate(after!.date)} ${after!.startTime}: você é ${duty(b)}`;
-      if (text) enqueue(s, "role", text, settings);
+      if (b && !a) text = sms(locale, "roleAssigned", { event: eventLabel(after!, locale), duty: duty(b) });
+      else if (a && !b && !after) text = sms(locale, "roleEventCancelled", { event: eventLabel(before!, locale) });
+      else if (a && !b) text = sms(locale, "roleLeft", { event: eventLabel(after ?? before!, locale) });
+      else if (a && b && (a.roleId !== b.roleId || a.detail !== b.detail)) text = sms(locale, "roleChanged", { event: eventLabel(after!, locale), duty: duty(b) });
+      else if (b && moved) text = sms(locale, "roleMoved", { title: before!.title, when: `${shortDate(after!.date, locale)} ${after!.startTime}`, duty: duty(b) });
+      if (text) await enqueue(s, "role", text, settings);
     }
   } catch (err) {
     console.error("notify: event change failed", err);
@@ -748,19 +912,7 @@ export async function notifyRoleEdited(roleBefore: ScheduleRole, roleAfter: Sche
   try {
     const settings = await getSettings();
     const n = settings.notifications;
-    const items: Item[] = [];
-    if (n.roleChanges && roleBefore.name !== roleAfter.name) items.push({ kind: "role", text: `sua função "${roleBefore.name}" agora se chama "${roleAfter.name}"` });
-    if (n.roleChanges && roleBefore.forRoomRoles.join() !== roleAfter.forRoomRoles.join()) {
-      items.push({
-        kind: "role",
-        text: isAutomatic(roleAfter)
-          ? `a função ${roleAfter.name} agora vale para ${autoAudienceLabel(roleAfter)}: confira sua escala`
-          : `a função ${roleAfter.name} agora só vale para quem for escalado: confira sua escala`,
-      });
-    }
-    if (n.contentChanges && roleBefore.instructions !== roleAfter.instructions) items.push({ kind: "instructions", text: `instruções da função ${roleAfter.name} atualizadas` });
-    if (n.contentChanges && roleBefore.preparation !== roleAfter.preparation) items.push({ kind: "preparation", text: `preparação da função ${roleAfter.name} atualizada` });
-    if (items.length === 0) return;
+    if (!n.roleChanges && !n.contentChanges) return;
 
     const staff = await listStaff({ active: true });
     const using = events.filter((e) => e.roles.includes(roleAfter._id));
@@ -770,7 +922,27 @@ export async function notifyRoleEdited(roleBefore: ScheduleRole, roleAfter: Sche
         // automatic role: only the positions it covers (before or after the edit) are concerned
         return a ? a.roleId === roleAfter._id : autoRoleCovers(roleAfter, s.roomRole) || autoRoleCovers(roleBefore, s.roomRole);
       });
-      if (concerned) for (const i of items) enqueue(s, i.kind, i.text, settings);
+      if (!concerned) continue;
+      const locale = await localeForPhone(s.phone);
+      const items: Item[] = [];
+      if (n.roleChanges && roleBefore.name !== roleAfter.name) items.push({ kind: "role", text: sms(locale, "roleRenamed", { before: roleBefore.name, after: roleAfter.name }) });
+      if (n.roleChanges && roleBefore.forRoomRoles.join() !== roleAfter.forRoomRoles.join()) {
+        items.push({
+          kind: "role",
+          text: isAutomatic(roleAfter)
+            ? sms(locale, "roleNowAuto", { role: roleAfter.name, audience: autoAudienceLabel(roleAfter) })
+            : sms(locale, "roleNowManual", { role: roleAfter.name }),
+        });
+      }
+      if (n.contentChanges && roleBefore.instructions !== roleAfter.instructions) items.push({ kind: "instructions", text: sms(locale, "instructionsUpdated", { title: roleAfter.name }) });
+      if (n.contentChanges && roleBefore.preparation !== roleAfter.preparation) items.push({ kind: "preparation", text: sms(locale, "prepUpdated", { title: roleAfter.name }) });
+      for (const i of items) await enqueue(s, i.kind, i.text, settings);
+      if (n.contentChanges && roleBefore.instructions !== roleAfter.instructions) {
+        await mail(staffEmailOf(s), roleDocEmail(s.name, roleAfter, "instructions"), "role-instructions");
+      }
+      if (n.contentChanges && roleBefore.preparation !== roleAfter.preparation) {
+        await mail(staffEmailOf(s), roleDocEmail(s.name, roleAfter, "preparation"), "role-preparation");
+      }
     }
   } catch (err) {
     console.error("notify: role edit failed", err);
@@ -780,18 +952,32 @@ export async function notifyRoleEdited(roleBefore: ScheduleRole, roleAfter: Sche
 // ── general documents (Instruções / Preparação) ─────────────────────────────
 
 /** the whole active team, or only the caretakers / helpers when the document has a narrower audience */
-async function notifyEveryone(kind: NotifyKind, text: string, enabled: (n: Settings["notifications"]) => boolean, audience: DocAudience = "all"): Promise<void> {
+async function notifyEveryone(kind: NotifyKind, textFor: (locale: Locale) => string, enabled: (n: Settings["notifications"]) => boolean, audience: DocAudience = "all"): Promise<void> {
   const settings = await getSettings();
   if (!enabled(settings.notifications)) return;
-  for (const s of await listStaff({ active: true })) if (audience === "all" || s.roomRole === audience) enqueue(s, kind, text, settings);
+  for (const s of await listStaff({ active: true })) {
+    if (audience === "all" || s.roomRole === audience) await enqueue(s, kind, textFor(await localeForPhone(s.phone)), settings);
+  }
 }
 
 /** A general instructions document was created or its title / content changed → the whole active team. */
 export async function notifyInstructionChange(before: InstructionDoc | null, after: InstructionDoc): Promise<void> {
   try {
     if (before && before.title === after.title && before.content === after.content) return; // reorder / emoji only
-    const text = !before ? `novas instruções: "${after.title}"` : before.title !== after.title ? `instruções "${before.title}" viraram "${after.title}"` : `instruções "${after.title}" atualizadas`;
-    await notifyEveryone("instructions", text, (n) => n.contentChanges, after.audience);
+    const textFor = (locale: Locale) =>
+      !before
+        ? sms(locale, "instructionsNew", { title: after.title })
+        : before.title !== after.title
+          ? sms(locale, "instructionsRenamed", { before: before.title, after: after.title })
+          : sms(locale, "instructionsUpdated", { title: after.title });
+    await notifyEveryone("instructions", textFor, (n) => n.contentChanges, after.audience);
+    const settings = await getSettings();
+    if (settings.notifications.contentChanges) {
+      for (const s of await listStaff({ active: true })) {
+        if (after.audience !== "all" && s.roomRole !== after.audience) continue;
+        await mail(staffEmailOf(s), instructionEmail(s.name, after, !before), "instructions");
+      }
+    }
   } catch (err) {
     console.error("notify: instruction change failed", err);
   }
@@ -810,18 +996,29 @@ export async function notifyPreparationChange(before: PrepSection | null, after:
     const changed = !before || before.title !== after.title || before.content !== after.content;
     const gained = (a: PrepAudience) => after.audiences.includes(a) && (!before || !before.audiences.includes(a));
     const isNew = (a: PrepAudience) => !before || gained(a);
-    const textFor = (a: PrepAudience) => (isNew(a) ? `nova preparação: "${after.title}"` : before!.title !== after.title ? `preparação "${before!.title}" virou "${after.title}"` : `preparação "${after.title}" atualizada`);
+    const textFor = (a: PrepAudience, locale: Locale) =>
+      isNew(a)
+        ? sms(locale, "prepNew", { title: after.title })
+        : before!.title !== after.title
+          ? sms(locale, "prepRenamed", { before: before!.title, after: after.title })
+          : sms(locale, "prepUpdated", { title: after.title });
     const concerned = (a: PrepAudience) => after.audiences.includes(a) && (changed || gained(a));
     if (!PREP_AUDIENCES.some(concerned)) return;
 
     const settings = await getSettings();
     const n = settings.notifications;
     if (n.contentChanges && (concerned("caretaker") || concerned("helper"))) {
-      for (const s of await listStaff({ active: true })) if (concerned(s.roomRole)) enqueue(s, "preparation", textFor(s.roomRole), settings);
+      for (const s of await listStaff({ active: true })) {
+        if (!concerned(s.roomRole)) continue;
+        await enqueue(s, "preparation", textFor(s.roomRole, await localeForPhone(s.phone)), settings);
+        await mail(staffEmailOf(s), prepEmail(s.name, after, isNew(s.roomRole)), "preparation");
+      }
     }
     if (n.parentContentChanges && concerned("parent")) {
-      const text = textFor("parent");
-      for (const p of await listParents()) enqueueParent(p, "preparation", text, settings);
+      for (const p of await listParents()) {
+        await enqueueParent(p, "preparation", textFor("parent", p.locale), settings);
+        await mail(await parentEmailOf(p.phone), parentPrepEmail(p.name, after, isNew("parent")), "parent-prep");
+      }
     }
   } catch (err) {
     console.error("notify: preparation change failed", err);
@@ -842,14 +1039,13 @@ export async function notifyPhotosPublished(count: number): Promise<void> {
     if (count <= 0) return;
     const settings = await getSettings();
     if (!settings.notifications.photoPublishes) return;
-    const text = "as fotos do acampamento j\u00e1 est\u00e3o no app \u{1F4F7}";
     for (const s of await listStaff({ active: true })) {
       if (!s.phone || !staffHasAccess(s._id, settings)) continue; // claim only for someone who will really be texted
-      if (await claimStaffPhotosNotice(s._id)) enqueue(s, "photos", text, settings);
+      if (await claimStaffPhotosNotice(s._id)) await enqueue(s, "photos", sms(await localeForPhone(s.phone), "photos"), settings);
     }
     for (const p of await listParents()) {
       if (!p.phone || !staffAccessOpen(settings.parentAccessWindow)) continue;
-      if (await claimParentPhotosNotice(p._id)) enqueueParent(p, "photos", text, settings);
+      if (await claimParentPhotosNotice(p._id)) await enqueueParent(p, "photos", sms(p.locale, "photos"), settings);
     }
   } catch (err) {
     console.error("notify: photos published failed", err);
@@ -864,12 +1060,19 @@ export async function notifyPhotosPublished(count: number): Promise<void> {
  * cuidar muito bem dela." — gendered by the kid's `sex` ("dele" / "dela").
  * Exported so the admin panel shows the exact text.
  */
-export function composeBusCheckinSms(kid: Pick<Camper, "name" | "sex" | "probableGender" | "guardianName">): string {
+export function composeBusCheckinSms(kid: Pick<Camper, "name" | "sex" | "probableGender" | "guardianName">, locale: Locale = "pt"): string {
   const fem = (kid.sex ?? kid.probableGender) === "F";
-  const article = fem ? "a" : "o";
-  const pron = fem ? "dela" : "dele";
+  const article = sms(locale, fem ? "theF" : "theM");
+  const pron = sms(locale, fem ? "her" : "him");
   const to = first(kid.guardianName || "");
-  const build = (greet: string) => `${config.comtele.prefix}: ${greet}${article} ${first(kid.name)} está a caminho de um fim de semana incrível para aprender sobre Jesus! Aproveite o fim de semana livre: vamos cuidar muito bem ${pron}.`;
+  const build = (greet: string) =>
+    sms(locale, "busCheckin", {
+      prefix: smsPrefix(),
+      greet,
+      article: article ? `${article} ` : "",
+      kid: first(kid.name),
+      pron,
+    });
   const msg = build(to ? `${to}, ` : "");
   return msg.length <= SMS_MAX ? msg : build("");
 }
@@ -881,10 +1084,20 @@ export function composeBusCheckinSms(kid: Pick<Camper, "name" | "sex" | "probabl
  */
 export async function notifyBusCheckin(kid: Camper): Promise<void> {
   try {
-    if (!kid.guardianPhone) return;
+    if (!kid.guardianPhone && !kid.guardianEmail) return;
     const settings = await getSettings();
     if (!settings.notifications.busCheckin) return;
-    await deliver({ name: kid.guardianName || `responsável de ${first(kid.name)}`, phone: kid.guardianPhone }, composeBusCheckinSms(kid), "bus-checkin", "parent");
+    if (kid.guardianPhone) {
+      const locale = await localeForPhone(kid.guardianPhone);
+      await deliver(
+        { name: kid.guardianName || sms(locale, "guardianOf", { name: first(kid.name) }), phone: kid.guardianPhone },
+        composeBusCheckinSms(kid, locale),
+        "bus-checkin",
+        "parent",
+      );
+    }
+    const contacts = await parentContactsForEmail();
+    await mail(await parentEmailOf(kid.guardianPhone, kid.guardianEmail), busCheckinEmail(kid, contacts), "bus-checkin");
   } catch (err) {
     console.error("notify: bus check-in failed", err);
   }
@@ -893,18 +1106,23 @@ export async function notifyBusCheckin(kid: Camper): Promise<void> {
 // ── parents: welcome (app link) ──────────────────────────────────────────────
 
 /** "Maria, a Ana está inscrita no Acampa Kids! Acompanhe tudo pelo app. Entre com o celular (11) 9… em <app>" */
-export function composeParentWelcomeSms(parent: { name: string; phone: string }, kids: Pick<Camper, "name" | "sex" | "probableGender">[]): string {
+export function composeParentWelcomeSms(parent: { name: string; phone: string }, kids: Pick<Camper, "name" | "sex" | "probableGender">[], locale: Locale = "pt"): string {
   const names = kids.map((k) => first(k.name));
   const fem = (k: Pick<Camper, "sex" | "probableGender">) => (k.sex ?? k.probableGender) === "F";
   const who =
     kids.length === 0
-      ? "sua criança está inscrita"
+      ? sms(locale, "parentWelcomeFallback")
       : kids.length === 1
-        ? `${fem(kids[0]) ? "a" : "o"} ${names[0]} está inscrit${fem(kids[0]) ? "a" : "o"}`
-        : `${names.slice(0, -1).join(", ")} e ${names[names.length - 1]} estão inscrit${kids.every(fem) ? "as" : "os"}`;
-  const build = (w: string, p: string) => `${config.comtele.prefix}: ${first(parent.name)}, ${w} no Acampa Kids! Acompanhe tudo pelo app.${p ? ` Entre com o celular ${p}` : " Entre"} em ${appLink()}`;
-  for (const msg of [build(who, formatBrazilPhone(parent.phone)), build(who, ""), build("sua criança está inscrita", "")]) if (msg.length <= SMS_MAX) return msg;
-  return build("sua criança está inscrita", "");
+        ? sms(locale, fem(kids[0]) ? "enrolledF" : "enrolledM", { name: names[0] })
+        : sms(locale, kids.every(fem) ? "enrolledFp" : "enrolledMp", {
+            names: `${names.slice(0, -1).join(", ")}${sms(locale, "and")}${names[names.length - 1]}`,
+          });
+  const body = (w: string) => sms(locale, kids.length > 1 ? "parentWelcomeMany" : "parentWelcomeOne", { who: w });
+  const full = (w: string, phone: string) =>
+    `${smsPrefix()}: ${first(parent.name)}, ${body(w)}${phone ? sms(locale, "parentWelcomeEnterPhone", { phone, link: appLink() }) : sms(locale, "parentWelcomeEnter", { link: appLink() })}`;
+  const fallback = sms(locale, "parentWelcomeFallback");
+  for (const msg of [full(who, formatBrazilPhone(parent.phone)), full(who, ""), full(fallback, "")]) if (msg.length <= SMS_MAX) return msg;
+  return full(fallback, "");
 }
 
 /** the parents who would be welcomed right now: parent role, a phone, never welcomed (the window is checked by the caller) */
@@ -926,9 +1144,11 @@ export async function syncParentWelcomes(): Promise<void> {
     const settings = await getSettings();
     if (!settings.notifications.parentWelcome) return;
     if (!staffAccessOpen(settings.parentAccessWindow)) return;
+    const windowLabel = accessWindowLabel(settings.parentAccessWindow.from, settings.parentAccessWindow.until);
     for (const p of await pendingParentWelcomes()) {
       if (!(await claimParentWelcome(p.id))) continue;
-      await deliver(p, composeParentWelcomeSms(p, p.kids), "parent-welcome", "parent");
+      await deliver(p, composeParentWelcomeSms(p, p.kids, await localeForPhone(p.phone)), "parent-welcome", "parent");
+      await mail(await parentEmailOf(p.phone), parentWelcomeEmail(p, p.kids, windowLabel), "parent-welcome");
     }
   } catch (err) {
     console.error("notify: parent welcome sync failed", err);
@@ -958,16 +1178,17 @@ export async function welcomePreview(): Promise<{ staff: { count: number; window
  * welcome, when the team window opens) and ALWAYS carries the app link (with
  * the phone they must log in with), since this is how they find the app.
  */
-export function composeEnrolSms(staff: Staff, roles: string[]): string {
+export function composeEnrolSms(staff: Staff, roles: string[], locale: Locale = "pt"): string {
   const name = first(staff.name);
-  const list = roles.length > 1 ? `${roles.slice(0, -1).join(", ")} e ${roles[roles.length - 1]}` : roles[0];
-  const what = roles.length ? `você agora é ${list}` : "o app do acampamento está liberado para você";
-  const phone = staff.phone ? ` com o celular ${formatBrazilPhone(staff.phone)}` : "";
-  const build = (w: string, p: string) => `${config.comtele.prefix}: ${name}, ${w}!${p ? ` Entre${p}` : " Entre"} em ${appLink()}`;
-  for (const msg of [build(what, phone), build(what, ""), build(`você recebeu ${roles.length} novas funções no acampamento`, "")]) {
+  const list = roles.length > 1 ? `${roles.slice(0, -1).join(", ")}${sms(locale, "and")}${roles[roles.length - 1]}` : roles[0];
+  const what = roles.length ? sms(locale, "enrolRoles", { roles: list }) : sms(locale, "enrolOpen");
+  const phone = staff.phone ? formatBrazilPhone(staff.phone) : "";
+  const build = (w: string, withPhone: boolean) =>
+    `${smsPrefix()}: ${name}, ${w}!${withPhone && phone ? sms(locale, "enrolEnterPhone", { phone, link: appLink() }) : sms(locale, "enrolEnter", { link: appLink() })}`;
+  for (const msg of [build(what, true), build(what, false), build(sms(locale, "enrolNewRoles", { count: roles.length }), false)]) {
     if (msg.length <= SMS_MAX) return msg;
   }
-  return build(clip(what, 60), "");
+  return build(clip(what, 60), false);
 }
 
 /**
@@ -975,10 +1196,21 @@ export function composeEnrolSms(staff: Staff, roles: string[]): string {
  * atomic in the database, so restarts, double saves or two triggers firing
  * together can't text twice. Returns true when it went out.
  */
+async function staffWelcomeFacts(staff: Staff): Promise<{ room?: string | null; team?: string | null; bus?: string | null }> {
+  const [room, team, bus] = await Promise.all([
+    bedroomName(staff.bedroom),
+    staff.team ? findTeamById(staff.team).then((t) => t?.name ?? null) : Promise.resolve(null),
+    transportLabel(staff.transportation),
+  ]);
+  return { room, team, bus };
+}
+
 async function sendWelcome(staff: Staff, roles: string[] = []): Promise<boolean> {
-  if (!staff.phone || !staff.active) return false;
+  if (!staff.active) return false;
+  if (!staff.phone && !(staffEmailOf(staff))) return false;
   if (!(await claimStaffWelcome(staff._id))) return false;
-  await deliver(staff, composeEnrolSms(staff, roles), roles.length ? "enrol" : "welcome");
+  if (staff.phone) await deliver(staff, composeEnrolSms(staff, roles, await localeForPhone(staff.phone)), roles.length ? "enrol" : "welcome");
+  await mail(staffEmailOf(staff), staffWelcomeEmail(staff, roles, await staffWelcomeFacts(staff)), roles.length ? "enrol" : "welcome");
   return true;
 }
 
@@ -996,7 +1228,7 @@ export async function syncWelcomes(): Promise<void> {
     if (!settings.notifications.enrolments) return;
     if (!staffAccessOpen(settings.staffAccessWindow)) return; // people on admin lists were welcomed when listed
     for (const s of await listStaff({ active: true })) {
-      if (s.welcomeSentAt || !s.phone) continue;
+      if (s.welcomeSentAt || (!s.phone && !(staffEmailOf(s)))) continue;
       await sendWelcome(s);
     }
   } catch (err) {
@@ -1005,21 +1237,21 @@ export async function syncWelcomes(): Promise<void> {
 }
 
 /** every admin-list membership of one person, as the person reads it */
-async function listRolesOf(id: string, s: Settings): Promise<string[]> {
+async function listRolesOf(id: string, s: Settings, locale: Locale = "pt"): Promise<string[]> {
   const out: string[] = [];
-  if (s.organizers.staffIds.includes(id)) out.push("organizador (acesso de administração)");
-  if (s.gameOrganizers.staffIds.includes(id)) out.push("organizador dos jogos (programação e placar)");
-  if (s.scoreHelpers.staffIds.includes(id)) out.push("ajudante do placar (lança pontos)");
-  if (s.checkinHelpers.staffIds.includes(id)) out.push("ajudante do check-in");
+  if (s.organizers.staffIds.includes(id)) out.push(sms(locale, "roleOrganizer"));
+  if (s.gameOrganizers.staffIds.includes(id)) out.push(sms(locale, "roleGameOrganizer"));
+  if (s.scoreHelpers.staffIds.includes(id)) out.push(sms(locale, "roleScoreHelper"));
+  if (s.checkinHelpers.staffIds.includes(id)) out.push(sms(locale, "roleCheckinHelper"));
   const bus = s.busHelpers.helpers.find((h) => h.staffId === id);
   if (bus) {
     const v = await transportLabel(bus.vehicleId);
-    out.push(v ? `ajudante do ${v}` : "ajudante do ônibus");
+    out.push(v ? sms(locale, "roleBusHelperNamed", { vehicle: v }) : sms(locale, "roleBusHelper"));
   }
-  if (s.medicalStaff.staffIds.includes(id)) out.push("equipe médica");
-  if (s.vestHelpers.staffIds.includes(id)) out.push("responsável pelos coletes (entrega e devolução)");
-  if (s.photographers.staffIds.includes(id)) out.push("fotógrafo do acampamento (envia as fotos)");
-  for (const p of s.parentContacts) if (p.staffId === id) out.push(`contato dos pais (${p.title})`);
+  if (s.medicalStaff.staffIds.includes(id)) out.push(sms(locale, "roleMedical"));
+  if (s.vestHelpers.staffIds.includes(id)) out.push(sms(locale, "roleVestHelper"));
+  if (s.photographers.staffIds.includes(id)) out.push(sms(locale, "rolePhotographer"));
+  for (const p of s.parentContacts) if (p.staffId === id) out.push(sms(locale, "roleParentContact", { title: p.title }));
   return out;
 }
 
@@ -1044,11 +1276,16 @@ export async function notifyAccessListChange(before: Settings, after: Settings):
 
     const staff = await listStaff({ active: true });
     for (const s of staff) {
-      if (!ids.has(s._id) || !s.phone) continue;
-      const [was, now] = await Promise.all([listRolesOf(s._id, before), listRolesOf(s._id, after)]);
+      if (!ids.has(s._id) || (!s.phone && !(staffEmailOf(s)))) continue;
+      const locale = await localeForPhone(s.phone);
+      const [was, now] = await Promise.all([listRolesOf(s._id, before, locale), listRolesOf(s._id, after, locale)]);
       const gained = now.filter((r) => !was.includes(r));
+      if (!gained.length) continue;
       // a role text carries the link too, so it doubles as the welcome; someone already welcomed still hears about the new role
-      if (gained.length && !(await sendWelcome(s, gained))) await deliver(s, composeEnrolSms(s, gained), "enrol");
+      if (!(await sendWelcome(s, gained))) {
+        if (s.phone) await deliver(s, composeEnrolSms(s, gained, locale), "enrol");
+        await mail(staffEmailOf(s), staffWelcomeEmail(s, gained, await staffWelcomeFacts(s)), "enrol");
+      }
     }
   } catch (err) {
     console.error("notify: access list change failed", err);

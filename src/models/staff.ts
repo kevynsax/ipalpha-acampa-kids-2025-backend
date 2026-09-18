@@ -23,6 +23,7 @@ function toStaff(doc: Record<string, unknown> | null): Staff | null {
     sex: doc.sex === "F" || doc.sex === "M" ? (doc.sex as CamperSex) : null,
     probableGender: doc.probableGender === "F" || doc.probableGender === "M" ? (doc.probableGender as CamperSex) : null,
     phone: (doc.phone as string) ?? null,
+    email: typeof doc.email === "string" && doc.email.trim() ? doc.email : null,
     active: (doc.active as boolean) ?? true,
     team: (doc.team as string) ?? null,
     bedroom: (doc.bedroom as string) ?? null,
@@ -320,7 +321,7 @@ export async function ensureAdminsOnRoster(admins: { name: string; phone: string
   for (const a of admins) {
     const existing = await findStaffByPhone(a.phone);
     if (!existing) {
-      await insertStaff({ name: a.name, sex: null, probableGender: null, phone: a.phone, active: true, team: null, bedroom: null, roomRole: "helper", transportation: null, allergies: [], drugAllergies: [], foodRestrictions: "", healthIssues: [], medications: [], healthNotes: "" });
+      await insertStaff({ name: a.name, sex: null, probableGender: null, phone: a.phone, email: null, active: true, team: null, bedroom: null, roomRole: "helper", transportation: null, allergies: [], drugAllergies: [], foodRestrictions: "", healthIssues: [], medications: [], healthNotes: "" });
       created++;
     }
   }

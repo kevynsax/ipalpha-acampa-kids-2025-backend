@@ -4,11 +4,13 @@ import { requireAuth } from "../middleware/auth";
 import { requireAdmin, requireManager } from "../middleware/roles";
 import { listTransports } from "../models/transports";
 import { checkinWindowOpen, getSettings, staffAccessOpen, updateSettings } from "../models/settings";
-import { FOREIGN_LOOKUP_ALERT_AT, listForeignLookupOffenders, listStaff, resetForeignLookups, resetStaffCheckins, resetStaffPhotosNotice, resetStaffVests } from "../models/staff";
+import { FOREIGN_LOOKUP_ALERT_AT, findStaffByPhone, listForeignLookupOffenders, listStaff, resetForeignLookups, resetStaffCheckins, resetStaffPhotosNotice, resetStaffVests, updateStaff } from "../models/staff";
 import { clearCheckinLog, resetCamperCheckins } from "../models/campers";
 import { resetParentPhotosNotice } from "../models/users";
 import { comteleEnabled } from "../services/comtele";
-import { normalizeBrazilPhone } from "../utils";
+import { sampleNotificationEmails } from "../services/emails";
+import { mailEnabled, sendMail } from "../services/mail";
+import { normalizeBrazilPhone, normalizeEmail } from "../utils";
 import { notifyAccessListChange, sendBirthdayNotices, syncParentWelcomes, syncWelcomes, welcomePreview } from "../services/notify";
 import { evictStaffOutsideWindow, publish, rearmWindows, scheduleCheckinReminder } from "../services/realtime";
 import { listEvents } from "../models/schedule";
@@ -74,6 +76,8 @@ export async function serializeSettings(s: Settings) {
     parentContacts: s.parentContacts.map((contact) => ({ ...contact })),
     /** whether SMS can actually go out (Comtele key configured) — read-only, shown on the settings page */
     smsEnabled: comteleEnabled(),
+    /** whether notification emails can actually go out (SendGrid API key + from-address) */
+    mailEnabled: mailEnabled(),
     /**
      * Staff who scanned ≥3 kids outside their scope (emergency QR). Always an
      * empty list for non-managers; empty for managers too when nobody reached
@@ -398,6 +402,50 @@ settings.put("/", requireManager, async (c) => {
 
 /** GET /api/settings/welcome-preview — admin. How many people would get the welcome SMS RIGHT NOW if the toggle were on (never welcomed, inside their window, with a phone). */
 settings.get("/welcome-preview", requireAdmin, async (c) => c.json(await welcomePreview()));
+
+function sampleEmailList() {
+  return sampleNotificationEmails().map(({ id, audience, title, subject }) => ({ id, audience, title, subject }));
+}
+
+function testSubject(audience: "parent" | "staff", subject: string): string {
+  return `Teste - ${audience === "parent" ? "Pais" : "Equipe"} - ${subject}`;
+}
+
+/** GET /api/settings/sample-emails — admin. Catalog of every notification email, plus this admin's roster email. */
+settings.get("/sample-emails", requireAdmin, async (c) => {
+  const me = await findStaffByPhone(c.get("user").phone);
+  return c.json({ emails: sampleEmailList(), adminEmail: me?.email ?? null, mailEnabled: mailEnabled() });
+});
+
+/**
+ * POST /api/settings/sample-emails — admin. Sends the sample `id` (or every
+ * sample when omitted) to `email` (subjects prefixed "Teste - Pais/Equipe - …").
+ * When `save` is true, that address is written on the admin's roster record.
+ */
+settings.post("/sample-emails", requireAdmin, async (c) => {
+  const body = await c.req.json<{ email?: string; save?: boolean; id?: string }>().catch(() => null);
+  const email = typeof body?.email === "string" ? normalizeEmail(body.email) : null;
+  if (!email) return fail(c, "EMAIL_INVALID", "Informe um e-mail válido.");
+  const user = c.get("user");
+  const me = await findStaffByPhone(user.phone);
+  if (!me) return fail(c, "STAFF_NOT_FOUND", "Seu cadastro na equipe não foi encontrado.", 404);
+  if (body?.save !== false && me.email !== email) {
+    await updateStaff(me._id, { email });
+    publish("staff");
+  }
+  const all = sampleNotificationEmails();
+  const samples = typeof body?.id === "string" && body.id ? all.filter((s) => s.id === body.id) : all;
+  if (typeof body?.id === "string" && body.id && samples.length === 0) return fail(c, "SAMPLE_NOT_FOUND", "Amostra não encontrada.", 404);
+  let sent = 0;
+  const failed: string[] = [];
+  for (const sample of samples) {
+    const res = await sendMail(email, testSubject(sample.audience, sample.subject), sample.html, sample.text);
+    if (res.ok) sent++;
+    else failed.push(sample.title);
+  }
+  console.log(`✉️  sample emails → ${email} (${sent}/${samples.length}) by ${user.name}`);
+  return c.json({ sent, total: samples.length, failed, email, emails: sampleEmailList(), adminEmail: email, mailEnabled: mailEnabled() });
+});
 
 /** POST /api/settings/checkin/reset — admin only. Clears EVERY check-in (kids' church + both bus trips, team), the team vests and the audit log, so the process can be rehearsed. */
 settings.post("/checkin/reset", requireManager, async (c) => {

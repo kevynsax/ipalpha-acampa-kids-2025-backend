@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { config } from "../config";
+import { resolveLocale, sms, smsPrefix, type Locale } from "../i18n";
 import { ensureLoginAccount, findByPhone, toPublicUser, updateUser } from "../models/users";
 import { findStaffByPhone } from "../models/staff";
 import { listCampersOfGuardian } from "../models/campers";
@@ -83,7 +84,8 @@ async function landingRole(user: User): Promise<{ role: Role; available: Role[] 
  * this array contains more than one role.
  */
 auth.post("/otp/request", async (c) => {
-  const body = await c.req.json<{ phone?: string }>().catch(() => null);
+  const body = await c.req.json<{ phone?: string; locale?: string }>().catch(() => null);
+  const deviceLocale = resolveLocale(body?.locale ?? c.req.header("accept-language"));
 
   const phone = body?.phone ? normalizeBrazilPhone(body.phone) : null;
   if (!phone) {
@@ -189,10 +191,12 @@ auth.post("/otp/request", async (c) => {
     return c.json({ error: { code: "SMS_REDIRECT_UNSET", message: "O redirecionamento de SMS está ligado sem um celular de teste para este perfil. Ajuste em Configurações → Testes." } }, 503);
   }
 
+  // SMS language: last saved locale on the account, else the device language of this request
+  const smsLocale: Locale = user.locale || deviceLocale;
   if (viaSms) {
     const result = await comteleSendSms(
       target.phone,
-      `${config.comtele.prefix}: ${code} é seu código de acesso. Vale por ${config.otp.expireMinutes} min. Se não foi você, ignore.`,
+      sms(smsLocale, "otp", { prefix: smsPrefix(), code, minutes: config.otp.expireMinutes }),
     );
     if (!result.ok) {
       console.error("[comtele] send failed:", result.message);
@@ -236,7 +240,8 @@ auth.post("/otp/request", async (c) => {
 });
 
 auth.post("/otp/verify", async (c) => {
-  const body = await c.req.json<{ phone?: string; code?: string }>().catch(() => null);
+  const body = await c.req.json<{ phone?: string; code?: string; locale?: string }>().catch(() => null);
+  const deviceLocale = resolveLocale(body?.locale ?? c.req.header("accept-language"));
 
   const phone = body?.phone ? normalizeBrazilPhone(body.phone) : null;
   const code = (body?.code ?? "").replace(/\D/g, "");
@@ -254,7 +259,7 @@ auth.post("/otp/verify", async (c) => {
     );
   }
 
-  const user = await findByPhone(phone);
+  let user = await findByPhone(phone);
   if (!user) {
     return c.json(
       { error: { code: "USER_NOT_FOUND", message: "Cadastro não encontrado." } },
@@ -348,8 +353,9 @@ auth.post("/otp/verify", async (c) => {
     );
   }
 
-  // success — clear OTP, unfreeze, create session for the highest role held (4 days)
-  await updateUser(user._id, { otp: null, frozenUntil: null });
+  // success — clear OTP, unfreeze, remember device language, create session
+  await updateUser(user._id, { otp: null, frozenUntil: null, locale: deviceLocale });
+  user = { ...user, locale: deviceLocale };
 
   const { token, session } = await createSession(user._id, role);
 

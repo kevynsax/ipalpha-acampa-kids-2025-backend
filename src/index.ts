@@ -49,6 +49,7 @@ import camperImportRoutes from "./routes/camperImports";
 import staffImportRoutes from "./routes/staffImports";
 import workerRoutes from "./routes/worker";
 import { comteleEnabled } from "./services/comtele";
+import { mailEnabled } from "./services/mail";
 import { publish, rearmWindows, scheduleBirthdayNotices, scheduleCheckinReminder } from "./services/realtime";
 import { sendBirthdayNotices, sendCheckinReminder, syncParentWelcomes, syncWelcomes } from "./services/notify";
 import { getSettings } from "./models/settings";
@@ -68,7 +69,7 @@ app.use(
 );
 
 app.get("/health", (c) =>
-  c.json({ status: "ok", smsProvider: comteleEnabled() ? "comtele" : "mock" }),
+  c.json({ status: "ok", smsProvider: comteleEnabled() ? "comtele" : "mock", mailProvider: mailEnabled() ? "sendgrid" : "mock" }),
 );
 
 app.route("/api/auth", authRoutes);
@@ -182,6 +183,11 @@ console.log(
   comteleEnabled()
     ? "Comtele SMS enabled (real OTP via SMS)."
     : "⚠️  COMTELE_API_KEY not set — running in MOCK mode: OTP codes are printed in this console.",
+);
+console.log(
+  mailEnabled()
+    ? "SendGrid mail enabled (notification emails)."
+    : "⚠️  SENDGRID_API_KEY / MAIL_FROM not set — notification emails are printed in this console.",
 );
 
 export default {

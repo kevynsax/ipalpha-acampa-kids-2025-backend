@@ -30,6 +30,20 @@ export const config = {
   /** public URL of the app, appended to notification SMS (empty = no link) */
   appUrl: process.env.APP_URL ?? "",
 
+  /**
+   * Public origin of the site (frontend + `/api`). Prefixes images in
+   * notification emails (`/icons/…`, `/church-logo.png`, `/api/files/…`).
+   * `BACKEND_PUBLIC_URL` is an alias; falls back to `APP_URL`.
+   */
+  publicOrigin: (process.env.PUBLIC_ORIGIN || process.env.BACKEND_PUBLIC_URL || process.env.APP_URL || "").replace(/\/$/, ""),
+
+  mail: {
+    /** SendGrid HTTP API. Empty key = mock (emails printed in the console). */
+    apiKey: process.env.SENDGRID_API_KEY ?? "",
+    from: process.env.MAIL_FROM ?? "",
+    fromName: process.env.MAIL_FROM_NAME ?? "Acampa Kids",
+  },
+
   comtele: {
     baseUrl: "https://sms.comtele.com.br/api/v2",
     apiKey: process.env.COMTELE_API_KEY ?? "",

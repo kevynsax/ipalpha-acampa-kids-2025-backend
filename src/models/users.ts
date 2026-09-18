@@ -1,5 +1,6 @@
 import { ObjectId } from "mongodb";
 import { getDb } from "../db";
+import { DEFAULT_LOCALE, resolveLocale, type Locale } from "../i18n";
 import type { PublicUser, Role, User } from "../types";
 import { titleCaseName } from "../utils";
 
@@ -10,6 +11,7 @@ function toUser(doc: Record<string, unknown> | null): User | null {
     name: doc.name as string,
     phone: doc.phone as string,
     roles: (doc.roles as User["roles"]) ?? [],
+    locale: resolveLocale(doc.locale as string | undefined),
     createdAt: doc.createdAt as Date,
     updatedAt: doc.updatedAt as Date,
     otp: doc.otp as User["otp"],
@@ -68,6 +70,7 @@ export async function ensureLoginAccount(name: string, phone: string, role: Role
       $setOnInsert: {
         name: titleCaseName(name) || name,
         phone,
+        locale: DEFAULT_LOCALE,
         prepDone: [],
         welcomeSentAt: null,
         createdAt: now,
@@ -162,8 +165,13 @@ export async function updateUser(id: string, patch: Record<string, unknown>): Pr
     .updateOne({ _id: new ObjectId(id) }, { $set: { ...patch, updatedAt: new Date() } });
 }
 
+/** Persist the device language seen at login (transparent — no UI). */
+export async function setUserLocale(id: string, locale: Locale): Promise<void> {
+  await updateUser(id, { locale: resolveLocale(locale) });
+}
+
 export function toPublicUser(user: User): PublicUser {
-  return { id: user._id, name: user.name, phone: user.phone, roles: user.roles };
+  return { id: user._id, name: user.name, phone: user.phone, roles: user.roles, locale: user.locale };
 }
 
 export async function ensureIndexes(): Promise<void> {

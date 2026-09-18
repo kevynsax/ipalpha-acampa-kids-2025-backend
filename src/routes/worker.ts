@@ -1,12 +1,13 @@
 import { Hono } from "hono";
 import { config } from "../config";
-import { emitAiReviewed, type AiReviewedKind, type AiReviewedStatus } from "../services/realtime";
+import { emitAiReviewed, publish, type AiReviewedKind, type AiReviewedStatus } from "../services/realtime";
 
 /**
  * POST /api/worker/reviewed — the background import worker reports that one
  * record's AI review reached a terminal state (reviewed, or error with no
- * tries left). The API then emits `{ type: "ai-review-done", data }` to every
- * connected WebSocket client.
+ * tries left). The API process owns the WebSocket clients, so it re-reads and
+ * publishes the changed collection here. The worker process cannot do that
+ * directly because its in-memory realtime hub has no browser connections.
  *
  * Auth: shared secret, `Authorization: Bearer <WORKER_SECRET>`. Fail closed:
  * a missing or wrong secret (or none configured) is always 401.
@@ -25,6 +26,7 @@ worker.post("/reviewed", async (c) => {
   if ((kind !== "camper" && kind !== "staff") || !id || (status !== "reviewed" && status !== "error")) {
     return c.json({ error: { code: "BAD_BODY", message: "Informe kind (camper|staff), id e status (reviewed|error)." } }, 400);
   }
+  publish(kind === "camper" ? "campers" : "staff");
   emitAiReviewed(kind as AiReviewedKind, id, status as AiReviewedStatus, attempts);
   return c.json({ ok: true });
 });

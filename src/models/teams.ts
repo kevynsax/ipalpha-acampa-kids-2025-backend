@@ -86,6 +86,30 @@ export async function unlinkTeamEverywhere(teamId: string): Promise<void> {
   ]);
 }
 
+/** Deals camper groups across teams, keeping each group together and balancing total children. */
+export async function assignCamperGroupsAcrossTeams(teamIds: string[], groups: string[][]): Promise<number> {
+  const db = await getDb();
+  const shuffled = groups.filter((group) => group.length > 0).slice();
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  shuffled.sort((a, b) => b.length - a.length);
+  const totals = new Map(teamIds.map((id) => [id, 0]));
+  const assignments = new Map<string, string>();
+  for (const group of shuffled) {
+    const teamId = teamIds.reduce((best, id) => (totals.get(id)! < totals.get(best)! ? id : best), teamIds[0]);
+    for (const id of group) assignments.set(id, teamId);
+    totals.set(teamId, totals.get(teamId)! + group.length);
+  }
+  if (!assignments.size) return 0;
+  const now = new Date();
+  await db.collection("campers").bulkWrite([...assignments].map(([id, team]) => ({
+    updateOne: { filter: { _id: new ObjectId(id), draft: { $ne: true } }, update: { $set: { team, updatedAt: now } } },
+  })));
+  return assignments.size;
+}
+
 export async function ensureTeamIndexes(): Promise<void> {
   const db = await getDb();
   await db.collection(COLLECTION).createIndex({ order: 1, name: 1 });

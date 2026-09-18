@@ -31,6 +31,10 @@ committed YAML or frontend `VITE_*` variables.
 | `COMTELE_API_KEY` | Secret `acampa-2025-secrets`, key `comtele-api-key`; required in production. Empty enables console-only mock OTP |
 | `COMTELE_PREFIX` | `AcampaKids` |
 | `APP_URL` | `https://ipalpha-kids-camping.kevyn.com.br` (SMS links) |
+| `PUBLIC_ORIGIN` | `https://ipalpha-kids-camping.kevyn.com.br` (image URLs in notification emails). Alias `BACKEND_PUBLIC_URL`. Falls back to `APP_URL` |
+| `SENDGRID_API_KEY` | Optional Secret `acampa-2025-secrets`, key `sendgrid-api-key`. Empty = notification emails are logged only |
+| `MAIL_FROM` | Optional Secret key `mail-from` (verified SendGrid sender; required with the API key to send) |
+| `MAIL_FROM_NAME` | `Acampa Kids` |
 | `NOTIFY_COALESCE_SECONDS` | `20` |
 | `IMPORT_ADMIN_PHONE` | Admin E.164 phone notified when an AI import review takes over five minutes |
 | `IMPORT_SUPER_ADMIN_PHONE` | Super-admin E.164 phone for import error alerts; default `+5561985891092` |

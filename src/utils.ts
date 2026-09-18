@@ -6,6 +6,13 @@ import type { Role } from "./types";
  * Accepts input with or without formatting, with or without country code.
  * Returns null when the number is not a valid Brazilian mobile number.
  */
+/** Lower-case email, or null when empty. Invalid returns "" (caller treats as error). */
+export function normalizeEmail(raw: string): string | null {
+  const value = raw.trim().toLowerCase();
+  if (!value) return null;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) ? value : "";
+}
+
 export function normalizeBrazilPhone(raw: string): string | null {
   const digits = raw.replace(/\D/g, "");
 

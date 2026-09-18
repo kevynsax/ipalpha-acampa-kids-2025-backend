@@ -280,7 +280,7 @@ function validCpf(raw: string): string {
   return calc(9) === Number(d[9]) && calc(10) === Number(d[10]) ? formatCpf(d) : "";
 }
 
-function validEmail(raw: string): string {
+export function validEmail(raw: string): string {
   const value = raw.trim().toLowerCase();
   return !value || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) ? value : "";
 }
@@ -970,7 +970,7 @@ export function applyImportDelta(preview: Record<string, unknown>[], reviews: Ca
 export async function createLeaderFromReview(name: string, phone: string, importId: string): Promise<Staff> {
   const normalized = normalizeBrazilPhone(phone);
   if (!normalized) throw new Error("Informe um celular brasileiro válido com DDD.");
-  const data: StaffData = { name: titleCaseName(name), sex: null, probableGender: null, phone: normalized, active: true, team: null, transportation: null, bedroom: null, roomRole: "caretaker", allergies: [], drugAllergies: [], foodRestrictions: "", healthIssues: [], medications: [], healthNotes: "", draft: true, importId };
+  const data: StaffData = { name: titleCaseName(name), sex: null, probableGender: null, phone: normalized, email: null, active: true, team: null, transportation: null, bedroom: null, roomRole: "caretaker", allergies: [], drugAllergies: [], foodRestrictions: "", healthIssues: [], medications: [], healthNotes: "", draft: true, importId };
   const leaderGender = await resolveGender({ name: data.name, bedroomId: null, requested: null, guessIfMissing: true });
   data.sex = leaderGender.sex;
   data.probableGender = leaderGender.probableGender;

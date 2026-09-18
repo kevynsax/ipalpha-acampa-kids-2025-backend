@@ -31,7 +31,7 @@ interface Env {
  *   GET  /api/ai/models   the 3 models answering right now (primaries first, backups fill in)
  *   POST /api/ai/edit     { model, html, selection?, messages } → streams the reply: a chat answer, and
  *                         the new document HTML between <<<DOC>>> markers when the model decided to edit
- *   POST /api/ai/suggest  { html, context?, needTitle, needEmoji } → { title?, emoji? } (fills blanks after an AI edit)
+ *   POST /api/ai/suggest  { html, context?, needTitle, needEmoji } → { title?, emoji? } (title/icon from a title or document)
  *   POST /api/ai/transcribe  multipart { file } → { text } (voice message recorded in the chat, whisper)
  *   POST /api/ai/image    { description, shape?, model? } → { dataUrl, … } (illustration for the document)
  *   POST /api/ai/camper-notes { notes, current } → { fields, model } (sorts pasted observations into the camper form fields)
@@ -44,7 +44,7 @@ interface Env {
 const ai = new Hono<Env>();
 
 /** company whose logo the editor shows beside the model name */
-export type AiVendor = "anthropic" | "openai" | "xai" | "meta" | "zhipu";
+export type AiVendor = "anthropic" | "openai" | "xai" | "meta" | "zhipu" | "alibaba";
 
 /** shown in the editor, in this order (first = default) */
 const PRIMARY_MODELS: { id: string; label: string; vendor: AiVendor }[] = [
@@ -60,9 +60,9 @@ const BACKUP_MODELS: { id: string; label: string; vendor: AiVendor }[] = [
 export const AI_MODELS = [...PRIMARY_MODELS, ...BACKUP_MODELS];
 const OFFERED = 3;
 
-/** small, fast model used for title/emoji suggestions */
-const SUGGEST_MODEL = "gpt-5.6-luna";
-const SUGGEST_VENDOR: AiVendor = "openai";
+/** cheap coder model used for title/emoji suggestions */
+const SUGGEST_MODEL = "qwen-coder";
+const SUGGEST_VENDOR: AiVendor = "alibaba";
 
 const MAX_HTML = 200_000;
 const MAX_MESSAGES = 20;
@@ -101,6 +101,14 @@ export const AI_CONTEXTS = {
     name: "Registro de ocorrência",
     description:
       "Um registro permanente feito pela equipe médica ou pela organização sobre algo que aconteceu com uma ou mais crianças (queda, febre, alergia, medicação dada, conflito). Pode ser lido depois pelos pais e pela liderança. Tom factual, cronológico e respeitoso: o que aconteceu, quando, o que foi feito, quem acompanhou, orientações seguintes. Não invente fatos, horários, doses ou nomes; não faça diagnósticos que não estão no texto.",
+  },
+  event: {
+    name: "Evento da programação",
+    description: "Um item da programação do acampamento (ex.: Piscina, Café da manhã, Louvor, Fogueira). O título é curto; o ícone deve representar a atividade de imediato.",
+  },
+  category: {
+    name: "Categoria de ficha",
+    description: "Um campo de enumeração da ficha de criança ou equipe (ex.: Transporte, Alergias, Cama). O nome é curto; o ícone deve representar o assunto de imediato.",
   },
   generic: {
     name: "Texto do sistema do acampamento",
@@ -643,9 +651,8 @@ async function pingModel(id: string): Promise<{ ok: boolean; ms: number; message
 }
 
 /**
- * POST /api/ai/suggest — after the assistant edits a document whose title /
- * emoji are still blank, the frontend asks for suggestions. Non-streaming,
- * small fast model, JSON in/out.
+ * POST /api/ai/suggest — title / emoji from a title or a document. Non-streaming,
+ * qwen-coder, JSON in/out.
  */
 ai.post("/suggest", async (c) => {
   if (!config.ai.apiKey) return c.json({ error: { code: "AI_DISABLED", message: "Assistente de IA não configurado no servidor." } }, 503);
@@ -667,7 +674,7 @@ ai.post("/suggest", async (c) => {
     headers: { "content-type": "application/json", authorization: `Bearer ${config.ai.apiKey}` },
     body: JSON.stringify({
       model: SUGGEST_MODEL,
-      reasoning_effort: "high",
+      temperature: 0,
       response_format: { type: "json_object" },
       messages: [
         {

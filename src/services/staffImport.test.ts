@@ -57,6 +57,7 @@ describe("staff import review delta",()=>{
     expect(directStaffField("Remédio que dá alergia")?.key).toBe("drugAllergies");
     expect(directStaffField("Está participando?")?.key).toBe("active");
     expect(directStaffField("Gênero")?.key).toBe("probableGender");
+    expect(directStaffField("E-mail")?.key).toBe("email");
     expect(directStaffField("Alergias (alimentar, tópica ou de medicamentos)")?.key).toBe("healthNotes");
   });
   test("never leaves the same imported phone on two rows",()=>{

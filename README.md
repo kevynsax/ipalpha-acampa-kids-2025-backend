@@ -38,6 +38,9 @@ Copy `.env.example` to `.env` for local development. Production configuration an
 | `ACCOUNT_FREEZE_MINUTES` | how long the account stays frozen (default `30`) |
 | `SESSION_HOURS` | session token lifetime (default `96`, 4 days) |
 | `APP_URL` | public URL of the frontend, appended to notification SMS (optional) |
+| `PUBLIC_ORIGIN` | public origin of the site (frontend + `/api`). Prefixes images in notification emails. Falls back to `APP_URL`. Alias: `BACKEND_PUBLIC_URL` |
+| `SENDGRID_API_KEY` | SendGrid API key for `POST https://api.sendgrid.com/v3/mail/send`. **Empty = mock mode**: emails are printed to the server console |
+| `MAIL_FROM` / `MAIL_FROM_NAME` | From-address (verified SendGrid sender, required with the API key to send) and display name (default `Acampa Kids`) |
 | `FACE_SERVICE_URL` | private face service (repo `ipalpha-acampa-kids-2025-face-service`, sibling folder `../face-service`) used to index gallery faces and run the parents' photo search. **Empty = face search disabled** (parents still see the published album) |
 | `FACE_MATCH_THRESHOLD` | cosine similarity a gallery face must reach to count as a match (default `0.22`) — low so parents find their kid; a few other children in the results is acceptable |
 | `FACE_MIN_DETECTION_SCORE` | detections below this are ignored, both when indexing and when reading the reference (default `0.4`) |

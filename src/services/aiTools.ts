@@ -81,7 +81,7 @@ export const AI_TOOLS: AiTool[] = [
         instrucoes: "Documentos longos de referência para toda a equipe (regras, plano de emergência, rotina).",
         preparacao: "Checklists curtos que cada voluntário marca antes da viagem; funções podem ter a própria preparação.",
         ocorrencias: "Registros permanentes de algo que aconteceu com crianças/equipe (saúde, incidentes). Feitos pela equipe médica e pela organização. Cada grupo só vê as que o próprio grupo registrou; o admin vê todas.",
-        notificacoes: "SMS automáticos para a pessoa afetada quando muda quarto, escala, documentos ou quando o check-in dela é registrado.",
+        notificacoes: "SMS automáticos (e e-mail com o detalhe, quando há endereço) para a pessoa afetada quando muda quarto, escala, documentos ou quando o check-in dela é registrado.",
       },
     }),
   },

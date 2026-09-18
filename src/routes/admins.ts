@@ -49,7 +49,7 @@ admins.get("/", requireAuth, requireAdmin, async (c) => {
  * on, texts the person the app link so they can log in right away.
  */
 admins.post("/", requireAuth, requireAdmin, async (c) => {
-  const body = await c.req.json<{ name?: string; phone?: string; sendSms?: boolean }>().catch(() => null);
+  const body = await c.req.json<{ name?: string; phone?: string; sendSms?: boolean; locale?: string }>().catch(() => null);
   const name = (body?.name ?? "").trim();
   const phone = body?.phone ? normalizeBrazilPhone(body.phone) : null;
   if (!name) return c.json({ error: { code: "NAME_INVALID", message: "Informe o nome." } }, 400);
@@ -66,7 +66,9 @@ admins.post("/", requireAuth, requireAdmin, async (c) => {
   let smsSent = false;
   if (body?.sendSms !== false && comteleEnabled() && config.appUrl) {
     const first = name.split(/\s+/)[0];
-    const result = await comteleSendSms(phone, `${config.comtele.prefix}: ${first}, agora você administra o Acampa Kids. Entre com este celular: ${config.appUrl}`);
+    const { resolveLocale, sms, smsPrefix } = await import("../i18n");
+    const locale = resolveLocale(body?.locale);
+    const result = await comteleSendSms(phone, sms(locale, "adminInvite", { prefix: smsPrefix(), name: first, url: config.appUrl }));
     smsSent = result.ok;
     if (!result.ok) console.error("[comtele] admin invite failed:", result.message);
   }

@@ -28,7 +28,7 @@ import { canHandleVests, hideOwnBedroom, resolveScope, staffVisibility, type Sco
 import { bedroomFullMessage, isInvalid, parseBedroom, parseMedications, parseMulti, parseTeam, parseText, parseTransport } from "./_validate";
 import { listTeams } from "../models/teams";
 import { assignmentDetail, autoRoleFor, dutyOf, teamMap } from "../services/schedule";
-import { distanceMeters, normalizeBrazilPhone, titleCaseName, nowInSaoPauloWallClock, saoPauloWallClock, saoPauloWallClockToIso, todayInSaoPaulo } from "../utils";
+import { distanceMeters, normalizeBrazilPhone, normalizeEmail, titleCaseName, nowInSaoPauloWallClock, saoPauloWallClock, saoPauloWallClockToIso, todayInSaoPaulo } from "../utils";
 import { getSettings } from "../models/settings";
 import { ensureLoginAccount, isAdminPhone } from "../models/users";
 import { notifyCaretakerChange, notifyCheckin, notifyStaffChange, syncWelcomes } from "../services/notify";
@@ -80,6 +80,7 @@ export function serializeStaffFor(s: Staff, scope: Scope) {
     ...full,
     redacted: true,
     phone: s.phone,
+    email: null,
     // a roommate's team is public inside the room (the games are played together); parents / vest helpers don't get it
     team: roommate ? s.team : null,
     bedroom: roommate || parentRoom ? s.bedroom : null,
@@ -126,6 +127,7 @@ function serialize(s: Staff) {
     sex: s.sex,
     probableGender: s.probableGender,
     phone: s.phone,
+    email: s.email,
     /** an ADMIN's own roster record: can't be deleted, deactivated or have the phone changed */
     admin: isAdminPhone(s.phone),
     active: s.active,
@@ -184,6 +186,19 @@ async function buildPatch(
       const phone = typeof raw === "string" ? normalizeBrazilPhone(raw) : null;
       if (!phone) return { code: "PHONE_INVALID", message: "Informe um celular brasileiro válido com DDD." };
       patch.phone = phone;
+    }
+  }
+
+  if (has("email")) {
+    const raw = body.email;
+    if (raw === undefined || raw === null || (typeof raw === "string" && !raw.trim())) {
+      patch.email = null;
+    } else if (typeof raw !== "string") {
+      return { code: "EMAIL_INVALID", message: "Informe um e-mail válido." };
+    } else {
+      const email = normalizeEmail(raw);
+      if (!email) return { code: "EMAIL_INVALID", message: "Informe um e-mail válido." };
+      patch.email = email;
     }
   }
 
