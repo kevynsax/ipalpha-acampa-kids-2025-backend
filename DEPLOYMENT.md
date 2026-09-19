@@ -31,9 +31,9 @@ committed YAML or frontend `VITE_*` variables.
 | `COMTELE_API_KEY` | Secret `acampa-2025-secrets`, key `comtele-api-key`; required in production. Empty enables console-only mock OTP |
 | `COMTELE_PREFIX` | `AcampaKids` |
 | `APP_URL` | `https://ipalpha-kids-camping.kevyn.com.br` (SMS links) |
-| `PUBLIC_ORIGIN` | `https://ipalpha-kids-camping.kevyn.com.br` (image URLs in notification emails). Alias `BACKEND_PUBLIC_URL`. Falls back to `APP_URL` |
+| `PUBLIC_ORIGIN` | `https://ipalpha-kids-camping.kevyn.com.br` (image URLs in notification emails). Alias `BACKEND_PUBLIC_URL`. Empty = mail send is refused |
 | `SENDGRID_API_KEY` | Optional Secret `acampa-2025-secrets`, key `sendgrid-api-key`. Empty = notification emails are logged only |
-| `MAIL_FROM` | Optional Secret key `mail-from` (verified SendGrid sender; required with the API key to send) |
+| `MAIL_FROM` | `alphakids@kevyn.com.br` (verified SendGrid sender) |
 | `MAIL_FROM_NAME` | `Acampa Kids` |
 | `NOTIFY_COALESCE_SECONDS` | `20` |
 | `IMPORT_ADMIN_PHONE` | Admin E.164 phone notified when an AI import review takes over five minutes |
@@ -43,6 +43,7 @@ committed YAML or frontend `VITE_*` variables.
 | `SUPER_ADMIN_PHONE` | E.164 phone guaranteed the top-level `admin` login role at API startup |
 | `AI_BASE_URL` | `https://ai-models.kevyn.com.br/v1` |
 | `AI_API_KEY` | Secret `acampa-2025-secrets`, key `ai-api-key`; optional, empty disables AI |
+| `OPENROUTER_API_KEY` | Secret `acampa-2025-secrets`, key `openrouter-api-key`; optional. Empty disables Jev (icon suggestions + first-pass spreadsheet column mapping). Worker also needs it for import mapping |
 | `AI_TRANSCRIBE_URL` | `https://whisper.kevyn.com.br/v1`; empty hides voice input |
 | `AI_TRANSCRIBE_MODEL` | `whisper-large-v3-turbo` |
 | `AI_TRANSCRIBE_KEY` | Optional Secret key `ai-transcribe-key`; leave absent if the speech endpoint needs no authentication |
@@ -79,6 +80,13 @@ kubectl -n ipalpha-kids rollout restart deploy/acampa-2025-backend
 ```
 
 (`read -rs "?prompt"` is zsh; in bash it is `read -rs -p "AI_LIVE_API_KEY: " value`.)
+
+`OPENROUTER_API_KEY` (icon suggestions + spreadsheet mapping) is collected the same way, or with:
+
+```bash
+./backend/scripts/collect-openrouter-secret.sh            # prompt, never hits shell history
+./backend/scripts/collect-openrouter-secret.sh --from-env # copy from backend/.env
+```
 
 ## Face service (parents' photo search)
 

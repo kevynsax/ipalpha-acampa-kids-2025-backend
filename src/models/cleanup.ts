@@ -1,6 +1,5 @@
 import { ObjectId } from "mongodb";
 import { getDb } from "../db";
-import { loadAdminPhones } from "./users";
 
 /**
  * End-of-camp cleanup (Configurações → Limpeza, admin only): each group wipes
@@ -62,17 +61,16 @@ function emptyList(group: StaffKeepGroup): unknown {
 }
 
 /**
- * Every team member except the admins' own roster records (which can never be
- * deleted) and the people on the admin lists named in `keep`, plus their event
- * assignments, the kids they looked after and every admin list that named
- * them. A kept list is left untouched — its people stay on it.
+ * Every team member except the people on the admin lists named in `keep`, plus
+ * their event assignments, the kids they looked after and every admin list that
+ * named them. Login accounts (`users`) are never touched. A kept list is left
+ * untouched — its people stay on it.
  */
 export async function wipeStaff(keep: readonly StaffKeepGroup[] = []): Promise<number> {
   const db = await getDb();
-  const admins = await loadAdminPhones();
   const settings = (await db.collection("settings").findOne({ _id: "global" as never })) as Record<string, unknown> | null;
   const saved = new Set(keep.flatMap((g) => staffIdsOf(settings, g)).filter((id) => ObjectId.isValid(id)));
-  const filter = { phone: { $nin: [...admins] }, _id: { $nin: [...saved].map((id) => new ObjectId(id)) } };
+  const filter = { _id: { $nin: [...saved].map((id) => new ObjectId(id)) } };
   const doomed = (await db.collection("staff").find(filter, { projection: { _id: 1 } }).toArray()).map((d) => String(d._id));
   const { deletedCount } = await db.collection("staff").deleteMany(filter);
   const now = new Date();
@@ -257,10 +255,22 @@ export async function wipeImportCache(): Promise<number> {
   return deletedCount;
 }
 
-/** How many remembered mappings the import dictionary cache holds. */
-export async function countImportCache(): Promise<number> {
+/** Staff-import column mappings only (`staff-column:…`). */
+export async function wipeStaffImportCache(): Promise<number> {
   const db = await getDb();
-  return db.collection("camperImportDictionary").countDocuments({});
+  const { deletedCount } = await db.collection("camperImportDictionary").deleteMany({ field: { $regex: "^staff-column:" } });
+  return deletedCount;
+}
+
+/** How many remembered mappings the import dictionary cache holds. */
+export async function countImportCache(): Promise<{ count: number; staff: number; campers: number }> {
+  const db = await getDb();
+  const col = db.collection("camperImportDictionary");
+  const [count, staff] = await Promise.all([
+    col.countDocuments({}),
+    col.countDocuments({ field: { $regex: "^staff-column:" } }),
+  ]);
+  return { count, staff, campers: Math.max(0, count - staff) };
 }
 
 /**

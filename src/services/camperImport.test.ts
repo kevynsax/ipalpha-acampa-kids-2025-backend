@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import * as XLSX from "xlsx";
-import { applyCategoryChoices, applyImportDelta, camperDataFromPreview, camperIdentityKey, directImportField, extractImportNumber, isEmptyCategoryValue, isNarrativeCategoryText, narrativeOnlyAtoms, normalizeEmergencyContact, parseImportSex, parseSpreadsheet, splitCategoryText } from "./camperImport";
+import { applyCategoryChoices, applyImportDelta, camperDataFromPreview, camperIdentityKey, concatOtherColumns, directImportField, extractImportNumber, IMPORT_ID_VALUE_RE, isEmptyCategoryValue, isIgnoredImportColumn, isNarrativeCategoryText, narrativeOnlyAtoms, normalizeEmergencyContact, parseImportSex, parseSpreadsheet, splitCategoryText } from "./camperImport";
 import type { CamperImportReviewItem } from "../types";
 
 function book(rows: unknown[][]): Uint8Array {
@@ -41,6 +41,23 @@ describe("camper spreadsheet parser", () => {
 });
 
 describe("camper deterministic column mapping", () => {
+  test("spreadsheet UUID columns stay out of mapping and notes", () => {
+    expect(isIgnoredImportColumn("id")).toBe(true);
+    expect(isIgnoredImportColumn("room_id")).toBe(true);
+    expect(isIgnoredImportColumn("bus_id")).toBe(true);
+    expect(isIgnoredImportColumn("team_id")).toBe(true);
+    expect(isIgnoredImportColumn("quarto")).toBe(false);
+    expect(isIgnoredImportColumn("transporte")).toBe(false);
+    expect(IMPORT_ID_VALUE_RE.test("89c85104-0d73-4ebf-821c-08f94689254e")).toBe(true);
+    expect(IMPORT_ID_VALUE_RE.test("MENINOS - 403")).toBe(false);
+    expect(concatOtherColumns({
+      id: "f73f61af-c696-48e8-9f61-d55e6c58715d",
+      rg: "83122818191",
+      quarto: "COORDENAÇÃO - 505",
+      room_id: "75ff6440-bfc0-4968-8aba-a3f43de3fce9",
+    }, new Set(["quarto"]))).toBe("rg: 83122818191.");
+  });
+
   test("specific labels win over generic words", () => {
     expect(directImportField("Gostaria de ficar no mesmo quarto de alguém?")?.key).toBe("bedroomPreference");
     expect(directImportField("Série/ano escolar")?.key).toBe("schoolGrade");

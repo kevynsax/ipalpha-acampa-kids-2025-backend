@@ -31,9 +31,10 @@ export const config = {
   appUrl: process.env.APP_URL ?? "",
 
   /**
-   * Public origin of the site (frontend + `/api`). Prefixes images in
-   * notification emails (`/icons/…`, `/church-logo.png`, `/api/files/…`).
-   * `BACKEND_PUBLIC_URL` is an alias; falls back to `APP_URL`.
+   * Origin used as a prefix for images in notification emails (`/icons/…`,
+   * `/church-logo.png`, `/api/files/…`). Must be reachable by mail clients
+   * (not localhost). `PUBLIC_ORIGIN`, else `BACKEND_PUBLIC_URL`, else `APP_URL`.
+   * Empty = mail send is refused so the missing env is obvious.
    */
   publicOrigin: (process.env.PUBLIC_ORIGIN || process.env.BACKEND_PUBLIC_URL || process.env.APP_URL || "").replace(/\/$/, ""),
 
@@ -81,6 +82,8 @@ export const config = {
   ai: {
     baseUrl: aiBaseUrl,
     apiKey: aiApiKey,
+    /** OpenRouter Decisions API used by Jev for emoji suggestions and import column mapping. */
+    openRouterApiKey: process.env.OPENROUTER_API_KEY ?? "",
     /**
      * Two-way voice conversation with the assistant (GPT-Live, POST /v1/live/sessions).
      * GPT-Live owns the microphone and the speaker; it delegates every question to

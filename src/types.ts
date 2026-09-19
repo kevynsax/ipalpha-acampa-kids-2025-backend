@@ -228,6 +228,10 @@ export interface Staff {
   phone: string | null;
   /** optional — notification emails; null/empty = skip email, never block login */
   email: string | null;
+  /** unstructured identity document (CPF, RG, identidade, CDIN, passport…) */
+  document: string;
+  /** ISO date (YYYY-MM-DD); null when unknown */
+  birthDate: string | null;
   /** inactive members are kept for history but hidden from the default lists */
   active: boolean;
   /** id of a Team document (not a category) */

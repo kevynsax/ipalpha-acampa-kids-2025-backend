@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { applyStaffCategoryChoices, applyStaffDelta, directStaffField, normalizeStaffFreeText, parseStaffImportSex, staffDataFromPreview } from "./staffImport";
+import { isIgnoredImportColumn } from "./camperImport";
+import { applyStaffCategoryChoices, applyStaffDelta, directStaffField, normalizeStaffFreeText, parseStaffDuty, parseStaffImportSex, parseStaffRoomRole, resolveStaffColumnTarget, staffDataFromPreview } from "./staffImport";
 import type { StaffImportReviewItem } from "../types";
 
 const item = (patch: Partial<StaffImportReviewItem>): StaffImportReviewItem => ({ id:"r1",row:2,kind:"phone",field:"phone",memberName:"Ana",original:"",value:"",skip:false,resolved:false,...patch });
@@ -58,15 +59,76 @@ describe("staff import review delta",()=>{
     expect(directStaffField("Está participando?")?.key).toBe("active");
     expect(directStaffField("Gênero")?.key).toBe("probableGender");
     expect(directStaffField("E-mail")?.key).toBe("email");
+    expect(directStaffField("CPF")?.key).toBe("document");
+    expect(directStaffField("RG")?.key).toBe("document");
+    expect(directStaffField("Identidade")?.key).toBe("document");
+    expect(directStaffField("Passaporte")?.key).toBe("document");
+    expect(directStaffField("CDIN")?.key).toBe("document");
+    expect(staffDataFromPreview({name:"Ana",document:" 123.456.789-00 "},"import-1").document).toBe("123.456.789-00");
+    expect(directStaffField("Data de nascimento")?.key).toBe("birthDate");
+    expect(directStaffField("Nascimento")?.key).toBe("birthDate");
+    expect(staffDataFromPreview({name:"Ana",birthDate:"1990-04-12"},"import-1").birthDate).toBe("1990-04-12");
+    expect(staffDataFromPreview({name:"Ana"},"import-1").birthDate).toBeNull();
+    expect(resolveStaffColumnTarget("Data de nascimento")).toBe("birthDate");
     expect(directStaffField("Alergias (alimentar, tópica ou de medicamentos)")?.key).toBe("healthNotes");
+    expect(directStaffField("Função no quarto")?.key).toBe("roomRole");
+    expect(directStaffField("lider_checkin")?.key).toBe("checkinHelper");
+    expect(directStaffField("Líder check-in")?.key).toBe("checkinHelper");
+    expect(directStaffField("checkin leader")?.key).toBe("checkinHelper");
+    expect(resolveStaffColumnTarget("lider_checkin", undefined, "roomRole")).toBe("checkinHelper");
+    expect(resolveStaffColumnTarget("Nome")).toBe("name");
+    expect(resolveStaffColumnTarget("Notas internas", undefined, null, "roomRole")).toBeNull();
+    expect(resolveStaffColumnTarget("Cargo", undefined, "roomRole", "roomRole")).toBeNull();
+    expect(resolveStaffColumnTarget("Cargo", "roomRole")).toBe("roomRole");
+    expect(staffDataFromPreview({name:"Ana"},"import-1").roomRole).toBe("helper");
+    expect(parseStaffRoomRole("")).toBe("helper");
+    expect(parseStaffRoomRole("auxiliar")).toBe("helper");
+    expect(parseStaffRoomRole("líder")).toBe("caretaker");
+    expect(directStaffField("quarto")?.key).toBe("bedroom");
+    expect(directStaffField("transporte")?.key).toBe("transportation");
+    expect(directStaffField("Organizador")?.key).toBe("organizer");
+    expect(directStaffField("Ajudantes do check-in")?.key).toBe("checkinHelper");
+    expect(directStaffField("Coletes")?.key).toBe("vestHelper");
+    expect(directStaffField("Ajudantes do placar")?.key).toBe("scoreHelper");
+    expect(directStaffField("Organizadores dos jogos")?.key).toBe("gameOrganizer");
+    expect(directStaffField("pode gerenciar colete")?.key).toBe("vestHelper");
+    expect(resolveStaffColumnTarget("Cargo", undefined, "organizer", "organizer")).toBe("organizer");
+    expect(resolveStaffColumnTarget("Cargo", "checkinHelper")).toBe("checkinHelper");
+    expect(parseStaffDuty("sim")).toBe(true);
+    expect(parseStaffDuty("x")).toBe(true);
+    expect(parseStaffDuty("1")).toBe(true);
+    expect(parseStaffDuty("nao")).toBe(false);
+    expect(parseStaffDuty("")).toBe(false);
+    expect(isIgnoredImportColumn("id")).toBe(true);
+    expect(isIgnoredImportColumn("room_id")).toBe(true);
+    expect(isIgnoredImportColumn("bus_id")).toBe(true);
   });
   test("never leaves the same imported phone on two rows",()=>{
     const rows=applyStaffDelta([{row:2,name:"Ana",phone:"+5511999999999"},{row:3,name:"Bia",phone:"+5511999999999"}],[],{});
     expect(rows.map((row)=>row.phone)).toEqual(["+5511999999999",null]);
   });
-  test("review delta cannot turn an admin roster row into a leader or team member",()=>{
-    const [row]=applyStaffDelta([{row:2,name:"Admin",adminProtected:true,roomRole:"helper",team:null}], [item({kind:"roomRole",value:"helper"})], {r1:{value:"caretaker"}});
-    expect(row.roomRole).toBe("helper");
-    expect(row.team).toBeNull();
+  test("in-sheet phone conflict: chosen row keeps the number, the other is created without login",()=>{
+    const reviews=[item({id:"a",row:2,kind:"duplicate",incomingData:{name:"Ana"}}),item({id:"b",row:3,kind:"duplicate",incomingData:{name:"Bia"}})];
+    const rows=applyStaffDelta([{row:2,name:"Ana",phone:"+5511999999999"},{row:3,name:"Bia",phone:"+5511999999999"}],reviews,{a:{value:"keep-phone"},b:{value:"blank"}});
+    expect(rows[0]).toMatchObject({phone:"+5511999999999",blocked:false,duplicateChoice:"keep-phone"});
+    expect(rows[1]).toMatchObject({phone:null,blocked:false,duplicateChoice:"blank"});
+  });
+  test("in-sheet phone conflict: leaving it blank still creates both members without login",()=>{
+    const reviews=[item({id:"a",row:2,kind:"duplicate"}),item({id:"b",row:3,kind:"duplicate"})];
+    const rows=applyStaffDelta([{row:2,name:"Ana",phone:"+5511999999999"},{row:3,name:"Bia",phone:"+5511999999999"}],reviews,{a:{value:"blank"},b:{value:"blank"}});
+    expect(rows.map((row)=>({phone:row.phone,blocked:row.blocked}))).toEqual([{phone:null,blocked:false},{phone:null,blocked:false}]);
+  });
+  test("in-sheet phone conflict: ignoring one person keeps the other with the number",()=>{
+    const reviews=[item({id:"a",row:2,kind:"duplicate"}),item({id:"b",row:3,kind:"duplicate"})];
+    const rows=applyStaffDelta([{row:2,name:"Ana",phone:"+5511999999999"},{row:3,name:"Bia",phone:"+5511999999999"}],reviews,{a:{value:"keep-phone"},b:{skip:true}});
+    expect(rows[0]).toMatchObject({phone:"+5511999999999",blocked:false,duplicateChoice:"keep-phone"});
+    expect(rows[1]).toMatchObject({blocked:true,skipReason:"Revisão ignorada"});
+  });
+  test("in-sheet phone conflict: a new number on one row keeps both logins",()=>{
+    const reviews=[item({id:"a",row:2,kind:"duplicate"}),item({id:"b",row:3,kind:"duplicate"})];
+    const rows=applyStaffDelta([{row:2,name:"Ana",phone:"+5511999999999"},{row:3,name:"Bia",phone:"+5511999999999"}],reviews,{a:{value:"keep-phone"},b:{value:"(11) 98888-7777"}});
+    expect(rows[0]).toMatchObject({phone:"+5511999999999",blocked:false,duplicateChoice:"keep-phone"});
+    expect(rows[1]).toMatchObject({phone:"+5511988887777",blocked:false,duplicateChoice:"new-phone"});
   });
 });
+

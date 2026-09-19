@@ -24,6 +24,8 @@ function toStaff(doc: Record<string, unknown> | null): Staff | null {
     probableGender: doc.probableGender === "F" || doc.probableGender === "M" ? (doc.probableGender as CamperSex) : null,
     phone: (doc.phone as string) ?? null,
     email: typeof doc.email === "string" && doc.email.trim() ? doc.email : null,
+    document: typeof doc.document === "string" ? doc.document : "",
+    birthDate: typeof doc.birthDate === "string" && doc.birthDate ? doc.birthDate : null,
     active: (doc.active as boolean) ?? true,
     team: (doc.team as string) ?? null,
     bedroom: (doc.bedroom as string) ?? null,
@@ -307,25 +309,6 @@ export async function deleteStaff(id: string): Promise<boolean> {
   const db = await getDb();
   const res = await db.collection(COLLECTION).deleteOne({ _id: new ObjectId(id) });
   return res.deletedCount === 1;
-}
-
-/**
- * Every admin account (users.roles has "admin") also lives on the team roster,
- * so they get a room, food restrictions, a vest… like everyone else. That
- * Existing records are never rewritten: an administrator may also genuinely
- * serve on the team and the login lets them choose either profile. Called at
- * boot only to create a minimal roster record when one is missing.
- */
-export async function ensureAdminsOnRoster(admins: { name: string; phone: string }[]): Promise<{ created: number }> {
-  let created = 0;
-  for (const a of admins) {
-    const existing = await findStaffByPhone(a.phone);
-    if (!existing) {
-      await insertStaff({ name: a.name, sex: null, probableGender: null, phone: a.phone, email: null, active: true, team: null, bedroom: null, roomRole: "helper", transportation: null, allergies: [], drugAllergies: [], foodRestrictions: "", healthIssues: [], medications: [], healthNotes: "" });
-      created++;
-    }
-  }
-  return { created };
 }
 
 export async function ensureStaffIndexes(): Promise<void> {

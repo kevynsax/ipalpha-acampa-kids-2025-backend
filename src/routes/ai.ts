@@ -44,7 +44,7 @@ interface Env {
 const ai = new Hono<Env>();
 
 /** company whose logo the editor shows beside the model name */
-export type AiVendor = "anthropic" | "openai" | "xai" | "meta" | "zhipu" | "alibaba";
+export type AiVendor = "anthropic" | "openai" | "xai" | "meta" | "zhipu" | "alibaba" | "typesafe";
 
 /** shown in the editor, in this order (first = default) */
 const PRIMARY_MODELS: { id: string; label: string; vendor: AiVendor }[] = [
@@ -60,9 +60,13 @@ const BACKUP_MODELS: { id: string; label: string; vendor: AiVendor }[] = [
 export const AI_MODELS = [...PRIMARY_MODELS, ...BACKUP_MODELS];
 const OFFERED = 3;
 
-/** cheap coder model used for title/emoji suggestions */
-const SUGGEST_MODEL = "qwen-coder";
-const SUGGEST_VENDOR: AiVendor = "alibaba";
+/** Title generation stays on the existing text model; emoji choice uses Jev. */
+const TITLE_SUGGEST_MODEL = "qwen-coder";
+const TITLE_SUGGEST_VENDOR: AiVendor = "alibaba";
+const EMOJI_SUGGEST_MODEL = "typesafe/jev-1.13";
+const EMOJI_SUGGEST_VENDOR: AiVendor = "typesafe";
+const OPENROUTER_DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions";
+const MAX_EMOJI_CHOICES = 64;
 
 const MAX_HTML = 200_000;
 const MAX_MESSAGES = 20;
@@ -650,14 +654,109 @@ async function pingModel(id: string): Promise<{ ok: boolean; ms: number; message
   }
 }
 
-/**
- * POST /api/ai/suggest — title / emoji from a title or a document. Non-streaming,
- * qwen-coder, JSON in/out.
- */
+interface JevChoiceAnswer {
+  type?: unknown;
+  choice?: unknown;
+  confidence?: unknown;
+  probabilities?: unknown;
+}
+
+/** Jev is a closed-set decision model: it picks one of the emojis already shown by the form. */
+async function suggestEmojiWithJev(input: { html: string; ctx: AiContext; choices: string[]; userId: string; signal: AbortSignal }): Promise<string | undefined> {
+  if (!config.ai.openRouterApiKey || input.choices.length === 0) return undefined;
+  const optionToEmoji = Object.fromEntries(input.choices.map((emoji, index) => [`option_${index}`, emoji]));
+  const criteria = Object.fromEntries(Object.keys(optionToEmoji).map((option) => [option, { emoji: optionToEmoji[option] }]));
+  const upstream = await fetch(OPENROUTER_DECISIONS_URL, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${config.ai.openRouterApiKey}`,
+      "HTTP-Referer": config.appUrl || "https://acampakids.app",
+      "X-Title": "Acampa Kids emoji suggestions",
+    },
+    body: JSON.stringify({
+      model: EMOJI_SUGGEST_MODEL,
+      state: {
+        application: "Aplicativo brasileiro para organizar um acampamento infantil de igreja.",
+        itemType: AI_CONTEXTS[input.ctx].name,
+        itemDescription: AI_CONTEXTS[input.ctx].description,
+        content: input.html.slice(0, 20_000),
+      },
+      questions: {
+        icon: {
+          type: "choice",
+          instructions: "Qual dos emojis disponíveis representa melhor e de forma mais imediata este item da interface?",
+          criteria,
+        },
+      },
+    }),
+    signal: input.signal,
+  }).catch(() => null);
+
+  if (!upstream?.ok) {
+    console.error("Jev emoji suggest error", upstream?.status, (await upstream?.text().catch(() => ""))?.slice(0, 300));
+    void recordAiUsage({ at: new Date(), vendor: EMOJI_SUGGEST_VENDOR, model: EMOJI_SUGGEST_MODEL, kind: "suggest", userId: input.userId, promptTokens: 0, completionTokens: 0, ok: false });
+    return undefined;
+  }
+
+  const data = (await upstream.json().catch(() => null)) as { answers?: { icon?: JevChoiceAnswer }; usage?: { input_tokens?: number; output_tokens?: number } } | null;
+  const answer = data?.answers?.icon;
+  const emoji = answer?.type === "choice" && typeof answer.choice === "string" ? optionToEmoji[answer.choice] : undefined;
+  const ok = typeof emoji === "string" && input.choices.includes(emoji);
+  void recordAiUsage({
+    at: new Date(),
+    vendor: EMOJI_SUGGEST_VENDOR,
+    model: EMOJI_SUGGEST_MODEL,
+    kind: "suggest",
+    userId: input.userId,
+    promptTokens: data?.usage?.input_tokens ?? 0,
+    completionTokens: data?.usage?.output_tokens ?? 0,
+    ok,
+  });
+  return ok ? emoji : undefined;
+}
+
+async function suggestTitle(input: { html: string; ctx: AiContext; userId: string; signal: AbortSignal }): Promise<string | undefined> {
+  if (!config.ai.apiKey) return undefined;
+  const upstream = await fetch(`${config.ai.baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${config.ai.apiKey}` },
+    body: JSON.stringify({
+      model: TITLE_SUGGEST_MODEL,
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content: `Você nomeia documentos do app de um acampamento infantil de igreja. Tipo do documento: ${AI_CONTEXTS[input.ctx].name}. Leia o HTML e responda SOMENTE {"title":"título curto"}. Use 2 a 5 palavras em português do Brasil, sem ponto final e sem emoji. Seja específico ao conteúdo (ex.: "Regras da piscina", não "Instruções").`,
+        },
+        { role: "user", content: input.html.slice(0, 20_000) },
+      ],
+    }),
+    signal: input.signal,
+  }).catch(() => null);
+  if (!upstream?.ok) {
+    console.error("AI title suggest error", upstream?.status, (await upstream?.text().catch(() => ""))?.slice(0, 300));
+    void recordAiUsage({ at: new Date(), vendor: TITLE_SUGGEST_VENDOR, model: TITLE_SUGGEST_MODEL, kind: "suggest", userId: input.userId, promptTokens: 0, completionTokens: 0, ok: false });
+    return undefined;
+  }
+  const data = (await upstream.json().catch(() => null)) as { choices?: { message?: { content?: string } }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } } | null;
+  const raw = data?.choices?.[0]?.message?.content ?? "";
+  let parsed: { title?: unknown } = {};
+  try {
+    parsed = JSON.parse(raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""));
+  } catch {
+    console.error("AI title suggest: bad json", raw.slice(0, 200));
+  }
+  const title = typeof parsed.title === "string" ? parsed.title.trim().replace(/\.$/, "").slice(0, 80) : undefined;
+  void recordAiUsage({ at: new Date(), vendor: TITLE_SUGGEST_VENDOR, model: TITLE_SUGGEST_MODEL, kind: "suggest", userId: input.userId, promptTokens: data?.usage?.prompt_tokens ?? 0, completionTokens: data?.usage?.completion_tokens ?? 0, ok: !!title });
+  return title;
+}
+
+/** POST /api/ai/suggest — Jev chooses icons; the existing text model generates titles. */
 ai.post("/suggest", async (c) => {
-  if (!config.ai.apiKey) return c.json({ error: { code: "AI_DISABLED", message: "Assistente de IA não configurado no servidor." } }, 503);
   const body = (await c.req.json().catch(() => null)) as
-    | { html?: unknown; context?: unknown; needTitle?: unknown; needEmoji?: unknown }
+    | { html?: unknown; context?: unknown; needTitle?: unknown; needEmoji?: unknown; emojiChoices?: unknown }
     | null;
   const html = typeof body?.html === "string" ? body.html : "";
   const needTitle = body?.needTitle === true;
@@ -665,51 +764,17 @@ ai.post("/suggest", async (c) => {
   if (!html.trim() || (!needTitle && !needEmoji)) return c.json({});
   if (html.length > MAX_HTML) return c.json({ error: { code: "AI_TOO_LONG", message: "Documento grande demais." } }, 413);
   const ctx: AiContext = typeof body?.context === "string" && body.context in AI_CONTEXTS ? (body.context as AiContext) : "generic";
+  const emojiChoices = Array.isArray(body?.emojiChoices)
+    ? [...new Set(body.emojiChoices.filter((value): value is string => typeof value === "string").map((value) => value.trim()).filter(isEmojiLike))].slice(0, MAX_EMOJI_CHOICES)
+    : [];
+  if (needEmoji && emojiChoices.length === 0) return c.json({ error: { code: "AI_MESSAGE", message: "Nenhuma opção de ícone disponível." } }, 400);
+  if (needTitle && !config.ai.apiKey) return c.json({ error: { code: "AI_DISABLED", message: "Assistente de IA não configurado no servidor." } }, 503);
+  if (needEmoji && !config.ai.openRouterApiKey) return c.json({ error: { code: "AI_DISABLED", message: "Sugestão de ícone não configurada no servidor." } }, 503);
 
-  const wants = [needTitle && '"title": título curto (2 a 5 palavras, português do Brasil, sem ponto final, sem emoji)', needEmoji && '"emoji": UM único emoji que represente o assunto']
-    .filter(Boolean)
-    .join(" e ");
-  const upstream = await fetch(`${config.ai.baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${config.ai.apiKey}` },
-    body: JSON.stringify({
-      model: SUGGEST_MODEL,
-      temperature: 0,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: `Você nomeia documentos do app de um acampamento infantil de igreja. Tipo do documento: ${AI_CONTEXTS[ctx].name}. Leia o HTML e responda SOMENTE um objeto JSON com ${wants}. Seja específico ao conteúdo (ex.: "Regras da piscina", não "Instruções").`,
-        },
-        { role: "user", content: html.slice(0, 20_000) },
-      ],
-    }),
-  }).catch(() => null);
-  if (!upstream?.ok) {
-    console.error("AI suggest error", upstream?.status, (await upstream?.text().catch(() => ""))?.slice(0, 300));
-    void recordAiUsage({ at: new Date(), vendor: SUGGEST_VENDOR, model: SUGGEST_MODEL, kind: "suggest", userId: c.get("userId"), promptTokens: 0, completionTokens: 0, ok: false });
-    return c.json({});
-  }
-  const data = (await upstream.json().catch(() => null)) as { choices?: { message?: { content?: string } }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } } | null;
-  void recordAiUsage({
-    at: new Date(),
-    vendor: SUGGEST_VENDOR,
-    model: SUGGEST_MODEL,
-    kind: "suggest",
-    userId: c.get("userId"),
-    promptTokens: data?.usage?.prompt_tokens ?? 0,
-    completionTokens: data?.usage?.completion_tokens ?? 0,
-    ok: true,
-  });
-  const raw = data?.choices?.[0]?.message?.content ?? "";
-  let parsed: { title?: unknown; emoji?: unknown } = {};
-  try {
-    parsed = JSON.parse(raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""));
-  } catch {
-    console.error("AI suggest: bad json", raw.slice(0, 200));
-  }
-  const title = needTitle && typeof parsed.title === "string" ? parsed.title.trim().replace(/\.$/, "").slice(0, 80) : undefined;
-  const emoji = needEmoji && typeof parsed.emoji === "string" && isEmojiLike(parsed.emoji.trim()) ? parsed.emoji.trim() : undefined;
+  const [title, emoji] = await Promise.all([
+    needTitle ? suggestTitle({ html, ctx, userId: c.get("userId"), signal: c.req.raw.signal }) : undefined,
+    needEmoji ? suggestEmojiWithJev({ html, ctx, choices: emojiChoices, userId: c.get("userId"), signal: c.req.raw.signal }) : undefined,
+  ]);
   return c.json({ ...(title ? { title } : {}), ...(emoji ? { emoji } : {}) });
 });
 

@@ -5,8 +5,12 @@ import type { CamperSex } from "../types";
 export const IMPORT_FAST_MODEL = { id: "glm-5.3-flash", label: "GLM 5.3 Flash", vendor: "zhipu" as AiVendor };
 export const IMPORT_FAST_FALLBACKS = ["muse-spark-1.3"];
 export const IMPORT_DATE_MODEL = { id: "claude-fable-5-1", label: "Fable 5.1", vendor: "anthropic" as AiVendor };
+/** Closed-set column mapping is exactly a Jev System One decision task. */
+export const IMPORT_COLUMN_MODEL = { id: "typesafe/jev-1.13", label: "Jev 1.13", vendor: "typesafe" as AiVendor };
 
 const TIMEOUT_MS = 30_000;
+const OPENROUTER_DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions";
+const IMPORT_COLUMN_BATCH = 24;
 const MAX_CONCURRENT_IMPORT_AI = 3;
 let activeImportAi = 0;
 const importAiWaiters: (() => void)[] = [];
@@ -118,24 +122,152 @@ async function jsonCall<T>(model: string, system: string, input: unknown, signal
   }
 }
 
-export async function mapImportColumns(
-  columns: { name: string; samples: string[] }[],
-  targets: { key: string; label: string; aliases: string[]; required?: boolean }[],
+type ImportColumn = { name: string; samples: string[] };
+type ImportTarget = { key: string; label: string; aliases: string[]; required?: boolean };
+type ColumnMapping = { target: string | null; confidence: number };
+type JevChoiceAnswer = { type?: unknown; choice?: unknown; confidence?: unknown; probabilities?: unknown };
+
+function clampConfidence(value: unknown): number {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(0, Math.min(1, number)) : 0;
+}
+
+/** Parse one Jev batch separately so malformed/missing answers can fall back safely. */
+export function parseJevColumnMappings(
+  columns: ImportColumn[],
+  targets: ImportTarget[],
+  answers: Record<string, JevChoiceAnswer> | undefined,
+): Record<string, ColumnMapping> {
+  const out: Record<string, ColumnMapping> = {};
+  const validTargets = new Set(targets.map((target) => target.key));
+  columns.forEach((column, index) => {
+    const answer = answers?.[`column_${index}`];
+    if (answer?.type !== "choice" || typeof answer.choice !== "string") return;
+    if (answer.choice !== "ignore" && !validTargets.has(answer.choice)) return;
+    const target = answer.choice === "ignore" ? null : answer.choice;
+    const probabilities = answer.probabilities && typeof answer.probabilities === "object" ? answer.probabilities as Record<string, unknown> : {};
+    const confidence = clampConfidence(answer.confidence ?? probabilities[answer.choice]);
+    out[column.name] = { target, confidence };
+  });
+  return out;
+}
+
+async function mapImportColumnsWithJev(
+  columns: ImportColumn[],
+  targets: ImportTarget[],
   signal?: AbortSignal,
-): Promise<Record<string, { target: string | null; confidence: number }>> {
+  extraInstructions = "",
+): Promise<Record<string, ColumnMapping>> {
+  if (!config.ai.openRouterApiKey || columns.length === 0) return {};
+  const out: Record<string, ColumnMapping> = {};
+  const criteria = Object.fromEntries([
+    ...targets.map((target) => [target.key, {
+      field: target.label,
+      headerAliases: target.aliases,
+      required: target.required === true,
+    }]),
+    ["ignore", {
+      field: "Ignorar esta coluna",
+      useWhen: "A coluna é técnica, não corresponde claramente a nenhum campo disponível, ou contém informação livre que não deve ser forçada em um campo incorreto.",
+    }],
+  ]);
+
+  for (let from = 0; from < columns.length; from += IMPORT_COLUMN_BATCH) {
+    const batch = columns.slice(from, from + IMPORT_COLUMN_BATCH);
+    await acquireImportAi();
+    const started = Date.now();
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+    const abort = () => ctrl.abort();
+    signal?.addEventListener("abort", abort);
+    try {
+      const questions = Object.fromEntries(batch.map((column, index) => [
+        `column_${index}`,
+        {
+          type: "choice",
+          instructions: {
+            task: "Escolha o campo da ficha que esta coluna de CSV/Excel representa.",
+            sourceColumn: column.name,
+            sampleValues: column.samples.slice(0, 5),
+            rule: "Use o cabeçalho e os exemplos. Escolha ignore quando não houver correspondência clara; não force um campo apenas por semelhança vaga.",
+            additionalRules: extraInstructions || undefined,
+          },
+          criteria,
+        },
+      ]));
+      importAiStats.requests++;
+      importAiStats.byModel[IMPORT_COLUMN_MODEL.id] = (importAiStats.byModel[IMPORT_COLUMN_MODEL.id] ?? 0) + 1;
+      const response = await fetch(OPENROUTER_DECISIONS_URL, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${config.ai.openRouterApiKey}`,
+          "HTTP-Referer": config.appUrl || "https://acampakids.app",
+          "X-Title": "Acampa Kids import column mapping",
+        },
+        body: JSON.stringify({
+          model: IMPORT_COLUMN_MODEL.id,
+          state: {
+            application: "Sistema brasileiro para organizar um acampamento infantil de igreja.",
+            operation: "Primeira etapa de importação: mapear colunas da planilha para campos tipados da ficha.",
+          },
+          questions,
+        }),
+        signal: ctrl.signal,
+      });
+      const body = (await response.json().catch(() => null)) as { answers?: Record<string, JevChoiceAnswer>; error?: { message?: string } } | null;
+      if (!response.ok) {
+        importAiStats.failed++;
+        console.warn(`[import-ai] ${IMPORT_COLUMN_MODEL.id} HTTP ${response.status} (${Date.now() - started}ms): ${body?.error?.message ?? "unknown error"}`);
+        continue;
+      }
+      const parsed = parseJevColumnMappings(batch, targets, body?.answers);
+      Object.assign(out, parsed);
+      importAiStats.succeeded++;
+      if (process.env.IMPORT_AI_TRACE === "1") console.error(`[import-ai] ${IMPORT_COLUMN_MODEL.id} mapped ${Object.keys(parsed).length}/${batch.length} columns (${Date.now() - started}ms)`);
+    } catch (error) {
+      importAiStats.failed++;
+      console.warn(`[import-ai] ${IMPORT_COLUMN_MODEL.id} failed (${Date.now() - started}ms): ${error instanceof Error ? error.message : "unknown error"}`);
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+      releaseImportAi();
+    }
+  }
+  return out;
+}
+
+/**
+ * First-pass column mapping uses Jev's parallel Choice decisions. The previous
+ * generative model remains only as a best-effort fallback when Jev is disabled,
+ * unavailable, or omits an answer.
+ */
+export async function mapImportColumns(
+  columns: ImportColumn[],
+  targets: ImportTarget[],
+  signal?: AbortSignal,
+  extraInstructions = "",
+): Promise<Record<string, ColumnMapping>> {
+  const jev = await mapImportColumnsWithJev(columns, targets, signal, extraInstructions);
+  const missing = columns.filter((column) => jev[column.name] === undefined);
+  if (missing.length === 0) return jev;
+
   const answer = await jsonCall<{ mappings?: { source?: string; target?: string | null; confidence?: number }[] }>(
     IMPORT_FAST_MODEL.id,
-    `Você mapeia colunas de CSV/Excel para uma ficha de acampamento no Brasil. Use o nome da coluna e até 5 exemplos. Responda somente JSON {"mappings":[{"source":"...","target":"chave ou null","confidence":0-1}]}. Não force: target null se não houver campo claro. Campos possíveis: ${targets.map((t) => `${t.key}=${t.label} (sinônimos: ${t.aliases.join(", ")})`).join("; ")}.`,
-    { columns },
+    `Você mapeia colunas de CSV/Excel para uma ficha de acampamento no Brasil. Use o nome da coluna e até 5 exemplos. Responda somente JSON {"mappings":[{"source":"...","target":"chave ou null","confidence":0-1}]}. Não force: target null se não houver campo claro. Campos possíveis: ${targets.map((t) => `${t.key}=${t.label} (sinônimos: ${t.aliases.join(", ")})`).join("; ")}.${extraInstructions ? ` ${extraInstructions}` : ""}`,
+    { columns: missing },
     signal,
     IMPORT_FAST_FALLBACKS,
   );
-  const out: Record<string, { target: string | null; confidence: number }> = {};
-  for (const m of answer?.mappings ?? []) {
-    if (!m.source) continue;
-    out[m.source] = { target: typeof m.target === "string" && targets.some((t) => t.key === m.target) ? m.target : null, confidence: Math.max(0, Math.min(1, Number(m.confidence) || 0)) };
+  const fallback: Record<string, ColumnMapping> = {};
+  for (const mapping of answer?.mappings ?? []) {
+    if (!mapping.source || !missing.some((column) => column.name === mapping.source)) continue;
+    fallback[mapping.source] = {
+      target: typeof mapping.target === "string" && targets.some((target) => target.key === mapping.target) ? mapping.target : null,
+      confidence: clampConfidence(mapping.confidence),
+    };
   }
-  return out;
+  return { ...jev, ...fallback };
 }
 
 /** Category fields whose cells can list several conditions at once — these are split into atomic items. */

@@ -46,6 +46,7 @@ const staff = new Hono<Env>();
 
 const NAME_MAX = 80;
 const TEXT_MAX = 500;
+const DATE_RE = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
 
 function fail(c: Context, code: string, message: string, status: 400 | 404 | 409 = 400) {
   return c.json({ error: { code, message } }, status);
@@ -81,6 +82,8 @@ export function serializeStaffFor(s: Staff, scope: Scope) {
     redacted: true,
     phone: s.phone,
     email: null,
+    document: "",
+    birthDate: null,
     // a roommate's team is public inside the room (the games are played together); parents / vest helpers don't get it
     team: roommate ? s.team : null,
     bedroom: roommate || parentRoom ? s.bedroom : null,
@@ -128,7 +131,9 @@ function serialize(s: Staff) {
     probableGender: s.probableGender,
     phone: s.phone,
     email: s.email,
-    /** an ADMIN's own roster record: can't be deleted, deactivated or have the phone changed */
+    document: s.document,
+    birthDate: s.birthDate,
+    /** this roster row belongs to an admin login — badge only */
     admin: isAdminPhone(s.phone),
     active: s.active,
     team: s.team,
@@ -262,6 +267,20 @@ async function buildPatch(
     const v = parseMedications(body.medications);
     if (isInvalid(v)) return { code: "MEDICATIONS_INVALID", message: v.error };
     patch.medications = v;
+  }
+
+  if (has("document")) {
+    const v = parseText(body.document, TEXT_MAX);
+    if (isInvalid(v)) return { code: "DOCUMENT_INVALID", message: v.error };
+    patch.document = v;
+  }
+
+  if (has("birthDate")) {
+    const v = body.birthDate;
+    if (v === undefined || v === null || v === "") patch.birthDate = null;
+    else if (typeof v !== "string" || !DATE_RE.test(v) || Number.isNaN(Date.parse(v))) {
+      return { code: "BIRTH_DATE_INVALID", message: "Data de nascimento inválida." };
+    } else patch.birthDate = v;
   }
 
   for (const field of ["foodRestrictions", "healthNotes"] as const) {
@@ -594,12 +613,6 @@ staff.put("/:id", async (c) => {
   const result = await buildPatch(body, true);
   if (!("patch" in result)) return fail(c, result.code, result.message, result.status);
 
-  // an admin's own record: the phone is their login and the record must stay on the roster
-  if (isAdminPhone(existing.phone)) {
-    if (result.patch.phone !== undefined && result.patch.phone !== existing.phone) return fail(c, "ADMIN_LOCKED", "O celular de um admin não pode ser alterado por aqui.", 409);
-    if (result.patch.active === false) return fail(c, "ADMIN_LOCKED", "Um admin não pode ser desativado.", 409);
-  }
-
   if (result.patch.phone && result.patch.phone !== existing.phone) {
     const clash = await findStaffByPhone(result.patch.phone);
     if (clash && clash._id !== existing._id) {
@@ -738,8 +751,6 @@ staff.post("/:id/move", async (c) => {
 
 staff.delete("/:id", async (c) => {
   const id = c.req.param("id");
-  const existing = await findStaffById(id);
-  if (existing && isAdminPhone(existing.phone)) return fail(c, "ADMIN_LOCKED", "Um admin não pode ser excluído da equipe.", 409);
   const ok = await deleteStaff(id);
   if (!ok) return fail(c, "STAFF_NOT_FOUND", "Membro da equipe não encontrado.", 404);
   const [, orphaned] = await Promise.all([unassignStaffEverywhere(id), reassignCampers(id, null)]);

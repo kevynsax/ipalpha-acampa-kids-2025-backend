@@ -38,7 +38,7 @@ Copy `.env.example` to `.env` for local development. Production configuration an
 | `ACCOUNT_FREEZE_MINUTES` | how long the account stays frozen (default `30`) |
 | `SESSION_HOURS` | session token lifetime (default `96`, 4 days) |
 | `APP_URL` | public URL of the frontend, appended to notification SMS (optional) |
-| `PUBLIC_ORIGIN` | public origin of the site (frontend + `/api`). Prefixes images in notification emails. Falls back to `APP_URL`. Alias: `BACKEND_PUBLIC_URL` |
+| `PUBLIC_ORIGIN` | public origin of the site (frontend + `/api`). Prefixes images in notification emails. Empty = mail send is refused. Alias: `BACKEND_PUBLIC_URL` |
 | `SENDGRID_API_KEY` | SendGrid API key for `POST https://api.sendgrid.com/v3/mail/send`. **Empty = mock mode**: emails are printed to the server console |
 | `MAIL_FROM` / `MAIL_FROM_NAME` | From-address (verified SendGrid sender, required with the API key to send) and display name (default `Acampa Kids`) |
 | `FACE_SERVICE_URL` | private face service (repo `ipalpha-acampa-kids-2025-face-service`, sibling folder `../face-service`) used to index gallery faces and run the parents' photo search. **Empty = face search disabled** (parents still see the published album) |
@@ -109,10 +109,9 @@ client, and what `/api/auth/role` accepts — come from the DATA:
 - **`parent` ⇔ at least one kid with that `guardianPhone`.** It is a fact, not
   a grant: a stored `parent` with no kid enrolled is **dropped** (the mother of
   last year's camper is not a responsible this year).
-- **`staff` ⇔ an ACTIVE `staff` record with that phone — except for an admin.**
-  Every admin is on the roster only so they have a room, a transport and a vest
-  (`models/staff#ensureAdminsOnRoster`); that record is never a team profile, so
-  an admin is never offered "Equipe".
+- **`staff` ⇔ an ACTIVE `staff` record with that phone.** Being admin does not
+  create a roster row. An administrator who also serves on the team (a real
+  Equipe record) receives both profiles and chooses one after OTP.
 - `admin` and `health_staff` are never derived: they are granted.
 
 The role a login LANDS on is `pickActiveRole` over **that** list, so an admin
@@ -321,15 +320,11 @@ stay readable — the form asks for one the first time they are edited.)
 `roomRole` is `"caretaker"` (responsável: looks after specific kids) or
 `"helper"` (auxiliar, the default).
 
-**Admins on the roster.** Every admin account also has a `staff` record, but
-only so they have a room, a transport and a vest like everybody else
-(`models/staff#ensureAdminsOnRoster`, run at boot). That record is **not a team
-profile**: it can't be deleted, deactivated or have its phone changed, and it
-can never be a `caretaker`, hold a `team` or receive kids — attempts get 409
-`ADMIN_LOCKED` (`routes/staff#adminRosterBlock`, also enforced when a kid names
-a caretaker). Boot normalizes legacy records (back to `helper`, no team,
-orphaning kids they still carried). An admin never enters as "Equipe": see
-[Multi-role users](#multi-role-users).
+**Admins and the roster.** Admin / super-admin logins live on `users` and do
+**not** need a `staff` record. Adding an admin (wizard or `POST /api/admins`)
+only grants the role. If they also serve on the team, create a normal Equipe
+row; deleting that row removes them from Equipe and keeps the login. Cleanup
+→ Equipe wipes roster rows and never touches `users`.
 
 | Method | Path | Who | Body |
 |---|---|---|---|

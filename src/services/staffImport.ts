@@ -2,23 +2,26 @@ import { randomUUID } from "node:crypto";
 import { listBedrooms } from "../models/bedrooms";
 import { listCategories } from "../models/categories";
 import { listImportDictionary, type CamperImportColumn, type CamperImportCreatedItem } from "../models/camperImports";
+import { getSettings, updateSettings } from "../models/settings";
 import { insertStaff, listStaff, updateStaff, type StaffData } from "../models/staff";
 import { listTeams } from "../models/teams";
 import { listTransports } from "../models/transports";
-import { ensureLoginAccount, listAdmins } from "../models/users";
+import { ensureLoginAccount } from "../models/users";
 import { STAFF_CATEGORY_KEYS, type CamperImportDictionaryEntry, type CamperSex, type Staff, type StaffImportReviewItem } from "../types";
 import { titleCaseName } from "../utils";
 import { resolveGender, sexFromBedroomId } from "./camperSex";
 import { classifyImportItems, dedupeImportValues, guessIndividualNamesSex, mapImportColumns, SPLIT_CATEGORY_FIELDS } from "./importAi";
-import { concatOtherColumns, importPhone, isEmptyCategoryValue, narrativeOnlyAtoms, normalizeImportValue, parseImportSex, parseSpreadsheet, resolveBedroom, resolveCategoryValues, resolveTeam, resolveTransport, sourceMap, splitCategoryText, validEmail, valueOf, type ImportLookups } from "./camperImport";
+import { concatOtherColumns, importPhone, isEmptyCategoryValue, isIgnoredImportColumn, narrativeOnlyAtoms, normalizeImportValue, parseBuiltInDate, parseImportSex, parseSpreadsheet, resolveBedroom, resolveCategoryValues, resolveTeam, resolveTransport, sourceMap, splitCategoryText, validEmail, valueOf, type ImportLookups } from "./camperImport";
 
 export const STAFF_IMPORT_FIELDS = [
   { key: "name", label: "Nome", aliases: ["nome completo", "quem vai servir", "voluntario", "voluntário", "tio", "tia"], required: true },
   { key: "phone", label: "Celular", aliases: ["telefone", "fone", "whatsapp", "celular whatsapp", "contato pra entrar"] },
   { key: "email", label: "E-mail", aliases: ["email", "e-mail", "e mail", "mail", "correio"] },
+  { key: "document", label: "Documento", aliases: ["cpf", "rg", "identidade", "cdin", "passaporte", "passport", "documento de identidade", "n documento", "numero do documento"] },
+  { key: "birthDate", label: "Data de nascimento", aliases: ["nascimento", "data nascimento", "data de nascimento", "aniversario", "aniversário", "birth date", "birthday"] },
   { key: "probableGender", label: "Sexo", aliases: ["sexo", "sexo m ou f", "genero", "gênero", "genero m ou f", "gênero m ou f"] },
   { key: "active", label: "Ativo", aliases: ["ativa", "status", "ativo", "está participando", "esta participando"] },
-  { key: "roomRole", label: "Função no quarto", aliases: ["lider", "líder", "tio lider", "checkin leader", "lider_checkin", "cuida do quarto"] },
+  { key: "roomRole", label: "Função no quarto", aliases: ["lider", "líder", "tio lider", "cuida do quarto", "lider do quarto", "função quarto"] },
   { key: "team", label: "Time", aliases: ["equipe", "team", "time_name", "cor da galera"] },
   { key: "bedroom", label: "Quarto", aliases: ["room", "room_name", "dormitorio", "alojamento", "qual alojamento"] },
   { key: "transportation", label: "Transporte", aliases: ["onibus", "ônibus", "bus", "bus_name", "veiculo", "como chega"] },
@@ -28,12 +31,21 @@ export const STAFF_IMPORT_FIELDS = [
   { key: "foodRestrictions", label: "Restrição alimentar", aliases: ["restricao alimentar", "alimentacao", "o que não come", "o que nao come"] },
   { key: "dailyMedication", label: "Medicação de uso diário", aliases: ["medicacao", "remedio diario", "remédios todo dia", "remedios todo dia"] },
   { key: "healthNotes", label: "Observações de saúde", aliases: ["observacoes", "observação", "problema de saúde", "recado médico", "recado medico", "alergias alimentar tópica ou de medicamentos", "alergias alimentar topica ou de medicamentos"] },
+  { key: "organizer", label: "Organizador", aliases: ["organizadores", "organizacao", "organização", "e organizador"] },
+  { key: "checkinHelper", label: "Ajudante do check-in", aliases: ["checkin", "check in", "check-in", "lider checkin", "lider_checkin", "checkin leader", "lider do checkin", "lider do check-in", "ajudante checkin", "ajudantes do check in", "ajudantes do check-in", "checkin igreja", "check-in igreja"] },
+  { key: "vestHelper", label: "Ajudante de coletes", aliases: ["colete", "coletes", "ajudante colete", "ajudantes de coletes", "gerenciar colete", "pode gerenciar colete"] },
+  { key: "scoreHelper", label: "Ajudante do placar", aliases: ["placar", "ajudante placar", "ajudantes do placar", "score helper"] },
+  { key: "gameOrganizer", label: "Organizador dos jogos", aliases: ["organizador jogos", "organizadores dos jogos", "game organizer"] },
 ] as const;
 type Field = (typeof STAFF_IMPORT_FIELDS)[number]["key"];
+export const STAFF_DUTY_FIELDS = ["organizer", "checkinHelper", "vestHelper", "scoreHelper", "gameOrganizer"] as const;
+export type StaffDutyField = (typeof STAFF_DUTY_FIELDS)[number];
+const STAFF_COLUMN_HINT = "Funções extras do acampamento são colunas Sim/Não (ou 1/0/X) e NÃO são a função no quarto: organizer=organização geral do acampamento; checkinHelper=ajuda no check-in das crianças (igreja), inclusive colunas como lider_checkin, lider checkin, checkin leader, líder do check-in; vestHelper=entrega/devolução de coletes (pode gerenciar colete); scoreHelper=ajudante do placar; gameOrganizer=organização dos jogos. roomRole NÃO está nesta lista: é só líder vs auxiliar do quarto, nunca check-in, colete, placar ou jogos.";
 
 const compact = (s: string) => normalizeImportValue(s).replace(/\s/g, "");
-const STAFF_EXTRA_COLUMNS = ["rg", "cpf", "idade", "data de nascimento", "nascimento", "created at", "criado em", "colete", "pode trocar time", "pode gerenciar colete"];
+const STAFF_EXTRA_COLUMNS = ["idade", "created at", "criado em", "pode trocar time"];
 const isKnownExtra = (header: string) => {
+  if (isIgnoredImportColumn(header)) return true;
   const normalized = normalizeImportValue(header);
   return STAFF_EXTRA_COLUMNS.some((extra) => normalized === extra || normalized.startsWith(`${extra} `));
 };
@@ -49,15 +61,34 @@ export function directStaffField(header: string): { key: Field; confidence: numb
 }
 const direct = directStaffField;
 
+/** Room role stays helper unless the header clearly matches or the user mapped it. */
+export function resolveStaffColumnTarget(header: string, override?: string | null, saved?: string | null, ai?: string | null): Field | null {
+  const known = (key: string | null | undefined): Field | null => key && STAFF_IMPORT_FIELDS.some((f) => f.key === key) ? key as Field : null;
+  if (isKnownExtra(header)) return null;
+  if (override !== undefined) return known(override);
+  const matched = direct(header)?.key ?? null;
+  if (matched) return matched;
+  const guessed = known(saved) ?? known(ai);
+  return guessed === "roomRole" ? null : guessed;
+}
+
 export async function mapStaffColumns(columns: { name: string; samples: string[] }[], override: Record<string, string | null> = {}, signal?: AbortSignal): Promise<CamperImportColumn[]> {
   const saved = new Map((await listImportDictionary()).filter((d) => d.kind === "column" && d.field.startsWith("staff-column:")).map((d) => [d.normalized, typeof d.value === "string" ? d.value : null]));
   const unresolved = columns.filter((c) => override[c.name] === undefined && !isKnownExtra(c.name) && !direct(c.name) && !saved.has(normalizeImportValue(c.name)));
-  const ai = unresolved.length ? await mapImportColumns(unresolved, STAFF_IMPORT_FIELDS.map((f) => ({ key: f.key, label: f.label, aliases: [...f.aliases], required: "required" in f })), signal) : {};
+  const aiFields = STAFF_IMPORT_FIELDS.filter((f) => f.key !== "roomRole").map((f) => ({ key: f.key, label: f.label, aliases: [...f.aliases], required: "required" in f }));
+  const ai = unresolved.length ? await mapImportColumns(unresolved, aiFields, signal, STAFF_COLUMN_HINT) : {};
   const used = new Set<string>();
-  return columns.map((c) => { const d = direct(c.name); const ignored = isKnownExtra(c.name); const wanted = ignored ? null : override[c.name] !== undefined ? override[c.name] : d?.key ?? saved.get(normalizeImportValue(c.name)) ?? ai[c.name]?.target ?? null; const target = wanted && STAFF_IMPORT_FIELDS.some((f) => f.key === wanted) && !used.has(wanted) ? wanted : null; if (target) used.add(target); return { source: c.name, target, confidence: ignored ? 1 : override[c.name] !== undefined ? 1 : d?.confidence ?? ai[c.name]?.confidence ?? 0, samples: c.samples }; });
+  return columns.map((c) => { const d = direct(c.name); const ignored = isKnownExtra(c.name); const wanted = resolveStaffColumnTarget(c.name, override[c.name], saved.get(normalizeImportValue(c.name)), ai[c.name]?.target ?? null); const target = wanted && !used.has(wanted) ? wanted : null; if (target) used.add(target); return { source: c.name, target, confidence: ignored ? 1 : override[c.name] !== undefined ? 1 : d?.confidence ?? ai[c.name]?.confidence ?? 0, samples: c.samples }; });
 }
 
-const bool = (raw: string, fallback: boolean) => { const n = normalizeImportValue(raw); if (!n) return fallback; if (["sim", "s", "true", "1", "ativo", "lider", "líder"].includes(n)) return true; if (["nao", "não", "n", "false", "0", "inativo", "auxiliar"].includes(n)) return false; return fallback; };
+const bool = (raw: string, fallback: boolean) => { const n = normalizeImportValue(raw); if (!n) return fallback; if (["sim", "s", "true", "1", "x", "ativo", "lider", "líder"].includes(n)) return true; if (["nao", "não", "n", "false", "0", "inativo", "auxiliar"].includes(n)) return false; return fallback; };
+export function parseStaffDuty(raw: string): boolean { return bool(raw, false); }
+/** Empty / “auxiliar” cells stay helper; only explicit leader wording needs review. */
+export function parseStaffRoomRole(raw: string): "caretaker" | "helper" {
+  const n = normalizeImportValue(raw);
+  if (!n || ["auxiliar", "helper", "aux", "apoio", "nao", "não", "n", "false", "0"].includes(n)) return "helper";
+  return bool(raw, false) ? "caretaker" : "helper";
+}
 /** Import text is preserved; the background AI worker normalizes observations later. */
 export function normalizeStaffFreeText(raw:string):string{return raw.trim();}
 /** Staff spreadsheets accept only explicit sex words; guesses are handled separately. */
@@ -75,7 +106,7 @@ export async function analyzeStaffImport(input: { data: Uint8Array; fileName: st
   const columns = await mapStaffColumns(parsed.columns, input.mapping, input.signal); const sources = sourceMap(columns);
   report("columns", 20);
   if (!sources.has("name")) return { columns, dictionaries: [], reviews: [], preview: [], skipped: [], createdItems: [], status: "needs_mapping", panicMessage: "Escolha a coluna de Nome." };
-  const [bedrooms, transports, teams, rawCategories, staff, previous, admins] = await Promise.all([listBedrooms(), listTransports(), listTeams(), listCategories(), listStaff({ includeDraft: true }), listImportDictionary(), listAdmins()]);
+  const [bedrooms, transports, teams, rawCategories, staff, previous] = await Promise.all([listBedrooms(), listTransports(), listTeams(), listCategories(), listStaff({ includeDraft: true }), listImportDictionary()]);
   const categories = rawCategories.map((c) => ({ ...c, options: c.options.filter((o) => !o.draft) })); const lookups: ImportLookups = { bedrooms, transports, teams, categories, staff };
   const createdItems: CamperImportCreatedItem[] = [], dictionaries: CamperImportDictionaryEntry[] = [], reviews: StaffImportReviewItem[] = [], preview: Record<string, unknown>[] = [];
   const fields = ["bedroom", "team", "transportation", "allergies", "drugAllergies", "healthIssues"] as const;
@@ -124,20 +155,20 @@ export async function analyzeStaffImport(input: { data: Uint8Array; fileName: st
   const healthOf=(row:Record<string,string>)=>{ const out:Record<string,string[]>={allergies:[],drugAllergies:[],healthIssues:[]}; for (const f of healthFields) for (const id of getAll(f,valueOf(row,sources,f))) { const target=optionCategory.get(id)??f; if(out[target]&&!out[target].includes(id)) out[target].push(id); } return out; }; const mapped=new Set(columns.filter((c)=>c.target).map((c)=>c.source));
   const phoneRows=new Map<string,number[]>();
   for(let i=0;i<parsed.rows.length;i++){const phone=importPhone(valueOf(parsed.rows[i],sources,"phone"));if(phone)phoneRows.set(phone,[...(phoneRows.get(phone)??[]),i+2]);}
-  const adminPhones=new Set(admins.map((admin)=>admin.phone));
   for (let i=0;i<parsed.rows.length;i++) { const row=parsed.rows[i], line=i+2, name=titleCaseName(valueOf(row,sources,"name")); if(!name) continue; const rawPhone=valueOf(row,sources,"phone"), phone=importPhone(rawPhone); const phoneMatch=phone?staff.find((s)=>s.phone===phone):null; let existing=phoneMatch??null; const repeatedLines=phone?phoneRows.get(phone)??[]:[]; const ambiguous=repeatedLines.length>1;
     if(!phone) reviews.push(review("phone",line,name,rawPhone,{context:[valueOf(row,sources,"team"),valueOf(row,sources,"bedroom")].filter(Boolean).join(" · ")}));
     const bedroomRaw=valueOf(row,sources,"bedroom"), bedroom=bedroomRaw?get("bedroom",bedroomRaw)??null:null; const room=bedroom?bedrooms.find((b)=>b._id===bedroom):null; const sex:CamperSex|null=room?.group==="girls"?"F":room?.group==="boys"?"M":null, explicitGender=parseStaffImportSex(valueOf(row,sources,"probableGender")), probableGender=explicitGender??guesses.get(normalizeImportValue(name.split(" ")[0]))??null; if(!bedroom&&bedroomRaw) reviews.push(review("bedroom",line,name,"",{context:[phone,valueOf(row,sources,"team"),valueOf(row,sources,"transportation")].filter(Boolean).join(" · ")}));
-    const adminProtected=!!((phone&&adminPhones.has(phone))||(existing?.phone&&adminPhones.has(existing.phone))); const roleRaw=valueOf(row,sources,"roomRole"), roomRole=adminProtected?"helper":bool(roleRaw,false)?"caretaker":"helper"; if(roleRaw||adminProtected) reviews.push(review("roomRole",line,name,roleRaw,{value:roomRole,resolved:true,context:adminProtected?"Administrador mantido ativo, como auxiliar e sem time.":undefined})); const activeRaw=valueOf(row,sources,"active"), active=adminProtected?true:bool(activeRaw,true); if(activeRaw&&!active) reviews.push(review("inactive",line,name,activeRaw,{value:"false",resolved:true}));
+    const hasRoomRole=sources.has("roomRole"), roleRaw=hasRoomRole?valueOf(row,sources,"roomRole"):"", roomRole=parseStaffRoomRole(roleRaw); if(hasRoomRole&&roleRaw&&roomRole==="caretaker") reviews.push(review("roomRole",line,name,roleRaw,{value:roomRole,resolved:true})); const activeRaw=valueOf(row,sources,"active"), active=bool(activeRaw,true); if(activeRaw&&!active) reviews.push(review("inactive",line,name,activeRaw,{value:"false",resolved:true}));
     const health=healthOf(row), categoryNotesById:Record<string,string[]>={};
     const remember=(ids:string[],label:string,raw:string)=>{if(!raw)return;const note=`${label}: ${raw}.`;for(const id of ids){const notes=categoryNotesById[id]??[];if(!notes.includes(note))notes.push(note);categoryNotesById[id]=notes;}};
     for(const field of healthFields){const raw=valueOf(row,sources,field);remember(getAll(field,raw),field==="allergies"?"Alergias informadas":field==="drugAllergies"?"Alergias a medicamentos informadas":"Condições de saúde informadas",raw);}
     const categoryNote=(field:"allergies"|"drugAllergies"|"healthIssues",label:string)=>{const raw=valueOf(row,sources,field);if(!raw||isEmptyCategoryValue(raw))return "";return getAll(field,raw).length<Math.max(atomsOf(field,raw).length,1)?`${label}: ${raw}.`:"";};
     const foodRestrictions=normalizeStaffFreeText(valueOf(row,sources,"foodRestrictions")), dailyMedication=normalizeStaffFreeText(valueOf(row,sources,"dailyMedication"));
     const notes=normalizeStaffFreeText([normalizeStaffFreeText(valueOf(row,sources,"healthNotes")),dailyMedication&&`Medicação de uso diário: ${dailyMedication}.`,foodRestrictions&&`Restrição alimentar: ${foodRestrictions}.`,categoryNote("allergies","Alergias informadas"),categoryNote("drugAllergies","Alergias a medicamentos informadas"),categoryNote("healthIssues","Condições de saúde informadas"),concatOtherColumns(row,mapped)].filter(Boolean).join(" ").trim());
-    const incoming:Record<string,unknown>={row:line,name,phone:adminProtected&&existing?.phone?existing.phone:phone,email:validEmail(valueOf(row,sources,"email"))||null,active,roomRole,team:adminProtected?null:valueOf(row,sources,"team")?get("team",valueOf(row,sources,"team"))??null:null,bedroom,transportation:valueOf(row,sources,"transportation")?get("transportation",valueOf(row,sources,"transportation"))??null:null,sex,probableGender,allergies:health.allergies,drugAllergies:health.drugAllergies,healthIssues:health.healthIssues,foodRestrictions,medications:[],healthNotes:notes,categoryNotesById,existingStaffId:existing?._id??null,adminProtected,blocked:false};
+    const duties=Object.fromEntries(STAFF_DUTY_FIELDS.filter((field)=>sources.has(field)).map((field)=>[field,parseStaffDuty(valueOf(row,sources,field))]));
+    const incoming:Record<string,unknown>={row:line,name,phone,email:validEmail(valueOf(row,sources,"email"))||null,document:normalizeStaffFreeText(valueOf(row,sources,"document")),birthDate:parseBuiltInDate(valueOf(row,sources,"birthDate")),active,roomRole,team:valueOf(row,sources,"team")?get("team",valueOf(row,sources,"team"))??null:null,bedroom,transportation:valueOf(row,sources,"transportation")?get("transportation",valueOf(row,sources,"transportation"))??null:null,sex,probableGender,allergies:health.allergies,drugAllergies:health.drugAllergies,healthIssues:health.healthIssues,foodRestrictions,medications:[],healthNotes:notes,categoryNotesById,...duties,existingStaffId:existing?._id??null,blocked:false};
     if(phoneMatch&&!ambiguous){const existingData:Record<string,unknown>={...phoneMatch};for(const key of ["_id","createdAt","updatedAt","checkin","vest","prepDone","welcomeSentAt","foreignLookupCount","foreignLookupNames","foreignLookupAlertedAt"])delete existingData[key];const effectiveIncoming={...incoming};for(const key of ["bedroom","team","transportation","roomRole"] as const)effectiveIncoming[key]=existingData[key]??null;const has=(v:unknown)=>Array.isArray(v)?v.length>0:v!==null&&v!==undefined&&v!==""&&v!==false,merge=(oldValue:unknown,newValue:unknown)=>Array.isArray(oldValue)||Array.isArray(newValue)?[...new Set([...(Array.isArray(oldValue)?oldValue:[]),...(Array.isArray(newValue)?newValue:[])])]:has(newValue)?newValue:oldValue,mergedData=Object.fromEntries([...new Set([...Object.keys(existingData),...Object.keys(effectiveIncoming)])].map((key)=>[key,merge(existingData[key],effectiveIncoming[key])])),mergeAvailable=JSON.stringify(mergedData)!==JSON.stringify(existingData)&&JSON.stringify(mergedData)!==JSON.stringify(effectiveIncoming);reviews.push(review("duplicate",line,name,rawPhone,{existingId:phoneMatch._id,existingName:phoneMatch.name,existingPhone:phoneMatch.phone,existingData,incomingData:effectiveIncoming,mergedData,mergeAvailable}));incoming.blocked=true;}
-    else if(ambiguous){reviews.push(review("duplicate",line,name,rawPhone,{context:`Celular repetido nas linhas ${repeatedLines.join(", ")}.`,existingId:phoneMatch?._id,existingName:phoneMatch?.name,existingPhone:phoneMatch?.phone}));incoming.existingStaffId=null;}
+    else if(ambiguous){reviews.push(review("duplicate",line,name,rawPhone,{context:`Celular repetido nas linhas ${repeatedLines.join(", ")}.`,incomingData:incoming,existingId:phoneMatch?._id,existingName:phoneMatch?.name,existingPhone:phoneMatch?.phone}));incoming.existingStaffId=null;}
     preview.push(incoming);
   }
   report("preview", 96);
@@ -146,11 +177,33 @@ export async function analyzeStaffImport(input: { data: Uint8Array; fileName: st
 
 export function applyStaffCategoryChoices(preview:Record<string,unknown>[],declinedIds:string[]):Record<string,unknown>[]{if(!declinedIds.length)return preview.map((row)=>({...row}));const declined=new Set(declinedIds);return preview.map((source)=>{const row={...source},notesById=row.categoryNotesById&&typeof row.categoryNotesById==="object"?row.categoryNotesById as Record<string,string[]>:{},notes:string[]=[];for(const field of ["allergies","drugAllergies","healthIssues"] as const){const ids=Array.isArray(row[field])?row[field] as string[]:[];const removed=ids.filter((id)=>declined.has(id));row[field]=ids.filter((id)=>!declined.has(id));for(const id of removed)notes.push(...(notesById[id]??[]));}if(notes.length)row.healthNotes=normalizeStaffFreeText([String(row.healthNotes??"").trim(),...new Set(notes)].filter(Boolean).join(" "));return row;});}
 
-export function applyStaffDelta(preview: Record<string,unknown>[], reviews: StaffImportReviewItem[], delta: Record<string,{value?:string;skip?:boolean}>): Record<string,unknown>[] { const rows=preview.map((r)=>({...r})); for(const item of reviews){const d=delta[item.id]??{}, row=rows.find((r)=>Number(r.row)===item.row); if(!row)continue; const value=d.value??item.value; if(item.kind==="phone") row.phone=d.skip?null:importPhone(value); else if(item.kind==="bedroom") row.bedroom=d.skip?null:value||null; else if(item.kind==="roomRole") row.roomRole=value==="caretaker"?"caretaker":"helper"; else if(item.kind==="inactive") row.active=value!=="false"; else if(item.kind==="duplicate"){if(d.skip){row.blocked=true;row.skipReason="Revisão ignorada";}else if(value==="keep"){row.blocked=true;row.skipReason="Cadastro existente mantido";row.duplicateChoice="keep";}else if(value==="update"&&item.incomingData){Object.assign(row,item.incomingData,{row:row.row,blocked:false,existingStaffId:item.existingId??null,duplicateChoice:"update"});}else if(value==="merge"&&item.mergedData){Object.assign(row,item.mergedData,{row:row.row,blocked:false,existingStaffId:item.existingId??null,duplicateChoice:"merge"});}else if(value==="insert"){row.blocked=false;row.existingStaffId=null;row.phone=null;}else if(value)row.existingStaffId=value;} }
+export function applyStaffDelta(preview: Record<string,unknown>[], reviews: StaffImportReviewItem[], delta: Record<string,{value?:string;skip?:boolean}>): Record<string,unknown>[] { const rows=preview.map((r)=>({...r})); for(const item of reviews){const d=delta[item.id]??{}, row=rows.find((r)=>Number(r.row)===item.row); if(!row)continue; const value=d.value??item.value; if(item.kind==="phone") row.phone=d.skip?null:importPhone(value); else if(item.kind==="bedroom") row.bedroom=d.skip?null:value||null; else if(item.kind==="roomRole") row.roomRole=value==="caretaker"?"caretaker":"helper"; else if(item.kind==="inactive") row.active=value!=="false"; else if(item.kind==="duplicate"){
+      const sheetPhoneConflict=!item.existingData;
+      if(sheetPhoneConflict){if(d.skip){row.blocked=true;row.skipReason="Revisão ignorada";}else{row.blocked=false;row.existingStaffId=null;if(!value||value==="keep-phone")row.duplicateChoice="keep-phone";else if(value==="blank"){row.phone=null;row.duplicateChoice="blank";}else{const phone=importPhone(value);row.phone=phone;row.duplicateChoice=phone?"new-phone":"blank";}}}
+      else if(d.skip){row.blocked=true;row.skipReason="Revisão ignorada";}else if(value==="keep"){row.blocked=true;row.skipReason="Cadastro existente mantido";row.duplicateChoice="keep";}else if(value==="update"&&item.incomingData){Object.assign(row,item.incomingData,{row:row.row,blocked:false,existingStaffId:item.existingId??null,duplicateChoice:"update"});}else if(value==="merge"&&item.mergedData){Object.assign(row,item.mergedData,{row:row.row,blocked:false,existingStaffId:item.existingId??null,duplicateChoice:"merge"});}else if(value==="insert"){row.blocked=false;row.existingStaffId=null;row.phone=null;}else if(value)row.existingStaffId=value;} }
   const claimed=new Set<string>();
-  for(const row of rows){if(row.adminProtected){row.roomRole="helper";row.team=null;}const phone=typeof row.phone==="string"?row.phone:"";if(phone&&claimed.has(phone))row.phone=null;else if(phone)claimed.add(phone);}
+  for(const row of rows){if(row.blocked)continue;const phone=typeof row.phone==="string"?row.phone:"";if(phone&&claimed.has(phone))row.phone=null;else if(phone)claimed.add(phone);}
   return rows;
 }
 
-export function staffDataFromPreview(row:Record<string,unknown>,importId:string,draft=false):StaffData { return {name:String(row.name),phone:(row.phone as string|null)??null,email:typeof row.email==="string"&&row.email?row.email:null,active:row.active!==false,roomRole:row.roomRole==="caretaker"?"caretaker":"helper",team:(row.team as string|null)??null,bedroom:(row.bedroom as string|null)??null,transportation:(row.transportation as string|null)??null,sex:(row.sex as CamperSex|null)??null,probableGender:(row.probableGender as CamperSex|null)??null,allergies:(row.allergies as string[])??[],drugAllergies:(row.drugAllergies as string[])??[],healthIssues:(row.healthIssues as string[])??[],foodRestrictions:normalizeStaffFreeText(String(row.foodRestrictions??"")),medications:[],healthNotes:normalizeStaffFreeText(String(row.healthNotes??"")),draft,importId,aiReviewStatus:draft?null:"pending",aiReviewError:"",aiReviewStartedAt:null,aiReviewFinishedAt:null,aiReviewAttempts:0,aiReviewNextRetryAt:null}; }
-export async function insertImportStaff(rows: Record<string,unknown>[], importId:string): Promise<{inserted:number;updated:number;loginsCreated:number;eligiblePhones:number;skipped:Record<string,unknown>[]}> { let inserted=0,updated=0,loginsCreated=0,eligiblePhones=0; const skipped:Record<string,unknown>[]=[], [all,admins]=await Promise.all([listStaff({includeDraft:true}),listAdmins()]); const usedPhones=new Set(all.map((s)=>s.phone).filter((phone):phone is string=>!!phone)); const adminPhones=new Set(admins.map((admin)=>admin.phone)); for(const row of rows){ if(row.blocked||!row.name){skipped.push({row:row.row,name:row.name,reason:String(row.skipReason??"Revisão ignorada")});continue;} const data=staffDataFromPreview(row,importId); const id=typeof row.existingStaffId==="string"?row.existingStaffId:""; const old=id?all.find((s)=>s._id===id):null; const adminProtected=!!(old?.phone&&adminPhones.has(old.phone))||!!(data.phone&&adminPhones.has(data.phone)); if(adminProtected){data.phone=old?.phone??data.phone;data.active=true;data.roomRole="helper";data.team=null;} if(data.phone&&usedPhones.has(data.phone)&&old?.phone!==data.phone){skipped.push({row:row.row,name:row.name,reason:"Celular repetido; inserido sem login"});data.phone=null;} data.sex=await sexFromBedroomId(data.bedroom); if(data.probableGender!=="F"&&data.probableGender!=="M"){const inferred=await resolveGender({name:data.name,bedroomId:data.bedroom,requested:null,guessIfMissing:data.sex!=="F"&&data.sex!=="M"});data.probableGender=inferred.probableGender;} if(id){await updateStaff(id,data);updated++;} else {await insertStaff(data);inserted++;} if(data.phone){usedPhones.add(data.phone);eligiblePhones++;const x=await ensureLoginAccount(data.name,data.phone,"staff");if(x.created)loginsCreated++;} } return {inserted,updated,loginsCreated,eligiblePhones,skipped}; }
+export function staffDataFromPreview(row:Record<string,unknown>,importId:string,draft=false):StaffData { return {name:String(row.name),phone:(row.phone as string|null)??null,email:typeof row.email==="string"&&row.email?row.email:null,document:normalizeStaffFreeText(String(row.document??"")),birthDate:typeof row.birthDate==="string"&&row.birthDate?row.birthDate:null,active:row.active!==false,roomRole:row.roomRole==="caretaker"?"caretaker":"helper",team:(row.team as string|null)??null,bedroom:(row.bedroom as string|null)??null,transportation:(row.transportation as string|null)??null,sex:(row.sex as CamperSex|null)??null,probableGender:(row.probableGender as CamperSex|null)??null,allergies:(row.allergies as string[])??[],drugAllergies:(row.drugAllergies as string[])??[],healthIssues:(row.healthIssues as string[])??[],foodRestrictions:normalizeStaffFreeText(String(row.foodRestrictions??"")),medications:[],healthNotes:normalizeStaffFreeText(String(row.healthNotes??"")),draft,importId,aiReviewStatus:draft?null:"pending",aiReviewError:"",aiReviewStartedAt:null,aiReviewFinishedAt:null,aiReviewAttempts:0,aiReviewNextRetryAt:null}; }
+const DUTY_SETTING:{[K in StaffDutyField]:"organizers"|"checkinHelpers"|"vestHelpers"|"scoreHelpers"|"gameOrganizers"}={organizer:"organizers",checkinHelper:"checkinHelpers",vestHelper:"vestHelpers",scoreHelper:"scoreHelpers",gameOrganizer:"gameOrganizers"};
+async function applyImportedStaffDuties(rows:Record<string,unknown>[]):Promise<void>{
+  const settings=await getSettings();
+  const patch:Partial<Pick<typeof settings,"organizers"|"checkinHelpers"|"vestHelpers"|"scoreHelpers"|"gameOrganizers">>={};
+  let changed=false;
+  for(const field of STAFF_DUTY_FIELDS){
+    const key=DUTY_SETTING[field];
+    const ids=new Set(settings[key].staffIds);
+    let fieldChanged=false;
+    for(const row of rows){
+      if(row.blocked||!row.name||row[field]!==true)continue;
+      const id=typeof row.existingStaffId==="string"?row.existingStaffId:"";
+      if(!id||ids.has(id))continue;
+      ids.add(id);fieldChanged=true;
+    }
+    if(fieldChanged){patch[key]={staffIds:[...ids]};changed=true;}
+  }
+  if(changed)await updateSettings(patch);
+}
+export async function insertImportStaff(rows: Record<string,unknown>[], importId:string): Promise<{inserted:number;updated:number;loginsCreated:number;eligiblePhones:number;skipped:Record<string,unknown>[]}> { let inserted=0,updated=0,loginsCreated=0,eligiblePhones=0; const skipped:Record<string,unknown>[]=[], all=await listStaff({includeDraft:true}); const usedPhones=new Set(all.map((s)=>s.phone).filter((phone):phone is string=>!!phone)); for(const row of rows){ if(row.blocked||!row.name){skipped.push({row:row.row,name:row.name,reason:String(row.skipReason??"Revisão ignorada")});continue;} const data=staffDataFromPreview(row,importId); const id=typeof row.existingStaffId==="string"?row.existingStaffId:""; const old=id?all.find((s)=>s._id===id):null; if(data.phone&&usedPhones.has(data.phone)&&old?.phone!==data.phone){skipped.push({row:row.row,name:row.name,reason:"Celular repetido; inserido sem login"});data.phone=null;} data.sex=await sexFromBedroomId(data.bedroom); if(data.probableGender!=="F"&&data.probableGender!=="M"){const inferred=await resolveGender({name:data.name,bedroomId:data.bedroom,requested:null,guessIfMissing:data.sex!=="F"&&data.sex!=="M"});data.probableGender=inferred.probableGender;} if(id){await updateStaff(id,data);updated++;row.existingStaffId=id;} else {const created=await insertStaff(data);inserted++;row.existingStaffId=created._id;} if(data.phone){usedPhones.add(data.phone);eligiblePhones++;const x=await ensureLoginAccount(data.name,data.phone,"staff");if(x.created)loginsCreated++;} } await applyImportedStaffDuties(rows); return {inserted,updated,loginsCreated,eligiblePhones,skipped}; }

@@ -6,7 +6,8 @@ import { AI_REVIEW_MAX_ATTEMPTS, aiReviewExhaustedFilter, aiReviewRetryDelayMs, 
 import { findCamperImport, listImportsPendingNotification, updateCamperImport } from "./models/camperImports";
 import { recordAiUsage } from "./models/aiUsage";
 import { sortCamperNotes, type RawNotesCall } from "./services/camperNotesAi";
-import { normalizeCamperObservations } from "./services/observationNormalizeAi";
+import { structureImportHealthWithJev } from "./services/importHealthStructureAi";
+import { cleanupImportObservations } from "./services/importObservationCleanupAi";
 import { comteleEnabled, comteleSendSms } from "./services/comtele";
 
 const POLL_MS = 10_000;
@@ -63,83 +64,36 @@ function attemptLogger(who: string): (model: string, r: RawNotesCall) => void {
 async function reviewOne(camper: Awaited<ReturnType<typeof claimCampersForAiReview>>[number]): Promise<void> {
   const who = `camper "${camper.name}" (${camper._id})`;
   try {
-    const line = (label: string, value: unknown) => value == null || value === "" ? "" : `${label}: ${String(value)}`;
-    // Put every mutable scalar/text value in the source text as one labelled
-    // record. This lets the strict bulk prompt return the whole cleaned value
-    // (not merely append to it), including comma-separated room preferences.
-    const reviewNotes = [
-      camper.generalNotes,
-      line("Preferência de quarto e cama", camper.bedroomPreference),
-      line("Restrição alimentar", camper.foodRestrictions),
-      line("Observações médicas", camper.healthNotes),
-      line("Contato de emergência", camper.emergencyContact),
-      line("Peso", camper.weightKg),
-      line("Convênio médico", camper.insurance),
-      line("Carteirinha", camper.insuranceCard),
-      line("CPF da criança", camper.cpf),
-      line("RG da criança", camper.rg),
-      line("Escola", camper.school),
-      line("Série", camper.schoolGrade),
-      line("Igreja", camper.church),
-      line("Convidado por", camper.invitedBy),
-      line("CPF do responsável", camper.guardianCpf),
-    ].filter(Boolean).join("\n");
-    // Category ids and already structured medications are protected as
-    // current state. The text fields above intentionally start empty so the
-    // model can normalize (rather than append to) the imported spelling.
-    const current = {
+    const reviewNotes = camper.generalNotes.trim();
+    log("camper", `${who} — start, observations=${reviewNotes.length} chars`);
+    const health = await structureImportHealthWithJev(reviewNotes, {
       allergies: camper.allergies,
       drugAllergies: camper.drugAllergies,
       healthIssues: camper.healthIssues,
       neurodivergent: camper.neurodivergent,
-      medications: camper.medications,
-      foodRestrictions: "",
-      healthNotes: "",
-      bedroomPreference: "",
-      emergencyContact: "",
-      weightKg: null,
-      insurance: "",
-      insuranceCard: "",
-      cpf: "",
-      rg: "",
-      school: "",
-      schoolGrade: "",
-      church: "",
-      invitedBy: "",
-      guardianName: camper.guardianName,
-      guardianPhone: camper.guardianPhone ?? "",
-      guardianCpf: "",
-      guardianEmail: camper.guardianEmail,
-      generalNotes: "",
-    };
-    log("camper", `${who} — start, notes=${reviewNotes.length} chars`);
-    const result = await sortCamperNotes({ notes: reviewNotes, subject: "camper", current }, { mode: "bulk", onAttempt: attemptLogger(who) });
-    if (!result) throw new Error("Nenhum modelo respondeu.");
-    const f = result.fields;
-    log("camper", `${who} — sorted by ${result.model}: allergies=${f.allergies.length} drugAllergies=${f.drugAllergies.length} healthIssues=${f.healthIssues.length} medications=${f.medications.length} neurodivergent=${f.neurodivergent}`);
-    const observations=await normalizeCamperObservations(f.generalNotes);
-    void recordAiUsage({at:new Date(),vendor:observations.vendor,model:observations.model,kind:"normalize_observations",userId:"worker",...observations.usage,ok:observations.ok});
+    }, "camper");
+    void recordAiUsage({ at: new Date(), vendor: health.vendor, model: health.model, kind: "structure_health", userId: "worker", ...health.usage, ok: health.ok });
+    log("camper", `${who} — Jev structured: allergies=${health.allergies.length} drugAllergies=${health.drugAllergies.length} healthIssues=${health.healthIssues.length} neurodivergent=${health.neurodivergent}`);
+
+    const cleanup = await cleanupImportObservations({
+      notes: reviewNotes,
+      subject: "camper",
+      structured: { ...health, medications: camper.medications },
+      currentFoodRestrictions: camper.foodRestrictions,
+      currentHealthNotes: camper.healthNotes,
+    });
+    void recordAiUsage({ at: new Date(), vendor: cleanup.vendor, model: cleanup.model, kind: "normalize_observations", userId: "worker", ...cleanup.usage, ok: cleanup.ok });
+    if (!health.ok) throw new Error(`Jev: ${health.error ?? "falhou"}`);
+    if (!cleanup.ok) throw new Error(`Cleanup: ${cleanup.error ?? "falhou"}`);
     await finishCamperAiReview(camper._id, {
-      allergies: f.allergies,
-      drugAllergies: f.drugAllergies,
-      healthIssues: f.healthIssues,
-      neurodivergent: f.neurodivergent,
-      medications: f.medications,
-      foodRestrictions: f.foodRestrictions,
-      healthNotes: f.healthNotes,
-      generalNotes: observations.value,
-      bedroomPreference: f.bedroomPreference,
-      emergencyContact: f.emergencyContact || camper.emergencyContact,
-      weightKg: f.weightKg ?? camper.weightKg,
-      insurance: f.insurance || camper.insurance,
-      insuranceCard: f.insuranceCard || camper.insuranceCard,
-      cpf: f.cpf || camper.cpf,
-      rg: f.rg || camper.rg,
-      school: f.school || camper.school,
-      schoolGrade: f.schoolGrade || camper.schoolGrade,
-      church: f.church || camper.church,
-      invitedBy: f.invitedBy || camper.invitedBy,
-      guardianCpf: f.guardianCpf || camper.guardianCpf,
+      allergies: health.allergies,
+      drugAllergies: health.drugAllergies,
+      healthIssues: health.healthIssues,
+      neurodivergent: health.neurodivergent,
+      medications: cleanup.medications,
+      foodRestrictions: cleanup.foodRestrictions,
+      healthNotes: cleanup.healthNotes,
+      generalNotes: cleanup.generalNotes,
     });
     log("camper", `${who} — done`);
     await notifyBackend("camper", camper._id, "reviewed", 0);
@@ -155,17 +109,26 @@ async function reviewOne(camper: Awaited<ReturnType<typeof claimCampersForAiRevi
 async function reviewStaffOne(member: Awaited<ReturnType<typeof claimStaffForAiReview>>[number]): Promise<void> {
   const who = `staff "${member.name}" (${member._id})`;
   try {
-    const notes = [member.healthNotes, member.foodRestrictions && `Restrição alimentar: ${member.foodRestrictions}`].filter(Boolean).join("\n");
-    log("staff", `${who} — start, notes=${notes.length} chars`);
-    const result = await sortCamperNotes({ notes, subject: "staff", current: {
-      allergies: member.allergies, drugAllergies: member.drugAllergies, healthIssues: member.healthIssues,
-      neurodivergent: false, medications: member.medications, foodRestrictions: "", healthNotes: "",
-      bedroomPreference: "", emergencyContact: "", weightKg: null, insurance: "", insuranceCard: "", cpf: "", rg: "", school: "", schoolGrade: "", church: "", invitedBy: "", guardianName: "", guardianPhone: "", guardianCpf: "", guardianEmail: "", generalNotes: "",
-    } }, { mode: "bulk", onAttempt: attemptLogger(who) });
-    if (!result) throw new Error("Nenhum modelo respondeu.");
-    const f = result.fields;
-    log("staff", `${who} — sorted by ${result.model}: allergies=${f.allergies.length} drugAllergies=${f.drugAllergies.length} healthIssues=${f.healthIssues.length} medications=${f.medications.length}`);
-    await finishStaffAiReview(member._id, { allergies:f.allergies, drugAllergies:f.drugAllergies, healthIssues:f.healthIssues, medications:f.medications, foodRestrictions:f.foodRestrictions, healthNotes:f.healthNotes });
+    const notes = member.healthNotes.trim();
+    log("staff", `${who} — start, observations=${notes.length} chars`);
+    const health = await structureImportHealthWithJev(notes, {
+      allergies: member.allergies,
+      drugAllergies: member.drugAllergies,
+      healthIssues: member.healthIssues,
+      neurodivergent: false,
+    }, "staff");
+    void recordAiUsage({ at: new Date(), vendor: health.vendor, model: health.model, kind: "structure_health", userId: "worker", ...health.usage, ok: health.ok });
+    const cleanup = await cleanupImportObservations({
+      notes,
+      subject: "staff",
+      structured: { ...health, medications: member.medications },
+      currentFoodRestrictions: member.foodRestrictions,
+      currentHealthNotes: "",
+    });
+    void recordAiUsage({ at: new Date(), vendor: cleanup.vendor, model: cleanup.model, kind: "normalize_observations", userId: "worker", ...cleanup.usage, ok: cleanup.ok });
+    if (!health.ok) throw new Error(`Jev: ${health.error ?? "falhou"}`);
+    if (!cleanup.ok) throw new Error(`Cleanup: ${cleanup.error ?? "falhou"}`);
+    await finishStaffAiReview(member._id, { allergies:health.allergies, drugAllergies:health.drugAllergies, healthIssues:health.healthIssues, medications:cleanup.medications, foodRestrictions:cleanup.foodRestrictions, healthNotes:cleanup.healthNotes });
     log("staff", `${who} — done`);
     await notifyBackend("staff", member._id, "reviewed", 0);
   } catch (err) {

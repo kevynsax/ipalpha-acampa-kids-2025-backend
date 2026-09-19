@@ -4,11 +4,11 @@ import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { config } from "./config";
 import { getDb } from "./db";
-import { ensureIndexes, ensureLoginAccount, ensureRosterLogins, listAdmins, loadAdminPhones } from "./models/users";
+import { ensureIndexes, ensureLoginAccount, ensureRosterLogins, loadAdminPhones } from "./models/users";
 import { ensureCategoryIndexes } from "./models/categories";
 import { ensureTransportIndexes } from "./models/transports";
 import { ensureBedroomIndexes } from "./models/bedrooms";
-import { ensureAdminsOnRoster, ensureStaffIndexes } from "./models/staff";
+import { ensureStaffIndexes } from "./models/staff";
 import { ensureScheduleIndexes } from "./models/schedule";
 import { backfillParentEditedAt, ensureCamperIndexes } from "./models/campers";
 import { ensurePrepIndexes } from "./models/preparation";
@@ -142,14 +142,7 @@ if (config.superAdminPhone) {
   const { created } = await ensureLoginAccount("Administrador", phone, "admin");
   if (created) console.log("🔑 super-admin login created from SUPER_ADMIN_PHONE");
 }
-// Every admin is also present in the roster for room, health and vest data.
-// Existing staff assignments are preserved, so an admin who is genuinely on
-// the team can choose either profile after login.
-{
-  await loadAdminPhones();
-  const { created } = await ensureAdminsOnRoster((await listAdmins()).map((a) => ({ name: a.name, phone: a.phone })));
-  if (created > 0) console.log(`👤 ${created} admin(s) added to the team roster`);
-}
+await loadAdminPhones();
 {
   const n = await ensureRosterLogins();
   console.log(
@@ -187,7 +180,7 @@ console.log(
 console.log(
   mailEnabled()
     ? "SendGrid mail enabled (notification emails)."
-    : "⚠️  SENDGRID_API_KEY / MAIL_FROM not set — notification emails are printed in this console.",
+    : "⚠️  SENDGRID_API_KEY / MAIL_FROM / PUBLIC_ORIGIN not set — notification emails are refused until they are.",
 );
 
 export default {

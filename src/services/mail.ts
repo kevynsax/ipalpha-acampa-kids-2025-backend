@@ -1,8 +1,15 @@
 import { config } from "../config";
 
-/** SendGrid HTTP is active when an API key and a from-address are set; otherwise we log. */
+/** SendGrid HTTP is active when an API key, a from-address and a public origin are set; otherwise we log. */
 export function mailEnabled(): boolean {
-  return config.mail.apiKey.length > 0 && config.mail.from.length > 0;
+  return config.mail.apiKey.length > 0 && config.mail.from.length > 0 && config.publicOrigin.length > 0;
+}
+
+function mailConfigError(): string | null {
+  if (!config.mail.apiKey) return "SENDGRID_API_KEY is empty";
+  if (!config.mail.from) return "MAIL_FROM is empty";
+  if (!config.publicOrigin) return "PUBLIC_ORIGIN (or APP_URL) is empty — mail images need a public origin";
+  return null;
 }
 
 /**
@@ -12,9 +19,10 @@ export function mailEnabled(): boolean {
 export async function sendMail(to: string, subject: string, html: string, text?: string): Promise<{ ok: boolean; mocked?: boolean; message?: string }> {
   const address = to.trim().toLowerCase();
   if (!address) return { ok: false, message: "no-address" };
-  if (!mailEnabled()) {
-    console.log(`\n✉️  [NOTIFY · DEV MOCK] ${address} — ${subject}\n`);
-    return { ok: true, mocked: true };
+  const missing = mailConfigError();
+  if (missing) {
+    console.error(`✉️  [NOTIFY · MAIL] refused: ${missing} (set it in .env). Would send to ${address} — ${subject}`);
+    return { ok: false, message: missing };
   }
   try {
     const res = await fetch("https://api.sendgrid.com/v3/mail/send", {

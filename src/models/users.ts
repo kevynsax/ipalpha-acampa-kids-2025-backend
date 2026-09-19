@@ -125,10 +125,9 @@ export async function listAdmins(): Promise<User[]> {
 }
 
 /**
- * The admins' phones (E.164), cached at boot (`loadAdminPhones`): the staff
- * records carrying one of these are the admins' own — locked (no delete, no
- * phone change, no deactivation). Roles only change through the seed scripts,
- * so a boot-time cache is enough.
+ * The admins' phones (E.164), cached at boot (`loadAdminPhones`): used to badge
+ * a roster row that happens to belong to an admin. Being admin does not require
+ * a staff record — the login lives on `users`.
  */
 let ADMIN_PHONES = new Set<string>();
 

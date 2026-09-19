@@ -81,6 +81,17 @@ export const normalizeImportValue = (value: string): string => value.normalize("
 export function camperIdentityKey(name:string,birthDate:string|null|undefined):string|null{const normalized=normalizeImportValue(name),parts=normalized.split(" ").filter(Boolean);if(!normalized)return null;if(parts.length>1)return `name:${normalized}`;return birthDate?`name-birth:${normalized}:${birthDate}`:null;}
 const normalize = normalizeImportValue;
 const compact = (value: string): string => normalize(value).replace(/\s/g, "");
+/** Spreadsheet UUID / ObjectId leftover, e.g. `89c85104-0d73-4ebf-821c-08f94689254e`. */
+export const IMPORT_ID_VALUE_RE = /^(?:[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}|[a-f0-9]{24})$/i;
+const IMPORT_ID_HEADER_RE = /^(?:id|uuid|guid|_id|[a-z0-9]+_id|[a-z0-9]+ id)$/;
+const CAMPER_EXTRA_COLUMNS = ["created at", "criado em", "qr token", "qr_token", "guardian id", "guardian_id"];
+/** Foreign-key / technical columns that must never become Nome, Quarto, Transporte, or notes. */
+export function isIgnoredImportColumn(header: string): boolean {
+  const n = normalize(header);
+  if (!n) return false;
+  if (IMPORT_ID_HEADER_RE.test(n)) return true;
+  return CAMPER_EXTRA_COLUMNS.some((extra) => n === extra || n.startsWith(`${extra} `));
+}
 const text = (v: unknown): string => v == null ? "" : v instanceof Date ? v.toISOString().slice(0, 10) : String(v).trim();
 
 export function isEmptyCategoryValue(value: string): boolean {  const n = normalize(value);
@@ -247,15 +258,16 @@ export function parseSpreadsheet(data: Uint8Array, fileName: string): { rows: Re
 
 export async function mapColumns(columns: { name: string; samples: string[] }[], override: Record<string, string | null> = {}, signal?: AbortSignal): Promise<CamperImportColumn[]> {
   const saved = new Map((await listImportDictionary()).filter((d) => d.kind === "column" && d.field.startsWith("column:")).map((d) => [d.normalized, typeof d.value === "string" ? d.value : null]));
-  const unresolved = columns.filter((c) => override[c.name] === undefined && !directField(c.name) && !saved.has(normalize(c.name)));
+  const unresolved = columns.filter((c) => override[c.name] === undefined && !isIgnoredImportColumn(c.name) && !directField(c.name) && !saved.has(normalize(c.name)));
   const ai = unresolved.length ? await mapImportColumns(unresolved, IMPORT_FIELDS.map((f) => ({ key: f.key, label: f.label, aliases: [...f.aliases], required: "required" in f && f.required })), signal) : {};
   const used = new Set<string>();
   return columns.map((c) => {
+    const ignored = isIgnoredImportColumn(c.name);
     const direct = directField(c.name);
-    const requested = override[c.name] !== undefined ? override[c.name] : direct?.key ?? saved.get(normalize(c.name)) ?? ai[c.name]?.target ?? null;
+    const requested = ignored ? null : override[c.name] !== undefined ? override[c.name] : direct?.key ?? saved.get(normalize(c.name)) ?? ai[c.name]?.target ?? null;
     const target = requested && IMPORT_FIELDS.some((f) => f.key === requested) && !used.has(requested) ? requested : null;
     if (target) used.add(target);
-    return { source: c.name, target, confidence: override[c.name] !== undefined ? 1 : direct?.confidence ?? ai[c.name]?.confidence ?? 0, samples: c.samples };
+    return { source: c.name, target, confidence: ignored ? 1 : override[c.name] !== undefined ? 1 : direct?.confidence ?? ai[c.name]?.confidence ?? 0, samples: c.samples };
   });
 }
 
@@ -355,7 +367,7 @@ export const BUILTIN_DATE_FUNCTION = `function parseImportDate(value) {
   return null;
 }`;
 
-function parseBuiltInDate(value: string): string | null {
+export function parseBuiltInDate(value: string): string | null {
   const s = value.trim();
   let m = /^(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})$/.exec(s);
   if (m) return isoDate(+m[3], +m[2], +m[1]);
@@ -506,7 +518,7 @@ async function createTransportFor(raw: string, lookups: ImportLookups, createdIt
 }
 
 export async function resolveTransport(raw: string, lookups: ImportLookups, createdItems: CamperImportCreatedItem[], importId: string, signal?: AbortSignal): Promise<string | null> {
-  if (!raw) return null;
+  if (!raw || IMPORT_ID_VALUE_RE.test(raw)) return null;
   const candidates = lookups.transports.map((t) => ({ id: t._id, label: transportLabel(t) }));
   let id = deterministicMatch(raw, candidates);
   if (!id) id = (await bestImportMatch("transporte (ônibus, van ou carro)", raw, candidates, signal)).id;
@@ -514,7 +526,7 @@ export async function resolveTransport(raw: string, lookups: ImportLookups, crea
 }
 
 export async function resolveTeam(raw: string, lookups: ImportLookups, createdItems: CamperImportCreatedItem[], importId: string, signal?: AbortSignal): Promise<string | null> {
-  if (!raw) return null;
+  if (!raw || IMPORT_ID_VALUE_RE.test(raw)) return null;
   const candidates = lookups.teams.map((t) => ({ id: t._id, label: t.name }));
   let id = deterministicMatch(raw, candidates);
   let createName = raw;
@@ -532,7 +544,7 @@ export async function resolveTeam(raw: string, lookups: ImportLookups, createdIt
 }
 
 export async function resolveBedroom(raw: string, names: string[], lookups: ImportLookups, createdItems: CamperImportCreatedItem[], importId: string, signal?: AbortSignal): Promise<string | null> {
-  if (!raw) return null;
+  if (!raw || IMPORT_ID_VALUE_RE.test(raw)) return null;
   const candidates = lookups.bedrooms.map((b) => ({ id: b._id, label: b.name }));
   let id = deterministicMatch(raw, candidates);
   if (id) return id;
@@ -554,7 +566,7 @@ export async function resolveBedroom(raw: string, names: string[], lookups: Impo
 }
 
 export function concatOtherColumns(row: Record<string, string>, mappedSources: Set<string>, prefix = ""): string {
-  return Object.entries(row).filter(([key, value]) => value && !mappedSources.has(key)).map(([key, value]) => `${prefix}${key}: ${value}.`).join(" ");
+  return Object.entries(row).filter(([key, value]) => value && !mappedSources.has(key) && !isIgnoredImportColumn(key) && !IMPORT_ID_VALUE_RE.test(value)).map(([key, value]) => `${prefix}${key}: ${value}.`).join(" ");
 }
 
 export async function analyzeCamperImport(input: { data: Uint8Array; fileName: string; fileType: string; importId: string; mapping?: Record<string, string | null>; signal?: AbortSignal; onProgress?: (key: string, pct: number) => void }): Promise<ImportAnalysis> {
@@ -970,7 +982,7 @@ export function applyImportDelta(preview: Record<string, unknown>[], reviews: Ca
 export async function createLeaderFromReview(name: string, phone: string, importId: string): Promise<Staff> {
   const normalized = normalizeBrazilPhone(phone);
   if (!normalized) throw new Error("Informe um celular brasileiro válido com DDD.");
-  const data: StaffData = { name: titleCaseName(name), sex: null, probableGender: null, phone: normalized, email: null, active: true, team: null, transportation: null, bedroom: null, roomRole: "caretaker", allergies: [], drugAllergies: [], foodRestrictions: "", healthIssues: [], medications: [], healthNotes: "", draft: true, importId };
+  const data: StaffData = { name: titleCaseName(name), sex: null, probableGender: null, phone: normalized, email: null, document: "", birthDate: null, active: true, team: null, transportation: null, bedroom: null, roomRole: "caretaker", allergies: [], drugAllergies: [], foodRestrictions: "", healthIssues: [], medications: [], healthNotes: "", draft: true, importId };
   const leaderGender = await resolveGender({ name: data.name, bedroomId: null, requested: null, guessIfMissing: true });
   data.sex = leaderGender.sex;
   data.probableGender = leaderGender.probableGender;

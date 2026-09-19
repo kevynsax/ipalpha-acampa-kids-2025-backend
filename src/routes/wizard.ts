@@ -81,6 +81,8 @@ wizard.post("/sample", requireAdmin, async (c) => {
       probableGender: s.roomGroup === "girls" ? "F" : s.roomGroup === "boys" ? "M" : null,
       phone: s.phone,
       email: null,
+      document: "",
+      birthDate: null,
       active: s.active,
       team: s.team ? teamId.get(s.team) ?? null : null,
       bedroom: s.room && s.roomGroup ? roomId.get(`${s.roomGroup}:${s.room}`) ?? null : null,

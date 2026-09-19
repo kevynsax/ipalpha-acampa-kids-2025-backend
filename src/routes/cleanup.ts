@@ -9,6 +9,7 @@ import {
   STAFF_KEEP_GROUPS,
   countImportCache,
   wipeImportCache,
+  wipeStaffImportCache,
   countNotificationMarks,
   resetCampSettings,
   wipeBedrooms,
@@ -120,7 +121,15 @@ cleanup.get("/marks", async (c) => c.json(await countNotificationMarks()));
 /** SUPER ADMIN: how many remembered import mappings the cache holds. */
 cleanup.get("/import-cache", async (c) => {
   if (!isSuperAdmin(c)) return c.json({ error: { code: "FORBIDDEN", message: "Só o dono da implantação pode ver isso." } }, 403);
-  return c.json({ count: await countImportCache() });
+  return c.json(await countImportCache());
+});
+
+/** SUPER ADMIN: wipe the staff import column cache. */
+cleanup.post("/import-cache/staff", async (c) => {
+  if (!isSuperAdmin(c)) return c.json({ error: { code: "FORBIDDEN", message: "Só o dono da implantação pode limpar o cache de importação." } }, 403);
+  const removed = await wipeStaffImportCache();
+  console.log(`🧹 cleanup (staff-import-cache) by ${c.get("user").name}: ${removed} mapping(s)`);
+  return c.json({ removed });
 });
 
 /** SUPER ADMIN: wipe the staff + camper import dictionary cache. */

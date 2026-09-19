@@ -4,7 +4,6 @@ import { config } from "../config";
 import { getDb } from "../db";
 import { requireAuth } from "../middleware/auth";
 import { requireAdmin } from "../middleware/roles";
-import { ensureAdminsOnRoster } from "../models/staff";
 import { ensureLoginAccount, listAdmins, loadAdminPhones } from "../models/users";
 import { comteleEnabled, comteleSendSms } from "../services/comtele";
 import { publish } from "../services/realtime";
@@ -45,8 +44,8 @@ admins.get("/", requireAuth, requireAdmin, async (c) => {
 
 /**
  * POST /api/admins — admin. Grants the admin role to a phone (creating the
- * login account and the roster record when needed) and, when `sendSms` is
- * on, texts the person the app link so they can log in right away.
+ * login account when needed) and, when `sendSms` is on, texts the person the
+ * app link so they can log in right away. Does not put them on the team roster.
  */
 admins.post("/", requireAuth, requireAdmin, async (c) => {
   const body = await c.req.json<{ name?: string; phone?: string; sendSms?: boolean; locale?: string }>().catch(() => null);
@@ -56,9 +55,6 @@ admins.post("/", requireAuth, requireAdmin, async (c) => {
   if (!phone) return c.json({ error: { code: "PHONE_INVALID", message: "Informe um celular brasileiro válido com DDD." } }, 400);
 
   await ensureLoginAccount(name, phone, "admin");
-  // every admin is also on the roster (room, health and vest data)
-  await ensureAdminsOnRoster([{ name, phone }]);
-  // the admin phones are cached at boot — refresh so the new one is protected at once
   await loadAdminPhones();
   publish("staff");
 

@@ -1196,21 +1196,12 @@ export function composeEnrolSms(staff: Staff, roles: string[], locale: Locale = 
  * atomic in the database, so restarts, double saves or two triggers firing
  * together can't text twice. Returns true when it went out.
  */
-async function staffWelcomeFacts(staff: Staff): Promise<{ room?: string | null; team?: string | null; bus?: string | null }> {
-  const [room, team, bus] = await Promise.all([
-    bedroomName(staff.bedroom),
-    staff.team ? findTeamById(staff.team).then((t) => t?.name ?? null) : Promise.resolve(null),
-    transportLabel(staff.transportation),
-  ]);
-  return { room, team, bus };
-}
-
 async function sendWelcome(staff: Staff, roles: string[] = []): Promise<boolean> {
   if (!staff.active) return false;
   if (!staff.phone && !(staffEmailOf(staff))) return false;
   if (!(await claimStaffWelcome(staff._id))) return false;
   if (staff.phone) await deliver(staff, composeEnrolSms(staff, roles, await localeForPhone(staff.phone)), roles.length ? "enrol" : "welcome");
-  await mail(staffEmailOf(staff), staffWelcomeEmail(staff, roles, await staffWelcomeFacts(staff)), roles.length ? "enrol" : "welcome");
+  await mail(staffEmailOf(staff), staffWelcomeEmail(staff, roles), roles.length ? "enrol" : "welcome");
   return true;
 }
 
@@ -1284,7 +1275,7 @@ export async function notifyAccessListChange(before: Settings, after: Settings):
       // a role text carries the link too, so it doubles as the welcome; someone already welcomed still hears about the new role
       if (!(await sendWelcome(s, gained))) {
         if (s.phone) await deliver(s, composeEnrolSms(s, gained, locale), "enrol");
-        await mail(staffEmailOf(s), staffWelcomeEmail(s, gained, await staffWelcomeFacts(s)), "enrol");
+        await mail(staffEmailOf(s), staffWelcomeEmail(s, gained), "enrol");
       }
     }
   } catch (err) {

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { birthdayEmail, busCheckinEmail, checkinEmail, occurrenceEmail, parentWelcomeEmail, rewriteDocHtml, sampleNotificationEmails, wrapEmail } from "./emails";
+import { config } from "../config";
+import { birthdayEmail, busCheckinEmail, checkinEmail, enrolHero, occurrenceEmail, parentEditEmail, parentWelcomeEmail, rewriteDocHtml, sampleNotificationEmails, staffWelcomeEmail, wrapEmail } from "./emails";
 
 describe("notification emails", () => {
   test("wraps the camp look with a CTA and no underline", () => {
@@ -19,7 +20,8 @@ describe("notification emails", () => {
 
   test("rewrites relative file URLs against the public origin when set", () => {
     const html = rewriteDocHtml('<p><img src="/api/files/abc"></p>');
-    expect(html.includes('src="/api/files/abc"') || html.includes("src=\"http")).toBe(true);
+    if (config.publicOrigin) expect(html).toBe(`<p><img src="${config.publicOrigin}/api/files/abc"></p>`);
+    else expect(html).toContain('src="/api/files/abc"');
   });
 
   test("parent welcome names the kids and the login phone", () => {
@@ -31,6 +33,20 @@ describe("notification emails", () => {
     expect(mail.subject).toContain("Acampa Kids");
     expect(mail.html).toContain("Ana");
     expect(mail.html).toContain("(11) 99999-9999");
+  });
+
+  test("parent welcome lists every kid", () => {
+    const mail = parentWelcomeEmail(
+      { name: "Marcela Souza", phone: "+5511999999999" },
+      [
+        { name: "Ana Souza", sex: "F", probableGender: "F" },
+        { name: "Pedro Souza", sex: "M", probableGender: "M" },
+      ],
+      "liberado",
+    );
+    expect(mail.subject).toContain("crianças estão inscritas");
+    expect(mail.html).toContain("Ana e Pedro estão inscritos");
+    expect(mail.html).toContain("Ana Souza, Pedro Souza");
   });
 
   test("bus check-in includes parent contacts", () => {
@@ -57,6 +73,45 @@ describe("notification emails", () => {
     expect(mail.html).toContain("Maria");
   });
 
+  test("enrol hero matches the new responsibility", () => {
+    expect(enrolHero(["organizador dos jogos (programação e placar)"])).toBe("enrol-games");
+    expect(enrolHero(["organizador (acesso de administração)"])).toBe("enrol-organizer");
+    expect(enrolHero(["na porta do ônibus (embarque das crianças)"])).toBe("enrol-bus");
+    expect(enrolHero(["equipe médica"])).toBe("enrol-medical");
+    expect(enrolHero(["fotógrafo do acampamento (envia as fotos)"])).toBe("enrol-photo");
+    expect(enrolHero([])).toBe("staff-enrol");
+  });
+
+  test("bus door enrol explains the door, not the ride", () => {
+    const mail = staffWelcomeEmail({ name: "João Silva", phone: "+5511988887777" }, ["na porta do ônibus (embarque das crianças)"]);
+    expect(mail.html).toContain("não deixá-las saírem");
+    expect(mail.html).toContain("não coloca as malas");
+    expect(mail.html).not.toContain("Não precisa ir nele");
+  });
+
+  test("staff welcome and enrol only show the login phone", () => {
+    const welcome = staffWelcomeEmail({ name: "João Silva", phone: "+5511988887777" }, []);
+    const enrol = staffWelcomeEmail({ name: "João Silva", phone: "+5511988887777" }, ["organizador (acesso de administração)"]);
+    for (const mail of [welcome, enrol]) {
+      expect(mail.html).toContain("(11) 98888-7777");
+      expect(mail.html).not.toContain(">Quarto<");
+      expect(mail.html).not.toContain(">Time<");
+      expect(mail.html).not.toContain(">Transporte<");
+    }
+  });
+
+  test("church check-in enrol asks to verify medical info with the parent", () => {
+    const mail = staffWelcomeEmail({ name: "João Silva", phone: "+5511988887777" }, ["ajudante do check-in"]);
+    expect(mail.html).toContain("informações médicas");
+    expect(mail.html).not.toContain("Não entregue de volta");
+  });
+
+  test("medical enrol does not joke about corridor diagnoses", () => {
+    const mail = staffWelcomeEmail({ name: "João Silva", phone: "+5511988887777" }, ["equipe médica"]);
+    expect(mail.html).toContain("ficha de saúde");
+    expect(mail.html).not.toContain("diagnóstico de corredor");
+  });
+
   test("sample catalog covers parent and staff emails", () => {
     const samples = sampleNotificationEmails();
     expect(samples.length).toBeGreaterThan(5);
@@ -67,6 +122,18 @@ describe("notification emails", () => {
       expect(s.subject.length).toBeGreaterThan(0);
       expect(s.html).toContain("#183d36");
     }
+  });
+
+  test("parent edit capitalizes field names and values", () => {
+    const mail = parentEditEmail(
+      "João",
+      { name: "Ana Souza" },
+      { byName: "Marcela Souza", medical: true, changes: [{ field: "allergies", before: [], after: ["amendoim"] }] },
+      (id) => id,
+    );
+    expect(mail.html).toContain(">Alergias<");
+    expect(mail.html).toContain("Amendoim");
+    expect(mail.html).not.toContain(">alergias<");
   });
 
   test("occurrence includes the description HTML", () => {
@@ -82,5 +149,6 @@ describe("notification emails", () => {
     });
     expect(mail.html).toContain("Caiu no campo");
     expect(mail.html).toContain("Ana Souza");
+    expect(mail.html).not.toContain("precisa agir");
   });
 });
