@@ -196,6 +196,7 @@ export async function resetCampSettings(): Promise<void> {
         checkinTestMode: false,
         kidsRoomsDraft: false,
         scoreDraft: false,
+        scoreHideWindow: { from: null, until: null },
         updatedAt: new Date(),
       },
     },

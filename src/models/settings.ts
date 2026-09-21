@@ -34,6 +34,7 @@ export const DEFAULT_SETTINGS: Settings = {
   checkinTestMode: false,
   kidsRoomsDraft: false,
   scoreDraft: false,
+  scoreHideWindow: { from: null, until: null },
   wizardMode: false,
   galleryPublished: false,
   checkinReminder: { at: null, sentAt: null },
@@ -53,6 +54,11 @@ function asDate(v: unknown): Date | null {
 /** Is the check-in window open at `now`? (needs both ends) */
 export function checkinWindowOpen(w: CheckinWindow, now = new Date()): boolean {
   return !!w.from && !!w.until && w.from <= now && now < w.until;
+}
+
+/** Is the scoreboard hidden from the team right now? (needs both ends, like the check-in window) */
+export function scoreHidden(w: CheckinWindow, now = new Date()): boolean {
+  return checkinWindowOpen(w, now);
 }
 
 /** Is the ordinary team's access window open? Unlike the check-in window, an UNSET window means "always". */
@@ -152,6 +158,7 @@ function toSettings(doc: Record<string, unknown> | null): Settings {
     checkinTestMode: doc.checkinTestMode === true,
     kidsRoomsDraft: doc.kidsRoomsDraft === true,
     scoreDraft: doc.scoreDraft === true,
+    scoreHideWindow: toWindow(doc.scoreHideWindow),
     wizardMode: doc.wizardMode === true,
     galleryPublished: doc.galleryPublished === true,
     checkinReminder: toReminder(doc.checkinReminder),

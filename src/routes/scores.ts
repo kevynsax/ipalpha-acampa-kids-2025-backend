@@ -5,11 +5,12 @@ import { requireRole } from "../middleware/roles";
 import { findCamperById, logCheckin, setCamperCheckin } from "../models/campers";
 import { findEventById } from "../models/schedule";
 import { deleteScore, eventScanPoints, findScoreById, insertScore, listScores, repointEventScans, scannedForEvent, teamTotal } from "../models/scores";
-import { getSettings } from "../models/settings";
+import { getSettings, updateSettings } from "../models/settings";
 import { findTeamById } from "../models/teams";
 import { campInProgress, campPeriod } from "../services/camp";
-import { publish } from "../services/realtime";
-import { canKeepScore, canLaunchScore, canSeeCamper, resolveScope } from "../services/scope";
+import { publish, rearmWindows } from "../services/realtime";
+import { canKeepScore, canLaunchScore, canSeeCamper, canSeeScores, resolveScope } from "../services/scope";
+import { parseWindow } from "./settings";
 import type { Role, ScoreEntry, SessionUser } from "../types";
 
 interface Env {
@@ -89,8 +90,32 @@ const requireScoreOpen = createMiddleware<Env>(async (c, next) => {
 
 scores.use("*", requireAuth);
 
-/** GET /api/scores — the whole ledger, newest first (any team member / admin: the scoreboard is public inside the app). */
-scores.get("/", requireRole("admin", "staff", "health_staff"), async (c) => c.json({ scores: (await listScores()).map(serializeScore) }));
+/** GET /api/scores — the whole ledger, newest first (any team member / admin: the scoreboard is public inside the app — except during the suspense window, when only whoever launches points gets it). */
+scores.get("/", requireRole("admin", "staff", "health_staff"), async (c) => {
+  const visible = canSeeScores(await resolveScope(c.get("user")), await getSettings());
+  return c.json({ scores: visible ? (await listScores()).map(serializeScore) : [] });
+});
+
+/**
+ * PUT /api/scores/suspense  { from, until }
+ * The SUSPENSE window: between `from` and `until` the ledger is withheld from
+ * everyone who does not launch points (the ordinary team sees the Placar with
+ * the totals hidden); points keep being written normally and the board comes
+ * back by itself at `until`. Both null clears it. Admin, organizer or game
+ * organizer — it lives in the settings but game organizers may not touch
+ * those, hence this route.
+ */
+scores.put("/suspense", requireRole("admin", "staff", "health_staff"), requireScorekeeper, async (c) => {
+  const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+  if (!body) return fail(c, "BODY_INVALID", "Corpo da requisição inválido.");
+  const w = parseWindow(body);
+  if ("error" in w) return fail(c, "WINDOW_INVALID", w.error);
+  if ((w.from === null) !== (w.until === null)) return fail(c, "WINDOW_INVALID", "Informe o início e o fim do suspense (ou limpe os dois).");
+  await updateSettings({ scoreHideWindow: w });
+  publish("settings", "scores");
+  void rearmWindows();
+  return c.json({ scoreHideWindow: { from: w.from?.toISOString() ?? null, until: w.until?.toISOString() ?? null } });
+});
 
 /**
  * POST /api/scores  { teamId, points, note? }

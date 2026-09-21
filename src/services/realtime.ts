@@ -166,21 +166,21 @@ export async function rearmWindows(): Promise<void> {
   const [{ getSettings }, { listEvents }, { parentWindowOf }] = await Promise.all([import("../models/settings"), import("../models/schedule"), import("./camp")]);
   const s = await getSettings();
   const pw = parentWindowOf(s, await listEvents());
-  scheduleCheckinWindow(s.checkinWindow, s.staffAccessWindow, pw, s.parentAccessWindow, s.busReturnWindow);
+  scheduleCheckinWindow(s.checkinWindow, s.staffAccessWindow, pw, s.parentAccessWindow, s.busReturnWindow, s.scoreHideWindow);
 }
 
-export function scheduleCheckinWindow(w: CheckinWindow, staffAccess?: CheckinWindow, parents?: CheckinWindow, parentAccess?: CheckinWindow, busReturn?: CheckinWindow): void {
+export function scheduleCheckinWindow(w: CheckinWindow, staffAccess?: CheckinWindow, parents?: CheckinWindow, parentAccess?: CheckinWindow, busReturn?: CheckinWindow, scoreHide?: CheckinWindow): void {
   for (const t of edgeTimers) clearTimeout(t);
   edgeTimers = [];
   const now = Date.now();
-  for (const edge of [w.from, w.until, busReturn?.from ?? null, busReturn?.until ?? null, staffAccess?.from ?? null, staffAccess?.until ?? null, parents?.from ?? null, parents?.until ?? null, parentAccess?.from ?? null, parentAccess?.until ?? null]) {
+  for (const edge of [w.from, w.until, busReturn?.from ?? null, busReturn?.until ?? null, staffAccess?.from ?? null, staffAccess?.until ?? null, parents?.from ?? null, parents?.until ?? null, parentAccess?.from ?? null, parentAccess?.until ?? null, scoreHide?.from ?? null, scoreHide?.until ?? null]) {
     if (!edge) continue;
     const wait = edge.getTime() - now + 500; // a hair after, so the check sees the new state
     if (wait <= 0 || wait > MAX_TIMEOUT) continue;
     edgeTimers.push(
       setTimeout(() => {
         console.log("⏰ check-in window edge reached → re-publishing scoped collections");
-        publish("campers", "staff", "bedrooms", "roles", "events", "settings");
+        publish("campers", "staff", "bedrooms", "roles", "events", "scores", "settings");
         void evictStaffOutsideWindow().catch((err) => console.error("realtime: evict failed", err));
         void import("./notify").then((m) => Promise.all([m.syncWelcomes(), m.syncParentWelcomes()])); // a window may have just opened → welcome SMS
       }, wait),

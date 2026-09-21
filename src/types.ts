@@ -995,6 +995,14 @@ export interface Settings {
    */
   scoreDraft: boolean;
   /**
+   * Scoreboard SUSPENSE window (Settings → Jogos / the Placar page, set by the
+   * game organizers): while `from <= now < until` the ledger is withheld from
+   * everyone who does not launch points — the ordinary team sees the Placar
+   * with the totals hidden. Points keep being written normally; at `until`
+   * the board reappears for everybody. Both ends null = never hidden.
+   */
+  scoreHideWindow: CheckinWindow;
+  /**
    * Setup wizard LOCK: after an admin login the assistant takes over until
    * they finish it or leave it. While on, the settings gear is blocked.
    */

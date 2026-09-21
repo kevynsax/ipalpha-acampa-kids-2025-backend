@@ -1,6 +1,6 @@
 import { listCampersOfGuardian } from "../models/campers";
 import { listEvents } from "../models/schedule";
-import { checkinWindowOpen, getSettings, staffAccessOpen } from "../models/settings";
+import { checkinWindowOpen, getSettings, scoreHidden, staffAccessOpen } from "../models/settings";
 import { findStaffByPhone } from "../models/staff";
 import { findByPhone } from "../models/users";
 import type { CampEvent, Camper, DocAudience, OccurrenceGroup, PrepAudience, Role, RoomRole, ScheduleRole, Settings, Staff } from "../types";
@@ -292,6 +292,15 @@ export function canKeepScore(scope: Scope): boolean {
 /** May this session run the bulk QR scan (points by event)? (scorekeepers + score helpers) */
 export function canLaunchScore(scope: Scope): boolean {
   return scope.all || scope.gameOrganizer || scope.scoreHelper;
+}
+
+/**
+ * May this session read the scoreboard ledger right now? Whoever launches
+ * points (admin, organizers, game organizers, score helpers) always does;
+ * everyone else loses it while the suspense window (`scoreHideWindow`) is on.
+ */
+export function canSeeScores(scope: Scope, s: Pick<Settings, "scoreHideWindow">, now = new Date()): boolean {
+  return canLaunchScore(scope) || !scoreHidden(s.scoreHideWindow, now);
 }
 
 /** May this session hand out / take back the team vests? (admin, organizer or vest helper) */

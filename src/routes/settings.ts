@@ -3,7 +3,7 @@ import { config } from "../config";
 import { requireAuth } from "../middleware/auth";
 import { requireAdmin, requireManager } from "../middleware/roles";
 import { listTransports } from "../models/transports";
-import { checkinWindowOpen, getSettings, staffAccessOpen, updateSettings } from "../models/settings";
+import { checkinWindowOpen, getSettings, scoreHidden, staffAccessOpen, updateSettings } from "../models/settings";
 import { FOREIGN_LOOKUP_ALERT_AT, findStaffByPhone, listForeignLookupOffenders, listStaff, resetForeignLookups, resetStaffCheckins, resetStaffPhotosNotice, resetStaffVests, updateStaff } from "../models/staff";
 import { clearCheckinLog, resetCamperCheckins } from "../models/campers";
 import { resetParentPhotosNotice } from "../models/users";
@@ -60,6 +60,8 @@ export async function serializeSettings(s: Settings) {
     checkinTestMode: s.checkinTestMode,
     kidsRoomsDraft: s.kidsRoomsDraft,
     scoreDraft: s.scoreDraft,
+    /** the suspense window: written through PUT /api/scores/suspense (game organizers too) */
+    scoreHideWindow: serializeWindow(s.scoreHideWindow, scoreHidden(s.scoreHideWindow)),
     wizardMode: s.wizardMode,
     galleryPublished: s.galleryPublished,
     staffAccessWindow: serializeWindow(s.staffAccessWindow, staffAccessOpen(s.staffAccessWindow)),
@@ -180,7 +182,7 @@ async function parseStaffIds(value: unknown): Promise<string[] | { error: string
 }
 
 /** { from: ISO | null, until: ISO | null } — from < until when both are set */
-function parseWindow(value: unknown): CheckinWindow | { error: string } {
+export function parseWindow(value: unknown): CheckinWindow | { error: string } {
   if (!value || typeof value !== "object") return { error: "Informe a janela do check-in." };
   const o = value as Record<string, unknown>;
   const parseDate = (v: unknown, label: string): Date | null | { error: string } => {

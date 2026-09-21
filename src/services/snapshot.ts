@@ -28,7 +28,7 @@ import { serializeStaffList } from "../routes/staff";
 import { getSettings } from "../models/settings";
 import type { Role } from "../types";
 import { COLLECTIONS, type Collection, type Snapshot } from "./realtime";
-import { canManageGallery, canSeeBedroom, canSeeDoc, isParent, resolveScope, scopeEvent, scopeRoles, viewerOccurrenceGroup, type Viewer } from "./scope";
+import { canManageGallery, canSeeBedroom, canSeeDoc, canSeeScores, isParent, resolveScope, scopeEvent, scopeRoles, viewerOccurrenceGroup, type Viewer } from "./scope";
 
 /**
  * Collections each role may read (mirrors the REST `requireRole` guards).
@@ -107,7 +107,8 @@ export async function loadCollections(viewer: Viewer, names: readonly Collection
           out.teams = (await listTeams()).map(serializeTeam);
           break;
         case "scores":
-          out.scores = (await listScores()).map(serializeScore);
+          // suspense window: the ordinary team gets an empty ledger (the client shows the board with the totals hidden)
+          out.scores = canSeeScores(scope, await getSettings()) ? (await listScores()).map(serializeScore) : [];
           break;
         case "roles":
           out.roles = (await schedule!).roles.map(serializeRole);
