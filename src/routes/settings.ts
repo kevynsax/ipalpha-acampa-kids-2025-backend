@@ -60,6 +60,7 @@ export async function serializeSettings(s: Settings) {
     checkinTestMode: s.checkinTestMode,
     kidsRoomsDraft: s.kidsRoomsDraft,
     scoreDraft: s.scoreDraft,
+    wizardMode: s.wizardMode,
     galleryPublished: s.galleryPublished,
     staffAccessWindow: serializeWindow(s.staffAccessWindow, staffAccessOpen(s.staffAccessWindow)),
     parentAccessWindow: serializeWindow(s.parentAccessWindow, staffAccessOpen(s.parentAccessWindow)),
@@ -356,6 +357,16 @@ settings.put("/", requireManager, async (c) => {
   if (body.scoreDraft !== undefined) {
     if (typeof body.scoreDraft !== "boolean") return fail(c, "SCORE_DRAFT_INVALID", "O rascunho do placar deve ser ligado ou desligado.");
     patch.scoreDraft = body.scoreDraft;
+  }
+  if (body.wizardMode !== undefined) {
+    if (typeof body.wizardMode !== "boolean") return fail(c, "WIZARD_MODE_INVALID", "O modo assistente deve ser ligado ou desligado.");
+    const superPhone = config.superAdminPhone ? normalizeBrazilPhone(config.superAdminPhone) : null;
+    const isSuper = !!superPhone && c.get("user").phone === superPhone;
+    // only the deployment owner turns the lock ON; any admin may turn it OFF (finish / leave the wizard)
+    if (body.wizardMode === true && !isSuper) {
+      return c.json({ error: { code: "FORBIDDEN", message: "Só o administrador da implantação liga o assistente." } }, 403);
+    }
+    patch.wizardMode = body.wizardMode;
   }
   if (body.smsRedirect !== undefined) {
     const r = parseSmsRedirect(body.smsRedirect, (await getSettings()).smsRedirect);

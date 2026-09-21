@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { config } from "../config";
-import { birthdayEmail, busCheckinEmail, checkinEmail, enrolHero, occurrenceEmail, parentEditEmail, parentWelcomeEmail, rewriteDocHtml, sampleNotificationEmails, staffWelcomeEmail, wrapEmail } from "./emails";
+import { adminInviteEmail, birthdayEmail, busCheckinEmail, checkinEmail, enrolHero, occurrenceEmail, parentEditEmail, parentWelcomeEmail, rewriteDocHtml, sampleNotificationEmails, staffWelcomeEmail, wrapEmail } from "./emails";
 
 describe("notification emails", () => {
   test("wraps the camp look with a CTA and no underline", () => {
@@ -110,6 +110,14 @@ describe("notification emails", () => {
     const mail = staffWelcomeEmail({ name: "João Silva", phone: "+5511988887777" }, ["equipe médica"]);
     expect(mail.html).toContain("ficha de saúde");
     expect(mail.html).not.toContain("diagnóstico de corredor");
+  });
+
+  test("admin invite names the login phone and the wizard", () => {
+    const mail = adminInviteEmail({ name: "João Silva", phone: "+5511988887777" });
+    expect(mail.subject).toContain("administra");
+    expect(mail.html).toContain("João");
+    expect(mail.html).toContain("(11) 98888-7777");
+    expect(mail.html).toContain("assistente de configuração");
   });
 
   test("sample catalog covers parent and staff emails", () => {

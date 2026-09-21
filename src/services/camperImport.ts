@@ -492,6 +492,8 @@ export async function resolveCategoryValues(field: "bed" | "allergies" | "drugAl
   const matches = await bestImportMatches(`opção da categoria ${cat.name}`, unresolved, candidates, signal);
   for (const canonical of unresolved) {
     const match = matches[canonical];
+    // only the generative fallback can answer "not an item at all" (id+createName null);
+    // a Jev `none` comes back as createName=canonical and is created below
     if (match && !match.id && !match.createName) { result.set(canonical, null); continue; }
     let id = match?.id ?? deterministicMatch(match?.createName || canonical, cat.options.map((o) => ({ id: o.id, label: o.label })));
     if (!id) {

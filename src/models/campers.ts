@@ -54,7 +54,7 @@ function toCamper(doc: Record<string, unknown> | null): Camper | null {
     busReturnCheckin: toCheckin(doc.busReturnCheckin),
     parentEditedAt: (doc.parentEditedAt as Date) ?? null,
     importId: (doc.importId as string) ?? null,
-    aiReviewStatus: (["pending", "processing", "reviewed", "error"] as CamperAiReviewStatus[]).includes(doc.aiReviewStatus as CamperAiReviewStatus) ? (doc.aiReviewStatus as CamperAiReviewStatus) : null,
+    aiReviewStatus: (["pending", "processing", "structured", "reviewed", "error"] as CamperAiReviewStatus[]).includes(doc.aiReviewStatus as CamperAiReviewStatus) ? (doc.aiReviewStatus as CamperAiReviewStatus) : null,
     aiReviewError: s("aiReviewError"),
     aiReviewStartedAt: (doc.aiReviewStartedAt as Date) ?? null,
     aiReviewFinishedAt: (doc.aiReviewFinishedAt as Date) ?? null,
@@ -230,14 +230,36 @@ export async function listCamperChanges(camperId: string): Promise<CamperChangeL
   return docs.map((d) => ({ ...(d as unknown as CamperChangeLog), _id: (d._id as ObjectId).toString() }));
 }
 
-/** Claims the next imported campers for one worker batch: fresh pendings plus error retries whose cooldown expired. */
+/**
+ * Phase 1 claim — the fast Jev structuring pass: fresh pendings plus error
+ * retries whose cooldown expired. Records whose structure pass already
+ * succeeded are skipped (the cleanup claim takes those).
+ */
 export async function claimCampersForAiReview(limit = 15): Promise<Camper[]> {
   const db = await getDb();
   const out: Camper[] = [];
   const now = new Date();
   for (let i = 0; i < limit; i++) {
     const doc = await db.collection(COLLECTION).findOneAndUpdate(
-      { $or: [{ aiReviewStatus: "pending" }, aiReviewDueFilter(now)] },
+      { $or: [{ aiReviewStatus: "pending" }, aiReviewDueFilter(now)], aiReviewStructured: { $ne: true } },
+      { $set: { aiReviewStatus: "processing", aiReviewStartedAt: now, aiReviewError: "", aiReviewNextRetryAt: null, updatedAt: now } },
+      { sort: { createdAt: 1 }, returnDocument: "after" },
+    );
+    const camper = toCamper(doc as Record<string, unknown> | null);
+    if (!camper) break;
+    out.push(camper);
+  }
+  return out;
+}
+
+/** Phase 2 claim — the slow generative cleanup: records the Jev pass already structured (fresh, requeued or due retries). */
+export async function claimCampersForCleanup(limit = 15): Promise<Camper[]> {
+  const db = await getDb();
+  const out: Camper[] = [];
+  const now = new Date();
+  for (let i = 0; i < limit; i++) {
+    const doc = await db.collection(COLLECTION).findOneAndUpdate(
+      { aiReviewStructured: true, $or: [{ aiReviewStatus: { $in: ["pending", "structured"] } }, aiReviewDueFilter(now)] },
       { $set: { aiReviewStatus: "processing", aiReviewStartedAt: now, aiReviewError: "", aiReviewNextRetryAt: null, updatedAt: now } },
       { sort: { createdAt: 1 }, returnDocument: "after" },
     );
@@ -258,18 +280,27 @@ export async function requeueStaleAiReviews(staleMs = 10 * 60_000): Promise<numb
   return res.modifiedCount;
 }
 
-export async function finishCamperAiReview(id: string, patch: Partial<CamperData>, error?: string): Promise<Camper | null> {
-  const db = await getDb();
-  const now = new Date();
+/**
+ * Finishes phase 1 (Jev structuring): writes the structured health fields
+ * right away and marks the record "structured" so the UI can already show
+ * them while the slow cleanup pass is still pending. Never sets aiReviewFinishedAt.
+ */
+export async function finishCamperStructure(id: string, patch: Partial<CamperData>, error = ""): Promise<Camper | null> {
   if (!error) {
     return updateCamper(id, {
       ...patch,
-      aiReviewStatus: "reviewed",
+      aiReviewStatus: "structured",
+      aiReviewStructured: true,
       aiReviewError: "",
-      aiReviewFinishedAt: now,
       aiReviewNextRetryAt: null,
     });
   }
+  return failCamperReview(id, patch, error);
+}
+
+async function failCamperReview(id: string, patch: Partial<CamperData>, error: string): Promise<Camper | null> {
+  const db = await getDb();
+  const now = new Date();
   const after = await db.collection(COLLECTION).findOneAndUpdate(
     { _id: new ObjectId(id) },
     { $set: { ...patch, aiReviewStatus: "error", aiReviewError: error, aiReviewFinishedAt: now, updatedAt: now }, $inc: { aiReviewAttempts: 1 } },
@@ -284,6 +315,24 @@ export async function finishCamperAiReview(id: string, patch: Partial<CamperData
     { $set: { aiReviewNextRetryAt: attempts < AI_REVIEW_MAX_ATTEMPTS ? aiReviewRetryAt(attempts, now) : null, updatedAt: new Date() } },
   );
   return toCamper({ ...((after as unknown as Record<string, unknown>) ?? {}), aiReviewNextRetryAt: attempts < AI_REVIEW_MAX_ATTEMPTS ? aiReviewRetryAt(attempts, now) : null });
+}
+
+/**
+ * Finishes phase 2 (generative cleanup): the terminal "reviewed" state —
+ * medications, texts and recovered registration fields are all written.
+ * Errors keep `aiReviewStructured` set so the retry skips the Jev pass.
+ */
+export async function finishCamperAiReview(id: string, patch: Partial<CamperData>, error = ""): Promise<Camper | null> {
+  if (!error) {
+    return updateCamper(id, {
+      ...patch,
+      aiReviewStatus: "reviewed",
+      aiReviewError: "",
+      aiReviewFinishedAt: new Date(),
+      aiReviewNextRetryAt: null,
+    });
+  }
+  return failCamperReview(id, patch, error);
 }
 
 /** Every kid whose guardian phone is `phone` (a parent may have several kids enrolled). */

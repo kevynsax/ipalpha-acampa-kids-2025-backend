@@ -43,7 +43,7 @@ committed YAML or frontend `VITE_*` variables.
 | `SUPER_ADMIN_PHONE` | E.164 phone guaranteed the top-level `admin` login role at API startup |
 | `AI_BASE_URL` | `https://ai-models.kevyn.com.br/v1` |
 | `AI_API_KEY` | Secret `acampa-2025-secrets`, key `ai-api-key`; optional, empty disables AI |
-| `OPENROUTER_API_KEY` | Secret `acampa-2025-secrets`, key `openrouter-api-key`; optional. Empty disables Jev (icon suggestions + first-pass spreadsheet column mapping). Worker also needs it for import mapping |
+| `OPENROUTER_API_KEY` | Secret `acampa-2025-secrets`, key `openrouter-api-key`; optional. Empty disables Jev (icon suggestions + every closed import decision: column mapping, health bucketing, option/transport/team/leader matching, neurodivergent yes/no, name sex) — the generative fallback then does all of it, slower. Worker also needs it for health structuring |
 | `AI_TRANSCRIBE_URL` | `https://whisper.kevyn.com.br/v1`; empty hides voice input |
 | `AI_TRANSCRIBE_MODEL` | `whisper-large-v3-turbo` |
 | `AI_TRANSCRIBE_KEY` | Optional Secret key `ai-transcribe-key`; leave absent if the speech endpoint needs no authentication |

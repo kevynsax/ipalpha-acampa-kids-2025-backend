@@ -1,5 +1,7 @@
 import { createMiddleware } from "hono/factory";
+import { config } from "../config";
 import type { Role, SessionUser } from "../types";
+import { normalizeBrazilPhone } from "../utils";
 
 /**
  * Restricts a route to sessions whose ACTIVE role is one of `allowed`.
@@ -25,6 +27,19 @@ export function requireRole(...allowed: Role[]) {
 
 /** The real admin only: organizers list, categories, notifications, about. */
 export const requireAdmin = requireRole("admin");
+
+/**
+ * Deployment owner only (SUPER_ADMIN_PHONE): granting/removing the admin role
+ * itself. Regular admins can no longer create, edit or remove other admins.
+ * Must run after `requireAuth` (relies on `user`).
+ */
+export const requireSuperAdmin = createMiddleware<{ Variables: { user: SessionUser } }>(async (c, next) => {
+  const superPhone = config.superAdminPhone ? normalizeBrazilPhone(config.superAdminPhone) : null;
+  if (!superPhone || c.get("user").phone !== superPhone) {
+    return c.json({ error: { code: "FORBIDDEN", message: "Só o administrador da implantação pode gerenciar administradores." } }, 403);
+  }
+  await next();
+});
 
 type ScopeEnv = { Variables: { activeRole: Role; user: SessionUser } };
 

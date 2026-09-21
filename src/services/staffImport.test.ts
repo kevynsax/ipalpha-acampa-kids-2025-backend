@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { isIgnoredImportColumn } from "./camperImport";
-import { applyStaffCategoryChoices, applyStaffDelta, directStaffField, normalizeStaffFreeText, parseStaffDuty, parseStaffImportSex, parseStaffRoomRole, resolveStaffColumnTarget, staffDataFromPreview } from "./staffImport";
+import { applyStaffCategoryChoices, applyStaffDelta, directStaffField, isBlankStaffBedroom, normalizeStaffFreeText, parseStaffDuty, parseStaffImportSex, parseStaffRoomRole, resolveStaffColumnTarget, staffDataFromPreview } from "./staffImport";
 import type { StaffImportReviewItem } from "../types";
 
 const item = (patch: Partial<StaffImportReviewItem>): StaffImportReviewItem => ({ id:"r1",row:2,kind:"phone",field:"phone",memberName:"Ana",original:"",value:"",skip:false,resolved:false,...patch });
@@ -102,6 +102,13 @@ describe("staff import review delta",()=>{
     expect(isIgnoredImportColumn("id")).toBe(true);
     expect(isIgnoredImportColumn("room_id")).toBe(true);
     expect(isIgnoredImportColumn("bus_id")).toBe(true);
+  });
+  test("blank rooms do not need review",()=>{
+    expect(isBlankStaffBedroom("")).toBe(true);
+    expect(isBlankStaffBedroom("   ")).toBe(true);
+    expect(isBlankStaffBedroom("sem quarto")).toBe(true);
+    expect(isBlankStaffBedroom("n/a")).toBe(true);
+    expect(isBlankStaffBedroom("Quarto 12")).toBe(false);
   });
   test("never leaves the same imported phone on two rows",()=>{
     const rows=applyStaffDelta([{row:2,name:"Ana",phone:"+5511999999999"},{row:3,name:"Bia",phone:"+5511999999999"}],[],{});

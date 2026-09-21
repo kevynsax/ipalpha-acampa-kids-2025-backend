@@ -376,13 +376,14 @@ ai.post("/dedup-field", async (c) => {
  * POST /api/ai/guess-sex { name } → { sex: "F" | "M" | null }
  *
  * Background fill of the hidden sex field on the camper form, from the kid's
- * (Brazilian) first name. GLM 5.3 flash. Best-effort: any failure or a
- * disabled gateway returns `sex: null` so the form never blocks.
+ * (Brazilian) first name. Jev 1.13 narrow yes/no decisions (OpenRouter).
+ * Best-effort: any failure or a disabled gateway returns `sex: null` so the
+ * form never blocks.
  */
 ai.post("/guess-sex", async (c) => {
   const body = (await c.req.json().catch(() => null)) as { name?: unknown } | null;
   const name = typeof body?.name === "string" ? body.name.trim().slice(0, 100) : "";
-  if (!name || !config.ai.apiKey) return c.json({ sex: null });
+  if (!name || !config.ai.openRouterApiKey) return c.json({ sex: null });
   const r = await guessCamperSex(name, c.req.raw.signal);
   if (r.usage) void recordAiUsage({ at: new Date(), vendor: GUESS_SEX_MODEL.vendor, model: GUESS_SEX_MODEL.id, kind: "guess_sex", userId: c.get("userId"), ...r.usage, ok: true });
   return c.json({ sex: r.sex });

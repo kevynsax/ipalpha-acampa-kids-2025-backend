@@ -3,12 +3,13 @@ import { ObjectId } from "mongodb";
 import { config } from "../config";
 import { getDb } from "../db";
 import { requireAuth } from "../middleware/auth";
-import { requireAdmin } from "../middleware/roles";
+import { requireAdmin, requireSuperAdmin } from "../middleware/roles";
 import { ensureLoginAccount, listAdmins, loadAdminPhones } from "../models/users";
+import { handoverCamp } from "../services/campHandover";
 import { comteleEnabled, comteleSendSms } from "../services/comtele";
 import { publish } from "../services/realtime";
 import type { Role, SessionUser } from "../types";
-import { normalizeBrazilPhone } from "../utils";
+import { normalizeBrazilPhone, normalizeEmail } from "../utils";
 
 interface Env {
   Variables: {
@@ -47,7 +48,35 @@ admins.get("/", requireAuth, requireAdmin, async (c) => {
  * login account when needed) and, when `sendSms` is on, texts the person the
  * app link so they can log in right away. Does not put them on the team roster.
  */
-admins.post("/", requireAuth, requireAdmin, async (c) => {
+/** SUPER ADMIN: reset the camp and hand it to one new admin, forced through the wizard. */
+admins.post("/handover", requireAuth, requireAdmin, async (c) => {
+  const superPhone = superAdminPhone();
+  if (!superPhone || c.get("user").phone !== superPhone) {
+    return c.json({ error: { code: "FORBIDDEN", message: "Só o administrador da implantação pode passar o acampamento." } }, 403);
+  }
+
+  const body = await c.req.json<{ name?: string; phone?: string; email?: string; notify?: boolean }>().catch(() => null);
+  const name = (body?.name ?? "").trim();
+  const phone = body?.phone ? normalizeBrazilPhone(body.phone) : null;
+  const email = typeof body?.email === "string" ? normalizeEmail(body.email) : null;
+  if (!name) return c.json({ error: { code: "NAME_INVALID", message: "Informe o nome." } }, 400);
+  if (!phone) return c.json({ error: { code: "PHONE_INVALID", message: "Informe um celular brasileiro válido com DDD." } }, 400);
+  if (!email) return c.json({ error: { code: "EMAIL_INVALID", message: email === "" ? "Informe um e-mail válido." : "Informe o e-mail." } }, 400);
+  if (phone === superPhone) {
+    return c.json({ error: { code: "SUPER_ADMIN_LOCKED", message: "Esse celular é o da implantação. Escolha o admin do acampamento." } }, 400);
+  }
+
+  try {
+    const result = await handoverCamp({ superPhone, name, phone, email, notify: body?.notify !== false });
+    console.log(`🧹 handover by ${c.get("user").name} → ${result.admin.name} ${result.admin.phone}: users ${result.usersRemoved}`);
+    return c.json(result);
+  } catch (err) {
+    console.error("handover failed", err);
+    return c.json({ error: { code: "HANDOVER_FAILED", message: "Não foi possível limpar e criar o novo administrador." } }, 500);
+  }
+});
+
+admins.post("/", requireAuth, requireSuperAdmin, async (c) => {
   const body = await c.req.json<{ name?: string; phone?: string; sendSms?: boolean; locale?: string }>().catch(() => null);
   const name = (body?.name ?? "").trim();
   const phone = body?.phone ? normalizeBrazilPhone(body.phone) : null;
@@ -82,7 +111,7 @@ admins.post("/", requireAuth, requireAdmin, async (c) => {
  * (never from yourself, never from SUPER_ADMIN_PHONE). Other roles the
  * person holds (team, parent) are kept.
  */
-admins.delete("/:id", requireAuth, requireAdmin, async (c) => {
+admins.delete("/:id", requireAuth, requireSuperAdmin, async (c) => {
   const id = c.req.param("id");
   if (!ObjectId.isValid(id)) return c.json({ error: { code: "NOT_FOUND", message: "Conta não encontrada." } }, 404);
   if (id === c.get("userId")) return c.json({ error: { code: "SELF_FORBIDDEN", message: "Você não pode remover o próprio acesso de admin." } }, 400);

@@ -4,7 +4,7 @@ import { PARENT_FIELD_LABEL } from "../types";
 import { formatBrazilPhone } from "../utils";
 
 /** Paper-cut icons in `frontend/public/icons/` — same files the app uses. */
-export type MailIcon = "parent" | "staff" | "camper" | "bunk" | "transport" | "preparation" | "camera" | "health" | "notifications" | "badge" | "report" | "schedule";
+export type MailIcon = "parent" | "staff" | "camper" | "bunk" | "transport" | "preparation" | "camera" | "health" | "notifications" | "badge" | "report" | "schedule" | "wizard";
 
 function origin(): string {
   return config.publicOrigin;
@@ -282,6 +282,26 @@ function enrolBriefing(roles: string[]): string {
   return noteBox(brief[hero] ?? brief["staff-enrol"]);
 }
 
+export function adminInviteEmail(
+  admin: { name: string; phone: string },
+): { subject: string; html: string; text: string } {
+  const body = [
+    `<p style="margin:0 0 12px">Olá, <strong>${esc(firstName(admin.name))}</strong>.</p>`,
+    `<p style="margin:0 0 12px">Você agora administra o <strong>Acampa Kids</strong>. Na primeira vez que entrar, o assistente de configuração abre e te leva até o acampamento ficar pronto.</p>`,
+    factsHtml([{ label: "Entrar com o celular", value: admin.phone ? formatBrazilPhone(admin.phone) : "" }]),
+    `<p style="margin:16px 0 0;color:#668078;font-size:14px">O assistente importa a equipe e as crianças, escolhe o local, preenche a programação e ajusta as configurações. Dá para pular etapas e voltar quando quiser.</p>`,
+  ].join("");
+  return wrapEmail({
+    subject: "Você administra o Acampa Kids",
+    title: "Você é o admin",
+    icon: "wizard",
+    hero: "admin-invite",
+    bodyHtml: body,
+    cta: appCta("Entrar no app"),
+    preheader: "Na primeira vez, o assistente de configuração abre para montar o acampamento.",
+  });
+}
+
 export function staffWelcomeEmail(
   staff: Pick<Staff, "name" | "phone">,
   roles: string[],
@@ -517,6 +537,7 @@ export function sampleNotificationEmails(): SampleEmail[] {
   const parentPrep = parentPrepEmail(SAMPLE_PARENT.name, { title: "O que levar", emoji: "🎒", content: "<p>Roupa confortável, protetor solar e a Bíblia.</p>" }, true);
   const bus = busCheckinEmail(SAMPLE_KID, [{ title: "Coordenação", name: "João Silva", phone: "+5511988887777" }]);
   const staffWelcome = staffWelcomeEmail(SAMPLE_STAFF, []);
+  const adminInvite = adminInviteEmail(SAMPLE_STAFF);
   const enrol = (roles: string[]) => staffWelcomeEmail(SAMPLE_STAFF, roles);
   const instructions = instructionEmail(SAMPLE_STAFF.name, { title: "Regras do acampamento", emoji: "📖", content: "<p>Respeito, pontualidade e cuidado uns com os outros.</p>" }, true);
   const prep = prepEmail(SAMPLE_STAFF.name, { title: "Chegada na igreja", emoji: "📌", content: "<p>Esteja na igreja até 7h30. O ônibus sai às 8h.</p>" }, true);
@@ -557,6 +578,7 @@ export function sampleNotificationEmails(): SampleEmail[] {
     of("parent-welcome", "parent", "Boas-vindas aos pais", parentWelcome),
     of("parent-prep", "parent", "Preparação nova / alterada para os pais", parentPrep),
     of("bus-checkin", "parent", "Criança embarcou no ônibus", bus),
+    of("admin-invite", "staff", "Convite do administrador", adminInvite),
     of("staff-welcome", "staff", "Boas-vindas da equipe", staffWelcome),
     of("enrol-organizer", "staff", "Nova responsabilidade: organizador", enrol(["organizador (acesso de administração)"])),
     of("enrol-games", "staff", "Nova responsabilidade: jogos", enrol(["organizador dos jogos (programação e placar)"])),

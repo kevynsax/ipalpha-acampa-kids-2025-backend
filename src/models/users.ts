@@ -10,6 +10,7 @@ function toUser(doc: Record<string, unknown> | null): User | null {
     _id: (doc._id as ObjectId).toString(),
     name: doc.name as string,
     phone: doc.phone as string,
+    email: typeof doc.email === "string" && doc.email.trim() ? doc.email : null,
     roles: (doc.roles as User["roles"]) ?? [],
     locale: resolveLocale(doc.locale as string | undefined),
     createdAt: doc.createdAt as Date,
@@ -53,6 +54,32 @@ export async function resetParentPhotosNotice(): Promise<number> {
   const db = await getDb();
   const res = await db.collection("users").updateMany({ photosSmsSentAt: { $ne: null } }, { $set: { photosSmsSentAt: null } });
   return res.modifiedCount;
+}
+
+/** SUPER ADMIN handover: the new camp admin is this phone, with no leftover roles from a previous camp. */
+export async function replaceAdminAccount(name: string, phone: string, email: string): Promise<User> {
+  const db = await getDb();
+  const now = new Date();
+  const res = await db.collection("users").findOneAndUpdate(
+    { phone },
+    {
+      $set: {
+        name: titleCaseName(name) || name,
+        phone,
+        email,
+        roles: ["admin"],
+        locale: DEFAULT_LOCALE,
+        prepDone: [],
+        welcomeSentAt: null,
+        otp: null,
+        frozenUntil: null,
+        updatedAt: now,
+      },
+      $setOnInsert: { createdAt: now },
+    },
+    { upsert: true, returnDocument: "after" },
+  );
+  return toUser(res as Record<string, unknown>)!;
 }
 
 /**

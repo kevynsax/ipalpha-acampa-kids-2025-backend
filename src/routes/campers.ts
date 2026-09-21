@@ -610,7 +610,7 @@ campers.post("/", async (c) => {
   const bad = await caretakerConsistent(data.bedroom, data.caretakerId);
   if (bad) return fail(c, "CARETAKER_INVALID", bad, 409);
 
-  // girls/boys room wins; staff room / no room keeps the form's hidden GLM guess (or we guess here)
+  // girls/boys room wins; staff room / no room keeps the form's hidden Jev guess (or we guess here)
   const gender = await resolveWriteGender({
     name: data.name,
     bedroomId: data.bedroom,
@@ -662,8 +662,8 @@ campers.put("/:id", async (c) => {
   const nameChanged = result.patch.name !== undefined && result.patch.name !== existing.name;
   const sexTouched = result.patch.sex !== undefined;
   if (bedroomChanged || nameChanged || sexTouched || result.patch.probableGender !== undefined) {
-    // girls/boys room always wins. Form's hidden GLM guess is kept when present;
-    // a staff-room move or a rename without a guess asks GLM from the name.
+    // girls/boys room always wins. Form's hidden Jev guess is kept when present;
+    // a staff-room move or a rename without a guess asks Jev from the name.
     const gender = await resolveWriteGender({
       name,
       bedroomId: bedroom,

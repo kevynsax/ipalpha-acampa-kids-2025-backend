@@ -13,7 +13,7 @@ function toStaff(doc: Record<string, unknown> | null): Staff | null {
     _id: (doc._id as ObjectId).toString(),
     draft: doc.draft === true,
     importId: (doc.importId as string) ?? undefined,
-    aiReviewStatus: (["pending", "processing", "reviewed", "error"] as const).includes(doc.aiReviewStatus as never) ? doc.aiReviewStatus as Staff["aiReviewStatus"] : null,
+    aiReviewStatus: (["pending", "processing", "structured", "reviewed", "error"] as const).includes(doc.aiReviewStatus as never) ? doc.aiReviewStatus as Staff["aiReviewStatus"] : null,
     aiReviewError: (doc.aiReviewError as string) ?? "",
     aiReviewStartedAt: (doc.aiReviewStartedAt as Date) ?? null,
     aiReviewFinishedAt: (doc.aiReviewFinishedAt as Date) ?? null,
@@ -103,13 +103,14 @@ export async function updateStaff(id: string, patch: Partial<StaffData>): Promis
   return toStaff(res as Record<string, unknown> | null);
 }
 
+/** Phase 1 claim — the fast Jev structuring pass; skips records already structured. */
 export async function claimStaffForAiReview(limit: number): Promise<Staff[]> {
   const db = await getDb();
   const out: Staff[] = [];
   for (let i = 0; i < limit; i++) {
     const now = new Date();
     const doc = await db.collection(COLLECTION).findOneAndUpdate(
-      { $or: [{ aiReviewStatus: "pending" }, aiReviewDueFilter(now)] },
+      { $or: [{ aiReviewStatus: "pending" }, aiReviewDueFilter(now)], aiReviewStructured: { $ne: true } },
       { $set: { aiReviewStatus: "processing", aiReviewStartedAt: now, aiReviewError: "", aiReviewNextRetryAt: null, updatedAt: now } },
       { sort: { createdAt: 1 }, returnDocument: "after" },
     );
@@ -120,14 +121,41 @@ export async function claimStaffForAiReview(limit: number): Promise<Staff[]> {
   return out;
 }
 
-/** finishes one staff review; returns the failed-attempt count (for retry logs) */
-export async function finishStaffAiReview(id: string, patch: Partial<StaffData>, error = ""): Promise<number> {
+/** Phase 2 claim — the slow generative cleanup: records the Jev pass already structured (fresh, requeued or due retries). */
+export async function claimStaffForCleanup(limit: number): Promise<Staff[]> {
   const db = await getDb();
-  const now = new Date();
+  const out: Staff[] = [];
+  for (let i = 0; i < limit; i++) {
+    const now = new Date();
+    const doc = await db.collection(COLLECTION).findOneAndUpdate(
+      { aiReviewStructured: true, $or: [{ aiReviewStatus: { $in: ["pending", "structured"] } }, aiReviewDueFilter(now)] },
+      { $set: { aiReviewStatus: "processing", aiReviewStartedAt: now, aiReviewError: "", aiReviewNextRetryAt: null, updatedAt: now } },
+      { sort: { createdAt: 1 }, returnDocument: "after" },
+    );
+    const staff = toStaff(doc as Record<string, unknown> | null);
+    if (!staff) break;
+    out.push(staff);
+  }
+  return out;
+}
+
+/**
+ * Finishes phase 1 (Jev structuring): writes the structured health fields
+ * right away and marks the member "structured" while cleanup is pending.
+ * Returns the failed-attempt count on error (for retry logs).
+ */
+export async function finishStaffStructure(id: string, patch: Partial<StaffData>, error = ""): Promise<number> {
   if (!error) {
-    await db.collection(COLLECTION).updateOne({ _id: new ObjectId(id) }, { $set: { ...patch, aiReviewStatus: "reviewed", aiReviewError: "", aiReviewFinishedAt: now, aiReviewNextRetryAt: null, updatedAt: now } });
+    const db = await getDb();
+    await db.collection(COLLECTION).updateOne({ _id: new ObjectId(id) }, { $set: { ...patch, aiReviewStatus: "structured", aiReviewStructured: true, aiReviewError: "", aiReviewNextRetryAt: null, updatedAt: new Date() } });
     return 0;
   }
+  return failStaffReview(id, patch, error);
+}
+
+async function failStaffReview(id: string, patch: Partial<StaffData>, error: string): Promise<number> {
+  const db = await getDb();
+  const now = new Date();
   const after = await db.collection(COLLECTION).findOneAndUpdate(
     { _id: new ObjectId(id) },
     { $set: { ...patch, aiReviewStatus: "error", aiReviewError: error, aiReviewFinishedAt: now, updatedAt: now }, $inc: { aiReviewAttempts: 1 } },
@@ -141,6 +169,20 @@ export async function finishStaffAiReview(id: string, patch: Partial<StaffData>,
     { $set: { aiReviewNextRetryAt: attempts < AI_REVIEW_MAX_ATTEMPTS ? aiReviewRetryAt(attempts, now) : null, updatedAt: new Date() } },
   );
   return attempts;
+}
+
+/**
+ * Finishes phase 2 (generative cleanup): the terminal "reviewed" state.
+ * Errors keep `aiReviewStructured` set so the retry skips the Jev pass.
+ * Returns the failed-attempt count (for retry logs).
+ */
+export async function finishStaffAiReview(id: string, patch: Partial<StaffData>, error = ""): Promise<number> {
+  if (!error) {
+    const db = await getDb();
+    await db.collection(COLLECTION).updateOne({ _id: new ObjectId(id) }, { $set: { ...patch, aiReviewStatus: "reviewed", aiReviewError: "", aiReviewFinishedAt: new Date(), aiReviewNextRetryAt: null, updatedAt: new Date() } });
+    return 0;
+  }
+  return failStaffReview(id, patch, error);
 }
 
 export async function requeueStaleStaffAiReviews(staleMs = 15 * 60_000): Promise<number> {

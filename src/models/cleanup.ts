@@ -202,6 +202,17 @@ export async function resetCampSettings(): Promise<void> {
   );
 }
 
+/** SUPER ADMIN handover: drop every login except the phones in `keep`. Sessions go with them. */
+export async function wipeUsersExcept(keepPhones: readonly string[]): Promise<number> {
+  const db = await getDb();
+  const keep = [...new Set(keepPhones.filter(Boolean))];
+  const doomed = await db.collection("users").find(keep.length ? { phone: { $nin: keep } } : {}, { projection: { _id: 1 } }).toArray();
+  const ids = doomed.map((d) => String(d._id));
+  if (ids.length) await db.collection("sessions").deleteMany({ userId: { $in: ids } });
+  const { deletedCount } = await db.collection("users").deleteMany(keep.length ? { phone: { $nin: keep } } : {});
+  return deletedCount;
+}
+
 /** Every photo of the album. Returns the ids of the full-size files the caller must drop too. */
 export async function wipeGallery(): Promise<{ count: number; fileIds: string[] }> {
   const db = await getDb();

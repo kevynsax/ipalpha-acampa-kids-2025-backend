@@ -87,14 +87,16 @@ async function flush(): Promise<void> {
   }
 }
 
-/** targeted event, not a collection replace: one record's background review finished */
+/** targeted event, not a collection replace: one record's background review advanced */
 export type AiReviewedKind = "camper" | "staff";
-export type AiReviewedStatus = "reviewed" | "error";
+export type AiReviewedStatus = "structured" | "reviewed" | "error";
 
 /**
- * Tells every connected client that one record's background AI review reached
- * a terminal state. The payload carries only the record identity — clients
- * re-read what they need (or ignore it; unknown types are skipped).
+ * Tells every connected client about one record's background AI review:
+ * "structured" = the fast Jev pass wrote the structured health fields
+ * (cleanup still pending); "reviewed"/"error" are terminal. The payload
+ * carries only the record identity — clients re-read what they need
+ * (or ignore it; unknown types are skipped).
  */
 export function emitAiReviewed(kind: AiReviewedKind, id: string, status: AiReviewedStatus, attempts: number): void {
   if (clients.size === 0) return;

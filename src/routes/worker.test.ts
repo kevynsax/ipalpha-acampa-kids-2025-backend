@@ -25,4 +25,9 @@ describe("POST /reviewed", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
   });
+  test("accepts the early \"structured\" checkpoint", async () => {
+    const res = await worker.request("/reviewed", { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${SECRET}` }, body: JSON.stringify({ kind: "camper", id: "k1", status: "structured", attempts: 0 }) });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+  });
 });

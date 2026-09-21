@@ -20,6 +20,8 @@ export interface User {
   _id: string;
   name: string;
   phone: string; // E.164, e.g. +5511981234567 (always Brazilian mobile)
+  /** optional contact address; admins created by the handover keep it here */
+  email: string | null;
   /** the SAME person can hold multiple roles (e.g. parent + staff + admin) */
   roles: Role[];
   /** last device language seen at login — SMS and UI follow this */
@@ -219,10 +221,12 @@ export interface Staff {
   aiReviewAttempts?: number;
   /** when a failed review may be retried (cooldown); null when due now */
   aiReviewNextRetryAt?: Date | null;
+  /** true once the fast Jev pass already wrote the structured health fields; cleanup retries skip Jev */
+  aiReviewStructured?: boolean;
   name: string;
   /** "F" | "M" | null — from the room (girls/boys); never collected on the form */
   sex: CamperSex | null;
-  /** "F" | "M" | null — GLM guess on the name; internal, never shown; icon + ordering fallback when the room has no wing */
+  /** "F" | "M" | null — Jev guess on the name; internal, never shown; icon + ordering fallback when the room has no wing */
   probableGender: CamperSex | null;
   /** E.164 — null while the person hasn't registered a phone yet */
   phone: string | null;
@@ -343,7 +347,7 @@ export interface Camper {
   birthDate: string | null;
   /** "F" | "M" | null — from the room (girls/boys); never collected on the form */
   sex: CamperSex | null;
-  /** "F" | "M" | null — GLM guess on the name; internal, never shown; icon + ordering fallback when the room has no wing */
+  /** "F" | "M" | null — Jev guess on the name; internal, never shown; icon + ordering fallback when the room has no wing */
   probableGender: CamperSex | null;
   cpf: string;
   rg: string;
@@ -412,14 +416,16 @@ export interface Camper {
   aiReviewAttempts?: number;
   /** when a failed review may be retried (cooldown); null when due now */
   aiReviewNextRetryAt?: Date | null;
+  /** true once the fast Jev pass already wrote the structured health fields; cleanup retries skip Jev */
+  aiReviewStructured?: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
 
 export type CamperSex = "F" | "M";
 
-/** Background AI triage state for campers created by a spreadsheet import. */
-export type CamperAiReviewStatus = "pending" | "processing" | "reviewed" | "error";
+/** Background AI triage state for campers created by a spreadsheet import. "structured" = the fast Jev pass finished (health fields already updated); the slow cleanup pass is still pending. */
+export type CamperAiReviewStatus = "pending" | "processing" | "structured" | "reviewed" | "error";
 
 /** One reusable raw spreadsheet value → resolved system value mapping. */
 export interface CamperImportDictionaryEntry {
@@ -988,6 +994,11 @@ export interface Settings {
    * off, every score write is refused (SCORE_CLOSED).
    */
   scoreDraft: boolean;
+  /**
+   * Setup wizard LOCK: after an admin login the assistant takes over until
+   * they finish it or leave it. While on, the settings gear is blocked.
+   */
+  wizardMode: boolean;
   /**
    * The PHOTO ALBUM is visible to the camp. While false only the photographers
    * (and the admin / organizers) see the Fotos tab's pictures; flipping it on

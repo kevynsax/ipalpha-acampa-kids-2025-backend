@@ -11,7 +11,7 @@ import { STAFF_CATEGORY_KEYS, type CamperImportDictionaryEntry, type CamperSex, 
 import { titleCaseName } from "../utils";
 import { resolveGender, sexFromBedroomId } from "./camperSex";
 import { classifyImportItems, dedupeImportValues, guessIndividualNamesSex, mapImportColumns, SPLIT_CATEGORY_FIELDS } from "./importAi";
-import { concatOtherColumns, importPhone, isEmptyCategoryValue, isIgnoredImportColumn, narrativeOnlyAtoms, normalizeImportValue, parseBuiltInDate, parseImportSex, parseSpreadsheet, resolveBedroom, resolveCategoryValues, resolveTeam, resolveTransport, sourceMap, splitCategoryText, validEmail, valueOf, type ImportLookups } from "./camperImport";
+import { concatOtherColumns, IMPORT_ID_VALUE_RE, importPhone, isEmptyCategoryValue, isIgnoredImportColumn, narrativeOnlyAtoms, normalizeImportValue, parseBuiltInDate, parseImportSex, parseSpreadsheet, resolveBedroom, resolveCategoryValues, resolveTeam, resolveTransport, sourceMap, splitCategoryText, validEmail, valueOf, type ImportLookups } from "./camperImport";
 
 export const STAFF_IMPORT_FIELDS = [
   { key: "name", label: "Nome", aliases: ["nome completo", "quem vai servir", "voluntario", "voluntário", "tio", "tia"], required: true },
@@ -93,6 +93,12 @@ export function parseStaffRoomRole(raw: string): "caretaker" | "helper" {
 export function normalizeStaffFreeText(raw:string):string{return raw.trim();}
 /** Staff spreadsheets accept only explicit sex words; guesses are handled separately. */
 export function parseStaffImportSex(raw:string):CamperSex|null{return parseImportSex(raw);}
+/** Empty / "sem quarto" cells stay unassigned; no review. */
+export function isBlankStaffBedroom(raw:string):boolean{
+ const n=normalizeImportValue(raw);
+ if(!n||IMPORT_ID_VALUE_RE.test(raw.trim()))return true;
+ return ["n","na","n a","nao","nada","nenhum","nenhuma","sem","sem quarto","sem alojamento","nenhum quarto","nenhum alojamento","inexistente"].includes(n);
+}
 const review = (kind: StaffImportReviewItem["kind"], row: number, memberName: string, original: string, extra: Partial<StaffImportReviewItem> = {}): StaffImportReviewItem => ({ id: randomUUID(), row, kind, field: kind, memberName, original, value: "", skip: false, resolved: false, ...extra });
 
 export interface StaffImportAnalysis { columns: CamperImportColumn[]; dictionaries: CamperImportDictionaryEntry[]; reviews: StaffImportReviewItem[]; preview: Record<string, unknown>[]; skipped: Record<string, unknown>[]; createdItems: CamperImportCreatedItem[]; status: "needs_mapping" | "review" | "ready"; panicMessage: string; }
@@ -118,8 +124,8 @@ export async function analyzeStaffImport(input: { data: Uint8Array; fileName: st
   const deduped = Object.fromEntries(dedupPairs) as Record<string, Record<string,string|string[]>>; const resolution = new Map<string, string | null>();
   report("dedupe", 36);
   const atomsOf = (f: string, raw: string): string[] => { const d = deduped[f]?.[raw]; if (d === undefined) return isSplitField(f) ? splitCategoryText(raw) : raw ? [raw] : []; return Array.isArray(d) ? d : d ? [d] : []; };
-  const unique = (f: typeof fields[number]) => [...new Set(grouped[f].flatMap((r) => atomsOf(f, r)))];
-  const namesByRoom = new Map<string,string[]>(); for (const row of parsed.rows) { const raw = valueOf(row,sources,"bedroom"); if (raw) { const c = String(deduped.bedroom?.[raw] ?? raw); namesByRoom.set(c,[...(namesByRoom.get(c)??[]),valueOf(row,sources,"name")]); } }
+  const unique = (f: typeof fields[number]) => [...new Set(grouped[f].flatMap((r) => atomsOf(f, r)))].filter((v)=>f!=="bedroom"||!isBlankStaffBedroom(v));
+  const namesByRoom = new Map<string,string[]>(); for (const row of parsed.rows) { const raw = valueOf(row,sources,"bedroom"); if (raw&&!isBlankStaffBedroom(raw)) { const c = String(deduped.bedroom?.[raw] ?? raw); namesByRoom.set(c,[...(namesByRoom.get(c)??[]),valueOf(row,sources,"name")]); } }
   const tasks: Promise<void>[] = [];
   let crossingTotal = 0, crossingDone = 0;
   const track = (key: string, task: Promise<void>) => { crossingTotal++; return task.finally(() => { crossingDone++; report(key, 50 + (crossingDone / Math.max(crossingTotal, 1)) * 36); }); };
@@ -157,7 +163,7 @@ export async function analyzeStaffImport(input: { data: Uint8Array; fileName: st
   for(let i=0;i<parsed.rows.length;i++){const phone=importPhone(valueOf(parsed.rows[i],sources,"phone"));if(phone)phoneRows.set(phone,[...(phoneRows.get(phone)??[]),i+2]);}
   for (let i=0;i<parsed.rows.length;i++) { const row=parsed.rows[i], line=i+2, name=titleCaseName(valueOf(row,sources,"name")); if(!name) continue; const rawPhone=valueOf(row,sources,"phone"), phone=importPhone(rawPhone); const phoneMatch=phone?staff.find((s)=>s.phone===phone):null; let existing=phoneMatch??null; const repeatedLines=phone?phoneRows.get(phone)??[]:[]; const ambiguous=repeatedLines.length>1;
     if(!phone) reviews.push(review("phone",line,name,rawPhone,{context:[valueOf(row,sources,"team"),valueOf(row,sources,"bedroom")].filter(Boolean).join(" · ")}));
-    const bedroomRaw=valueOf(row,sources,"bedroom"), bedroom=bedroomRaw?get("bedroom",bedroomRaw)??null:null; const room=bedroom?bedrooms.find((b)=>b._id===bedroom):null; const sex:CamperSex|null=room?.group==="girls"?"F":room?.group==="boys"?"M":null, explicitGender=parseStaffImportSex(valueOf(row,sources,"probableGender")), probableGender=explicitGender??guesses.get(normalizeImportValue(name.split(" ")[0]))??null; if(!bedroom&&bedroomRaw) reviews.push(review("bedroom",line,name,"",{context:[phone,valueOf(row,sources,"team"),valueOf(row,sources,"transportation")].filter(Boolean).join(" · ")}));
+    const bedroomRaw=valueOf(row,sources,"bedroom"), bedroom=bedroomRaw&&!isBlankStaffBedroom(bedroomRaw)?get("bedroom",bedroomRaw)??null:null; const room=bedroom?bedrooms.find((b)=>b._id===bedroom):null; const sex:CamperSex|null=room?.group==="girls"?"F":room?.group==="boys"?"M":null, explicitGender=parseStaffImportSex(valueOf(row,sources,"probableGender")), probableGender=explicitGender??guesses.get(normalizeImportValue(name.split(" ")[0]))??null; if(!bedroom&&bedroomRaw&&!isBlankStaffBedroom(bedroomRaw)) reviews.push(review("bedroom",line,name,bedroomRaw,{context:[phone,valueOf(row,sources,"team"),valueOf(row,sources,"transportation")].filter(Boolean).join(" · ")}));
     const hasRoomRole=sources.has("roomRole"), roleRaw=hasRoomRole?valueOf(row,sources,"roomRole"):"", roomRole=parseStaffRoomRole(roleRaw); if(hasRoomRole&&roleRaw&&roomRole==="caretaker") reviews.push(review("roomRole",line,name,roleRaw,{value:roomRole,resolved:true})); const activeRaw=valueOf(row,sources,"active"), active=bool(activeRaw,true); if(activeRaw&&!active) reviews.push(review("inactive",line,name,activeRaw,{value:"false",resolved:true}));
     const health=healthOf(row), categoryNotesById:Record<string,string[]>={};
     const remember=(ids:string[],label:string,raw:string)=>{if(!raw)return;const note=`${label}: ${raw}.`;for(const id of ids){const notes=categoryNotesById[id]??[];if(!notes.includes(note))notes.push(note);categoryNotesById[id]=notes;}};

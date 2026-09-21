@@ -22,14 +22,14 @@ export async function sexFromBedroomId(bedroomId: string | null | undefined): Pr
 export interface ResolvedGender {
   /** from the bedroom wing, else the requested value; the room never writes a guess here */
   sex: CamperSex | null;
-  /** the requested value, else a GLM guess on the name; internal, never shown */
+  /** the requested value, else a Jev guess on the name; internal, never shown */
   probableGender: CamperSex | null;
 }
 
 /**
  * Bedroom wing wins for `sex`. `probableGender` keeps the requested value
- * (the form's hidden GLM guess) and, when the room has no wing and
- * `guessIfMissing`, asks GLM 5.3 flash from the name.
+ * (the form's hidden Jev guess) and, when the room has no wing and
+ * `guessIfMissing`, asks Jev from the name.
  */
 export async function resolveGender(opts: {
   name: string;
@@ -37,7 +37,7 @@ export async function resolveGender(opts: {
   /** already-known wing — skip the bedroom lookup (used right after a group change) */
   group?: BedroomGroup | null;
   requested: CamperSex | null | undefined;
-  /** when the room has no sex and the form didn't send one, ask GLM from the name */
+  /** when the room has no sex and the form didn't send one, ask Jev from the name */
   guessIfMissing?: boolean;
   signal?: AbortSignal;
   userId?: string;
@@ -60,7 +60,7 @@ const validSex = (v: CamperSex | null | undefined): CamperSex | null => (v === "
 /**
  * Shared write path (POST / PUT of campers and staff): decides the stored
  * `sex` (room wins, else the sent value) and `probableGender` (sent value,
- * else a GLM guess when the name or room changed and the room says nothing).
+ * else a Jev guess when the name or room changed and the room says nothing).
  * Untouched records keep both existing values without spending model calls.
  */
 export async function resolveWriteGender(opts: {
