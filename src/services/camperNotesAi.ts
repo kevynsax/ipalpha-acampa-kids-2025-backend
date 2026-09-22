@@ -166,7 +166,7 @@ interface OptionLabels {
  * Whose record is being sorted — decides which fields exist and where the
  * leftovers go:
  *   "camper" — admin form of a kid: every field; leftovers → generalNotes.
- *   "parent" — the parent's "Pontos de atenção" dialog: the kid's medical block
+ *   "parent" — the parent's "Informações de saúde" dialog: the kid's medical block
  *              only (no room preference, emergency contact or neurodivergent
  *              flag — the parent can't edit those, so such facts stay in
  *              generalNotes for the organization to move); leftovers → generalNotes.

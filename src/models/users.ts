@@ -3,9 +3,11 @@ import { getDb } from "../db";
 import { DEFAULT_LOCALE, resolveLocale, type Locale } from "../i18n";
 import type { PublicUser, Role, User } from "../types";
 import { titleCaseName } from "../utils";
+import { claimUserPhotosNotice, claimUserWelcome, listUserCampStates, resetUserPhotosNotice, setUserPrepDoneState, stateOrEmpty, type UserCampState } from "./userCampState";
 
-function toUser(doc: Record<string, unknown> | null): User | null {
+function toUser(doc: Record<string, unknown> | null, state?: UserCampState | null): User | null {
   if (!doc) return null;
+  const marks = stateOrEmpty(state);
   return {
     _id: (doc._id as ObjectId).toString(),
     name: doc.name as string,
@@ -17,43 +19,37 @@ function toUser(doc: Record<string, unknown> | null): User | null {
     updatedAt: doc.updatedAt as Date,
     otp: doc.otp as User["otp"],
     frozenUntil: doc.frozenUntil as Date | undefined,
-    prepDone: (doc.prepDone as string[]) ?? [],
-    welcomeSentAt: (doc.welcomeSentAt as Date) ?? null,
+    prepDone: marks.prepDone,
+    welcomeSentAt: marks.welcomeSentAt,
   };
 }
 
-/** Every account holding the parent role. */
+/** Every account holding the parent role, with this camp's prep/welcome marks merged in. */
 export async function listParents(): Promise<User[]> {
   const db = await getDb();
-  const docs = await db.collection("users").find({ roles: "parent" }).sort({ name: 1 }).toArray();
-  return docs.map((d) => toUser(d as Record<string, unknown>)!);
+  const docs = (await db.collection("users").find({ roles: "parent" }).sort({ name: 1 }).toArray()) as Record<string, unknown>[];
+  const states = await listUserCampStates(docs.map((d) => (d._id as ObjectId).toString()));
+  return docs.map((d) => toUser(d, states.get((d._id as ObjectId).toString()))!);
 }
 
-/** Marks a parent's welcome SMS as sent — atomically, only if NOT sent yet. True when this call won. */
+/** Marks a parent's welcome SMS as sent for the current camp — atomically, only if NOT sent yet. True when this call won. */
 export async function claimParentWelcome(id: string): Promise<boolean> {
-  const db = await getDb();
-  const res = await db.collection("users").updateOne({ _id: new ObjectId(id), $or: [{ welcomeSentAt: null }, { welcomeSentAt: { $exists: false } }] }, { $set: { welcomeSentAt: new Date() } });
-  return res.modifiedCount === 1;
+  return claimUserWelcome(id);
 }
 
 /**
- * Marks the "there are photos in the app" SMS as sent to this parent —
- * atomically, only if it never went out. Each responsible hears about the
- * album ONCE per camp, however many batches the photographer publishes.
+ * Marks the "there are photos in the app" SMS as sent to this parent for the
+ * current camp — atomically, only if it never went out. Each responsible
+ * hears about the album ONCE per camp, however many batches the photographer
+ * publishes.
  */
 export async function claimParentPhotosNotice(id: string): Promise<boolean> {
-  const db = await getDb();
-  const res = await db
-    .collection("users")
-    .updateOne({ _id: new ObjectId(id), $or: [{ photosSmsSentAt: null }, { photosSmsSentAt: { $exists: false } }] }, { $set: { photosSmsSentAt: new Date() } });
-  return res.modifiedCount === 1;
+  return claimUserPhotosNotice(id);
 }
 
-/** Clears the album notice stamp on every parent (a new camp starts). */
+/** Clears the album notice stamp on every parent of the current camp (a new camp starts). */
 export async function resetParentPhotosNotice(): Promise<number> {
-  const db = await getDb();
-  const res = await db.collection("users").updateMany({ photosSmsSentAt: { $ne: null } }, { $set: { photosSmsSentAt: null } });
-  return res.modifiedCount;
+  return resetUserPhotosNotice();
 }
 
 /** SUPER ADMIN handover: the new camp admin is this phone, with no leftover roles from a previous camp. */
@@ -69,8 +65,6 @@ export async function replaceAdminAccount(name: string, phone: string, email: st
         email,
         roles: ["admin"],
         locale: DEFAULT_LOCALE,
-        prepDone: [],
-        welcomeSentAt: null,
         otp: null,
         frozenUntil: null,
         updatedAt: now,
@@ -98,8 +92,6 @@ export async function ensureLoginAccount(name: string, phone: string, role: Role
         name: titleCaseName(name) || name,
         phone,
         locale: DEFAULT_LOCALE,
-        prepDone: [],
-        welcomeSentAt: null,
         createdAt: now,
       },
       $addToSet: { roles: role },
@@ -136,15 +128,21 @@ export async function ensureRosterLogins(): Promise<{ staffPhones: number; staff
 /** A person is unique by phone — they may hold several roles at once. */
 export async function findByPhone(phone: string): Promise<User | null> {
   const db = await getDb();
-  return toUser(await db.collection("users").findOne({ phone }));
+  const doc = await db.collection("users").findOne({ phone });
+  if (!doc) return null;
+  const { findUserCampState } = await import("./userCampState");
+  return toUser(doc, await findUserCampState(doc._id.toString()));
 }
 
 export async function findById(id: string): Promise<User | null> {
   const db = await getDb();
-  return toUser(await db.collection("users").findOne({ _id: new ObjectId(id) }));
+  const doc = await db.collection("users").findOne({ _id: new ObjectId(id) });
+  if (!doc) return null;
+  const { findUserCampState } = await import("./userCampState");
+  return toUser(doc, await findUserCampState(id));
 }
 
-/** Every account holding the admin role (name + phone). */
+/** Every account holding the admin role (name + phone) — admins have no per-camp marks, so no state lookup is needed. */
 export async function listAdmins(): Promise<User[]> {
   const db = await getDb();
   const docs = await db.collection("users").find({ roles: "admin" }).sort({ name: 1 }).toArray();
@@ -170,18 +168,12 @@ export function isAdminPhone(phone: string | null): boolean {
   return phone !== null && ADMIN_PHONES.has(phone);
 }
 
-/** Ticks / unticks one Preparação item for a PARENT (their checklist lives on the user record). */
+/** Ticks / unticks one Preparação item for a PARENT (their checklist lives on their `userCampState` row for the current camp). */
 export async function setUserPrepDone(id: string, key: string, done: boolean): Promise<User | null> {
   if (!ObjectId.isValid(id)) return null;
   const db = await getDb();
-  const res = await db
-    .collection("users")
-    .findOneAndUpdate(
-      { _id: new ObjectId(id) },
-      (done ? { $addToSet: { prepDone: key }, $set: { updatedAt: new Date() } } : { $pull: { prepDone: key }, $set: { updatedAt: new Date() } }) as never,
-      { returnDocument: "after" },
-    );
-  return toUser(res as Record<string, unknown> | null);
+  const [doc, state] = await Promise.all([db.collection("users").findOne({ _id: new ObjectId(id) }), setUserPrepDoneState(id, key, done)]);
+  return toUser(doc, state);
 }
 
 export async function updateUser(id: string, patch: Record<string, unknown>): Promise<void> {
@@ -212,4 +204,6 @@ export async function ensureIndexes(): Promise<void> {
 
   await db.collection("users").createIndex({ phone: 1 }, { unique: true });
   await db.collection("sessions").createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+  const { ensureUserCampStateIndexes } = await import("./userCampState");
+  await ensureUserCampStateIndexes();
 }

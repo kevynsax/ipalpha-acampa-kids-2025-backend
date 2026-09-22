@@ -131,6 +131,55 @@ kubectl -n ipalpha-kids rollout restart deploy/acampa-2025-backend
 - Check Settings → notification toggles and SMS redirect before real use. Do not
   send OTPs or enable broadcasts just to smoke-test a deployment.
 
+## Multi-year camps boot migration
+
+`migrateToCamps()` (`services/campMigration.ts`) runs once on every boot,
+right after `ensureCampsCollection()` and before the rest of the index setup
+(`index.ts`). It is idempotent — safe against an already-migrated database,
+and safe against a fresh one:
+
+1. **First camp.** If the `camps` collection is empty, inserts one `{ label:
+   "Acampa Kids <year>", year, active: true }` — `year` comes from the
+   earliest `schedule_events.date`, else today's year. A pre-existing
+   single-camp deployment becomes this camp's **active** year.
+2. **Stamp.** Every document in a SCOPED collection with no `campId` gets the
+   active camp's id (`updateMany({ campId: { $exists: false } }, { $set: {
+   campId } })`, per collection).
+3. **Settings.** The single `settings._id: "global"` document is copied to
+   `_id: <activeCampId>` (the old `"global"` document is left in place,
+   unused).
+4. **Legacy indexes.** Every SCOPED collection's index whose key does **not**
+   start with `campId` is dropped (`bedrooms.name`, `categories.key`,
+   `schedule_roles.name`, `staff.phone`, the `medicationDoses` scheduled-key
+   unique index…) — the `ensure*Indexes()` calls right after this recreate
+   them through the scoped `Db` wrapper as `{ campId, ... }`, so a second
+   camp never collides with the first on the old unique keys.
+5. **User marks.** `users.prepDone` / `welcomeSentAt` / `photosSmsSentAt`
+   move to `userCampState` rows for the first camp, then are unset from
+   `users`.
+
+Expect log lines like:
+
+```
+🏕️  camps: created the first camp — "Acampa Kids 2025"
+🏕️  camps: stamped campId on 148 "campers" document(s)
+🏕️  camps: copied settings.global → settings for the active camp
+🏕️  camps: dropped legacy index "bedrooms.name_1"
+🏕️  camps: moved prep/welcome marks of 42 user(s) to userCampState
+🏕️  active camp: "Acampa Kids 2025" (<id>)
+```
+
+A database already on multi-year camps just prints the last line — steps 1–5
+find nothing to do.
+
+### Upgrading an existing deployment
+
+**Take a backup first** (`bun run backup`, from `backend/`) — the migration
+touches every collection in the database. Then roll out the new image as
+usual; the migration runs automatically at boot, before the API accepts
+traffic. No manual step, no downtime beyond the normal rollout window (one
+replica, `Recreate` — see "Persistent data and upgrades" above).
+
 ## Verification
 
 ```bash

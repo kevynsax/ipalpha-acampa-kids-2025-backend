@@ -37,17 +37,44 @@
  *     renameField(b, "campers", "guardianPhone", "guardianPhones.0");
  *   },
  */
-import { Binary, ObjectId } from "mongodb";
+import { Binary, ObjectId, type Db } from "mongodb";
 import { inflateRawSync } from "node:zlib";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { join } from "node:path";
 import { config } from "../src/config";
-import { closeDb, getDb } from "../src/db";
+import { closeDb, rawDb } from "../src/db";
+import { SCOPED } from "../src/services/campScope";
 import pkg from "../package.json";
 
 /** the version of the backup strategy — mirror this in the app's "Sobre" page */
-export const BACKUP_VERSION = 1;
+export const BACKUP_VERSION = 2;
+
+const LEGACY_SETTINGS_ID = "global";
+
+/**
+ * v1 backups predate the multi-year camps feature: none of their documents
+ * carry a `campId`. `--camp` is a DUMP-time filter only (§scripts/backup.ts
+ * header) — restoring always targets the whole (already migrated) database,
+ * so every v1 file is stamped with ONE camp id: the target DB's active camp,
+ * created here exactly like the boot migration's step 1 if the DB has none yet.
+ */
+async function ensureCampForBackup(db: Db): Promise<string> {
+  const existingActive = await db.collection("camps").findOne({ active: true });
+  if (existingActive) return String(existingActive._id);
+  const [earliest] = await db.collection("schedule_events").find().sort({ date: 1 }).limit(1).toArray();
+  const date = earliest?.date as string | undefined;
+  const year = date && Number.isFinite(Number(date.slice(0, 4))) ? Number(date.slice(0, 4)) : new Date().getFullYear();
+  const { insertedId } = await db.collection("camps").insertOne({
+    label: `Acampa Kids ${year}`,
+    year,
+    active: true,
+    archivedAt: null,
+    createdAt: new Date(),
+    createdByUserId: null,
+  });
+  return insertedId.toString();
+}
 
 const META_SHEET = "_backup";
 const XLSX_NAME = "backup.xlsx";
@@ -71,10 +98,25 @@ type Doc = Record<string, unknown>;
 /**
  * Version n → n+1 transforms. Key = the OLD version; the function rewrites the
  * backup in place so it matches the NEXT version's shape. Restore walks these
- * from the file's version up to BACKUP_VERSION.
+ * from the file's version up to BACKUP_VERSION. Async because a migration may
+ * need to read the target database (e.g. v1 → v2 needs the active camp's id).
  */
-const MIGRATIONS: Record<number, (backup: Backup) => void> = {
-  // none yet — version 1 is the first format. See the example in the header.
+const MIGRATIONS: Record<number, (backup: Backup, db: Db) => void | Promise<void>> = {
+  // v1 (single camp, no `campId` anywhere) → v2 (multi-year camps)
+  1: async (backup, db) => {
+    const campId = await ensureCampForBackup(db);
+    for (const name of SCOPED) {
+      for (const doc of backup.collections[name] ?? []) if (doc.campId === undefined) doc.campId = campId;
+    }
+    const settingsDocs = backup.collections["settings"] ?? [];
+    if (settingsDocs.length && !settingsDocs.some((d) => String(d._id) === campId)) {
+      const legacy = settingsDocs.find((d) => d._id === LEGACY_SETTINGS_ID);
+      if (legacy) {
+        const { _id, ...rest } = legacy;
+        settingsDocs.push({ ...rest, _id: campId, campId });
+      }
+    }
+  },
 };
 
 // --------------------------------------------------------------- migrations --
@@ -100,7 +142,7 @@ function dropField(backup: Backup, collection: string, field: string): void {
   for (const doc of backup.collections[collection] ?? []) delete doc[field];
 }
 
-function migrate(backup: Backup): Backup {
+async function migrate(backup: Backup, db: Db): Promise<Backup> {
   if (backup.version > BACKUP_VERSION) {
     throw new Error(
       `backup format v${backup.version} is NEWER than this script (v${BACKUP_VERSION}) — restore it with the app version that made it.`,
@@ -110,7 +152,7 @@ function migrate(backup: Backup): Backup {
   while (v < BACKUP_VERSION) {
     const step = MIGRATIONS[v];
     if (!step) throw new Error(`no migration path from backup format v${v} to v${v + 1}.`);
-    step(backup);
+    await step(backup, db);
     backup.version = ++v;
   }
   return backup;
@@ -484,22 +526,24 @@ function backupFromSheets(sheets: Map<string, string[][]>): Backup {
 }
 
 // ----------------------------------------------------------------- commands --
-async function runBackup(): Promise<void> {
-  const db = await getDb();
+async function runBackup(camp?: string): Promise<void> {
+  const db = await rawDb();
   const names = (await db.listCollections().toArray()).map((c) => c.name).sort();
   const now = new Date();
   const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+  if (camp) console.log(`📎 filtering to camp ${camp} — SCOPED collections only carry this camp's documents; every global collection is dumped in full.`);
 
   const sheets: { name: string; rows: Cell[][] }[] = [
     {
       name: META_SHEET,
-      rows: [["campo", "valor"], ["backupVersion", BACKUP_VERSION], ["appVersion", pkg.version], ["createdAt", now.toISOString()], ["dbName", config.dbName], ["collections", names.join(", ")]],
+      rows: [["campo", "valor"], ["backupVersion", BACKUP_VERSION], ["appVersion", pkg.version], ["createdAt", now.toISOString()], ["dbName", config.dbName], ["collections", names.join(", ")], ["camp", camp ?? ""]],
     },
   ];
   const images = new Map<string, Uint8Array>();
 
   for (const name of names) {
-    const docs = (await db.collection(name).find().sort({ _id: 1 }).toArray()) as unknown as Doc[];
+    const filter = camp && SCOPED.has(name) ? { campId: camp } : {};
+    const docs = (await db.collection(name).find(filter).sort({ _id: 1 }).toArray()) as unknown as Doc[];
     if (name === "files") {
       // legacy deployments keep the bytes INSIDE Mongo — they travel in imagens.zip instead
       for (const doc of docs) {
@@ -543,19 +587,20 @@ function summarize(backup: Backup): string {
 }
 
 async function runList(zipPath: string): Promise<void> {
-  const backup = await loadBackup(zipPath);
+  const backup = await loadBackup(zipPath, await rawDb());
   console.log(summarize(backup));
 }
 
-async function loadBackup(zipPath: string): Promise<Backup> {
+async function loadBackup(zipPath: string, db: Db): Promise<Backup> {
   const entries = readZip(new Uint8Array(await readFile(zipPath)));
   const xlsxBuf = entries.get(XLSX_NAME) ?? [...entries.entries()].find(([name]) => name.endsWith(".xlsx"))?.[1];
   if (!xlsxBuf) throw new Error(`${zipPath} has no ${XLSX_NAME} inside.`);
-  return migrate(backupFromSheets(parseXlsx(xlsxBuf)));
+  return migrate(backupFromSheets(parseXlsx(xlsxBuf)), db);
 }
 
 async function runRestore(zipPath: string, opts: { withPhotos: boolean; yes: boolean }): Promise<void> {
-  const backup = await loadBackup(zipPath);
+  const db = await rawDb();
+  const backup = await loadBackup(zipPath, db);
   const entries = readZip(new Uint8Array(await readFile(zipPath)));
   const imagesBuf = entries.get(IMAGES_NAME);
   const images = imagesBuf ? readZip(imagesBuf) : new Map<string, Uint8Array>();
@@ -581,7 +626,6 @@ async function runRestore(zipPath: string, opts: { withPhotos: boolean; yes: boo
     }
   }
 
-  const db = await getDb();
   for (const [name, docs] of Object.entries(backup.collections)) {
     if (skipped.includes(name)) continue;
     if (name === "files" && !opts.withPhotos) {
@@ -609,7 +653,7 @@ async function runRestore(zipPath: string, opts: { withPhotos: boolean; yes: boo
   console.log("\n✅ restore concluído — reinicie o backend para recriar índices e agendamentos.");
 }
 
-async function insertChunks(db: Awaited<ReturnType<typeof getDb>>, name: string, docs: Doc[]): Promise<void> {
+async function insertChunks(db: Db, name: string, docs: Doc[]): Promise<void> {
   for (let i = 0; i < docs.length; i += INSERT_CHUNK) {
     await db.collection(name).insertMany(docs.slice(i, i + INSERT_CHUNK) as never[]);
   }
@@ -618,7 +662,13 @@ async function insertChunks(db: Awaited<ReturnType<typeof getDb>>, name: string,
 const pad = (n: number): string => String(n).padStart(2, "0");
 
 // --------------------------------------------------------------------- main --
-const [command, ...args] = process.argv.slice(2);
+const argv = process.argv.slice(2);
+const command = argv[0] === "restore" || argv[0] === "list" ? argv[0] : null;
+const args = command ? argv.slice(1) : argv;
+function flagValue(name: string): string | undefined {
+  const i = args.indexOf(name);
+  return i >= 0 ? args[i + 1] : undefined;
+}
 try {
   if (command === "restore") {
     const zipPath = args.find((a) => !a.startsWith("--"));
@@ -628,10 +678,10 @@ try {
     const zipPath = args[0];
     if (!zipPath) throw new Error("usage: bun run scripts/backup.ts list <arquivo.zip>");
     await runList(zipPath);
-  } else if (!command) {
-    await runBackup();
+  } else if (argv[0] && !argv[0].startsWith("--")) {
+    throw new Error(`unknown command "${argv[0]}" — use no arguments (backup, optionally --camp <id>), "list <zip>" or "restore <zip>".`);
   } else {
-    throw new Error(`unknown command "${command}" — use no arguments (backup), "list <zip>" or "restore <zip>".`);
+    await runBackup(flagValue("--camp"));
   }
 } catch (error) {
   console.error(`❌ ${error instanceof Error ? error.message : error}`);

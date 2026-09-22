@@ -1,6 +1,7 @@
 import type { WSContext } from "hono/ws";
 import type { CheckinWindow, Role } from "../types";
 import { todayInSaoPaulo } from "../utils";
+import { activeCampId, currentCampId, withCamp } from "./campContext";
 
 /**
  * Realtime hub: every logged-in client keeps a WebSocket open and receives
@@ -20,6 +21,8 @@ export interface RealtimeClient {
   userId: string;
   /** the person's phone — staff payloads are personalised (own record un-redacted) */
   phone: string;
+  /** the camp this session (and every payload it receives) is scoped to */
+  campId: string;
 }
 
 const clients = new Set<RealtimeClient>();
@@ -46,12 +49,21 @@ function safeSend(client: RealtimeClient, payload: string): void {
 
 // ── publish (debounced so a burst of writes becomes one message) ───────────
 
-const pending = new Set<Collection>();
+/** collections pending a push, per camp — a write in one camp never re-sends another camp's clients */
+const pending = new Map<string, Set<Collection>>();
 let timer: ReturnType<typeof setTimeout> | null = null;
 
-/** Call after any write: the named collections are re-read and pushed to everyone. */
+/** Call after any write: the named collections are re-read and pushed to the CURRENT camp's clients. */
 export function publish(...names: Collection[]): void {
-  for (const n of names) pending.add(n);
+  let campId: string;
+  try {
+    campId = currentCampId();
+  } catch {
+    return; // no active camp cached yet (boot hasn't finished, or an isolated test with no clients anyway) — nothing to publish
+  }
+  const set = pending.get(campId) ?? new Set<Collection>();
+  for (const n of names) set.add(n);
+  pending.set(campId, set);
   if (timer) return;
   timer = setTimeout(() => {
     timer = null;
@@ -60,30 +72,36 @@ export function publish(...names: Collection[]): void {
 }
 
 async function flush(): Promise<void> {
-  const names = [...pending];
+  const byCamp = new Map(pending);
   pending.clear();
-  if (names.length === 0 || clients.size === 0) return;
+  if (byCamp.size === 0 || clients.size === 0) return;
 
   // lazy import: snapshot.ts imports the routes (serializers) and the routes import publish()
   const { loadCollections, snapshotKey } = await import("./snapshot");
   const at = new Date().toISOString();
-  // one payload per distinct view (role, or role+person for staff)
-  const byKey = new Map<string, string | null>();
 
-  for (const client of clients) {
-    const viewer = { activeRole: client.role, phone: client.phone };
-    const key = snapshotKey(viewer);
-    if (!byKey.has(key)) {
-      try {
-        const data = await loadCollections(viewer, names);
-        byKey.set(key, Object.keys(data).length ? JSON.stringify({ type: "update", at, data }) : null);
-      } catch (err) {
-        console.error("realtime: failed to build update", err);
-        byKey.set(key, null);
+  for (const [campId, names] of byCamp) {
+    const campClients = [...clients].filter((c) => c.campId === campId);
+    if (campClients.length === 0 || names.size === 0) continue;
+    await withCamp(campId, async () => {
+      // one payload per distinct view (role, or role+person for staff)
+      const byKey = new Map<string, string | null>();
+      for (const client of campClients) {
+        const viewer = { activeRole: client.role, phone: client.phone };
+        const key = snapshotKey(viewer);
+        if (!byKey.has(key)) {
+          try {
+            const data = await loadCollections(viewer, [...names]);
+            byKey.set(key, Object.keys(data).length ? JSON.stringify({ type: "update", at, data }) : null);
+          } catch (err) {
+            console.error("realtime: failed to build update", err);
+            byKey.set(key, null);
+          }
+        }
+        const payload = byKey.get(key);
+        if (payload) safeSend(client, payload);
       }
-    }
-    const payload = byKey.get(key);
-    if (payload) safeSend(client, payload);
+    });
   }
 }
 
@@ -100,8 +118,9 @@ export type AiReviewedStatus = "structured" | "reviewed" | "error";
  */
 export function emitAiReviewed(kind: AiReviewedKind, id: string, status: AiReviewedStatus, attempts: number): void {
   if (clients.size === 0) return;
+  const campId = currentCampId();
   const payload = JSON.stringify({ type: "ai-review-done", at: new Date().toISOString(), data: { kind, id, status, attempts } });
-  for (const client of clients) safeSend(client, payload);
+  for (const client of clients) if (client.campId === campId) safeSend(client, payload);
 }
 
 // ── staff access window: evict the ordinary team when it closes ─────────────
@@ -113,35 +132,42 @@ export function emitAiReviewed(kind: AiReviewedKind, id: string, status: AiRevie
  * 4401, so the phone logs out and wipes its local copy at once.
  */
 export async function evictStaffOutsideWindow(): Promise<void> {
-  const [{ getSettings }, { findStaffByPhone }, { staffHasAccess }, { revokeUserSessions }] = await Promise.all([
-    import("../models/settings"),
+  const [{ findStaffByPhone }, { staffHasAccess }, { revokeUserSessions }, { staffAccessOpen }] = await Promise.all([
     import("../models/staff"),
     import("./scope"),
     import("./session"),
+    import("../models/settings"),
   ]);
-  const settings = await getSettings();
   const now = new Date();
-  const { staffAccessOpen } = await import("../models/settings");
-  for (const client of [...clients]) {
-    let name: string;
-    if (client.role === "parent") {
-      if (staffAccessOpen(settings.parentAccessWindow, now)) continue;
-      name = `parent ${client.phone}`;
-    } else {
-      if (client.role !== "staff" && client.role !== "health_staff") continue;
-      const me = await findStaffByPhone(client.phone);
-      if (!me || staffHasAccess(me._id, settings, now)) continue;
-      name = me.name;
-    }
-    await revokeUserSessions(client.userId);
-    try {
-      client.ws.send(JSON.stringify({ type: "error", code: "UNAUTHORIZED", message: "O período de acesso da equipe terminou." }));
-      client.ws.close(4401, "access window closed");
-    } catch {
-      /* already gone */
-    }
-    clients.delete(client);
-    console.log(`🚪 access window closed → logged out ${name}`);
+  const byCamp = new Map<string, RealtimeClient[]>();
+  for (const client of clients) byCamp.set(client.campId, [...(byCamp.get(client.campId) ?? []), client]);
+
+  for (const [campId, campClients] of byCamp) {
+    await withCamp(campId, async () => {
+      const { getSettings } = await import("../models/settings");
+      const settings = await getSettings();
+      for (const client of campClients) {
+        let name: string;
+        if (client.role === "parent") {
+          if (staffAccessOpen(settings.parentAccessWindow, now)) continue;
+          name = `parent ${client.phone}`;
+        } else {
+          if (client.role !== "staff" && client.role !== "health_staff") continue;
+          const me = await findStaffByPhone(client.phone);
+          if (!me || staffHasAccess(me._id, settings, now)) continue;
+          name = me.name;
+        }
+        await revokeUserSessions(client.userId);
+        try {
+          client.ws.send(JSON.stringify({ type: "error", code: "UNAUTHORIZED", message: "O período de acesso da equipe terminou." }));
+          client.ws.close(4401, "access window closed");
+        } catch {
+          /* already gone */
+        }
+        clients.delete(client);
+        console.log(`🚪 access window closed → logged out ${name}`);
+      }
+    });
   }
 }
 
@@ -169,6 +195,17 @@ export async function rearmWindows(): Promise<void> {
   scheduleCheckinWindow(s.checkinWindow, s.staffAccessWindow, pw, s.parentAccessWindow, s.busReturnWindow, s.scoreHideWindow);
 }
 
+/** Re-arms every timer of THIS module for the active camp — used at boot and (phase 3) whenever the active camp changes. */
+export async function rearmActiveCampTimers(): Promise<void> {
+  const campId = activeCampId();
+  await withCamp(campId, async () => {
+    const { getSettings } = await import("../models/settings");
+    await rearmWindows();
+    scheduleCheckinReminder((await getSettings()).checkinReminder.at);
+    scheduleBirthdayNotices();
+  });
+}
+
 export function scheduleCheckinWindow(w: CheckinWindow, staffAccess?: CheckinWindow, parents?: CheckinWindow, parentAccess?: CheckinWindow, busReturn?: CheckinWindow, scoreHide?: CheckinWindow): void {
   for (const t of edgeTimers) clearTimeout(t);
   edgeTimers = [];
@@ -179,10 +216,13 @@ export function scheduleCheckinWindow(w: CheckinWindow, staffAccess?: CheckinWin
     if (wait <= 0 || wait > MAX_TIMEOUT) continue;
     edgeTimers.push(
       setTimeout(() => {
-        console.log("⏰ check-in window edge reached → re-publishing scoped collections");
-        publish("campers", "staff", "bedrooms", "roles", "events", "scores", "settings");
-        void evictStaffOutsideWindow().catch((err) => console.error("realtime: evict failed", err));
-        void import("./notify").then((m) => Promise.all([m.syncWelcomes(), m.syncParentWelcomes()])); // a window may have just opened → welcome SMS
+        void withCamp(activeCampId(), async () => {
+          console.log("⏰ check-in window edge reached → re-publishing scoped collections");
+          publish("campers", "staff", "bedrooms", "roles", "events", "scores", "settings");
+          await evictStaffOutsideWindow().catch((err) => console.error("realtime: evict failed", err));
+          const m = await import("./notify");
+          await Promise.all([m.syncWelcomes(), m.syncParentWelcomes()]); // a window may have just opened → welcome SMS
+        });
       }, wait),
     );
   }
@@ -201,7 +241,7 @@ export function scheduleCheckinReminder(at: Date | null): void {
   reminderTimer = setTimeout(() => {
     reminderTimer = null;
     console.log("⏰ check-in reminder instant reached");
-    void import("./notify").then((m) => m.sendCheckinReminder());
+    void withCamp(activeCampId(), async () => (await import("./notify")).sendCheckinReminder());
   }, Math.max(0, wait));
 }
 
@@ -217,13 +257,20 @@ export function scheduleBirthdayNotices(): void {
     birthdayTimer = setTimeout(() => {
       birthdayTimer = null;
       console.log("⏰ 07:45 → birthday notices");
-      void m.sendBirthdayNotices().finally(scheduleBirthdayNotices);
+      void withCamp(activeCampId(), () => m.sendBirthdayNotices()).finally(scheduleBirthdayNotices);
     }, Math.min(due.getTime() - now.getTime() + 500, MAX_TIMEOUT));
   });
 }
 
 // ── safety net: an instant further than setTimeout's limit (~24 days) can't be armed, so re-check hourly
-setInterval(() => void import("./notify").then((m) => Promise.all([m.syncWelcomes(), m.syncParentWelcomes(), m.sendCheckinReminder(), m.sendBirthdayNotices()])), 60 * 60_000);
+setInterval(
+  () =>
+    void withCamp(activeCampId(), async () => {
+      const m = await import("./notify");
+      await Promise.all([m.syncWelcomes(), m.syncParentWelcomes(), m.sendCheckinReminder(), m.sendBirthdayNotices()]);
+    }),
+  60 * 60_000,
+);
 
 // ── heartbeat (lets phones notice a dead connection and reconnect) ─────────
 

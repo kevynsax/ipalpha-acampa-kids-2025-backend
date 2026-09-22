@@ -18,6 +18,7 @@ interface Env {
     sessionId: string;
     activeRole: Role;
     user: SessionUser;
+    campId: string;
   };
 }
 

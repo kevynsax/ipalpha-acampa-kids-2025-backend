@@ -712,7 +712,7 @@ carries details — the app is the source of truth:
 | `occurrences` | an occurrence is registered (`POST /api/occurrences`, by an admin or the medical team) | every admin account with a phone, except the one who registered it — names who registered and who is involved (never the description). Sent at once; admins are not gated by the team access window |
 | `busCheckin` | a kid's BUS check-in is recorded (`POST /api/campers/:id/checkin/bus`) | the kid's guardian — *"a Ana está a caminho de um fim de semana incrível para aprender sobre Jesus! Aproveite o fim de semana livre: vamos cuidar muito bem dela."* (gendered by `Camper.sex`, falling back to `Camper.probableGender`). Sent at once; undo sends nothing |
 | `parentWelcome` | the parents' access window (`settings.parentAccessWindow`) is open — checked at boot, at the window edges, when the window / toggle is edited, hourly | every parent account with a kid and a phone, ONCE ever (`users.welcomeSentAt`, atomic claim) — *"a Ana está inscrita no Acampa Kids! Acompanhe tudo pelo app. Entre com o celular … em <app>"*. **Off by default.** Switching a welcome toggle on (this one or `enrolments`) texts everyone pending at once — the admin UI previews the count via `GET /api/settings/welcome-preview` and asks first |
-| `parentEdits` | a parent edited their kid's "Pontos de atenção" (`PUT /api/campers/:id/parent`) | medical field changed → medical team + every admin + the kid's caretaker; observations only → the caretaker. Sent at once |
+| `parentEdits` | a parent edited their kid's "Informações de saúde" (`PUT /api/campers/:id/parent`) | medical field changed → medical team + every admin + the kid's caretaker; observations only → the caretaker. Sent at once |
 | `checkinReminder` | the instant `settings.checkinReminder.at` is reached (timer re-armed on every settings write and at boot, hourly safety net) | every active team member with a phone who has no check-in yet — *"chegou a hora do seu check-in!"*. **Nothing goes out while the date is unset**; sent ONCE per date (atomic claim on `sentAt`), picking a new date re-arms it. Not gated by the team access window |
 
 Rules: only staff with a phone are texted; the notifier diffs BEFORE/AFTER
@@ -732,3 +732,180 @@ is appended to the message.
 - The login lands on the highest-privilege available profile and the session
   stores it as the active role (JWT + session doc); the switcher
   (`POST /api/auth/role`) accepts nothing outside that same list.
+
+## Multi-year camps
+
+One MongoDB database holds every year's data. Every camp-owned document
+carries a `campId`; the `camps` collection is the registry, with exactly one
+`active: true` document at a time.
+
+**Global (no `campId`)**:
+
+| Collection | Why |
+|---|---|
+| `users` | admin / super-admin logins are deployment-wide; parent and team accounts are one-per-phone, and their profile is derived per camp (`availableRolesOf`), so the same phone is a parent in 2025 and nothing in 2026 with no extra data |
+| `sessions` | belongs to exactly one camp by definition — carries `campId` as a plain field instead of being filtered by it |
+| `camps` | the registry itself |
+| `seeds`, `camperImportDictionary` | the wizard's templates and the AI/import column-matching cache — reused every year |
+| `files` | image bytes on disk under a global, unguessable id, served by the public sessionless `GET /api/files/:id`; staying global means content imported from another year keeps its pictures without copying bytes. Deleting a camp still removes only that camp's gallery files |
+| `userCampState` (new) | the per-year marks that used to live on `users` — `prepDone`, `welcomeSentAt`, `photosSmsSentAt` — one row per `{ userId, campId }` (`models/userCampState.ts`) |
+
+Everything else is **SCOPED** (`services/campScope.ts#SCOPED`): `campers,
+staff, bedrooms, categories, transports, teams, scores, schedule_roles,
+schedule_events, prep_sections, instructions, occurrences, medicationDoses,
+gallery, settings, checkinLog, camperChangeLog, camperLookups,
+camperImports, ai_usage, sms_usage`.
+
+**The scoped `Db` proxy** (`db.ts`) is what keeps the ~300 existing
+`.collection(name)` call sites untouched. `getDb()` returns a `Proxy` whose
+`collection(name)` hands back the real MongoDB collection for a global name,
+and a wrapped one for a SCOPED name. The wrapper reads `currentCampId()` **at
+call time** and:
+
+- read methods (`find`, `findOne`, `findOneAndUpdate/Replace/Delete`,
+  `updateOne/Many`, `replaceOne`, `deleteOne/Many`, `countDocuments`,
+  `estimatedDocumentCount`, `distinct`) get `{ campId, ...filter }` merged in
+  — or `{ $and: [{ campId }, filter] }` when the filter already uses `$or` /
+  `$and` / `$nor` / `campId`, so neither side shadows the other;
+- `aggregate` gets a `$match: { campId }` prepended to the pipeline;
+- `insertOne` / `insertMany` stamp `campId` on the document; an upsert
+  (`updateOne` / `findOneAndUpdate` with `upsert: true`) stamps it into
+  `$setOnInsert` instead, so a matching document is never touched;
+- `bulkWrite` patches every operation inside it the same way;
+- `createIndex(keys, opts)` becomes `{ campId: 1, ...keys }` — every index,
+  unique ones included, ends up per camp.
+
+`rawDb()` is the unscoped `Db` — used for the `camps` registry itself, the
+boot migration, and `scripts/backup.ts`. `models/settings.ts` and
+`models/cleanup.ts` are the only call sites that had to change by hand: the
+single `settings` document's `_id` is now the camp id instead of the literal
+`"global"`.
+
+**`services/campContext.ts`** holds the request-scoped camp: `withCamp(campId,
+fn)` enters an `AsyncLocalStorage`; `currentCampId()` reads it back, falling
+back to `activeCampId()` (the cached `camps { active: true }` doc, refreshed
+by `refreshActiveCamp()` on boot and on every create/activate) when there is
+no context — a fire-and-forget promise or a background job never throws, and
+a single-camp deployment behaves exactly as before this feature existed.
+`requireAuth` (`middleware/auth.ts`) enters `withCamp(payload.campId)` before
+any model call runs. `inHistoryCamp()` is true when the current context is a
+camp other than the active one.
+
+### Sessions & switching years
+
+- The JWT and its `sessions` document carry a `campId` (JWT claim `camp`);
+  `verifySessionToken` returns it, and sessions created before this feature
+  fall back to the active camp.
+- Login (`/api/auth/otp/verify`) always lands on the **active** camp.
+- `POST /api/auth/camp { campId }` — a global admin, or a staff/health_staff
+  session that is an **organizer of the active camp**
+  (`services/campAccess.ts#canSwitchCamps`, evaluated in the active camp
+  regardless of which camp the session is currently in). Anyone else gets
+  `403 CAMP_FORBIDDEN`. Revokes the current session and issues a new one,
+  same role, in the target camp.
+- A **history session** (its camp ≠ the active one): `activeRole` is forced to
+  `admin` for every read (so list/detail endpoints and the realtime snapshot
+  answer with the full manager view); `middleware/camp.ts#campWriteGuard`
+  refuses every non-GET request under `/api/*` with `403 CAMP_ARCHIVED`,
+  except `/api/auth/*`, everything under `/api/camps` (the registry writes
+  are their own thing — see below) and the **super admin** (may fix old
+  data).
+- `/api/auth/me`, `/otp/verify`, `/role` and `/camp` all return `camp: { id,
+  label, year, active }`, and `camps: [...]` (the switchable list) only when
+  `canSwitchCamps` says the caller may switch — parents, ordinary team and
+  medical never get the field, so they never see a year switcher.
+
+### `/api/camps` and `/api/super`
+
+`GET /active` is public (the login screen); everything else needs a session.
+"manager" below is `requireManager` (admin or an organizer of the **active**
+camp — see [Organizers](#organizers-admin-like-team-members-)); "admin" is a
+real global admin (`requireGlobalAdmin` in `routes/camps.ts`, includes the
+super admin — it's just the account whose phone matches
+`SUPER_ADMIN_PHONE`).
+
+| Method | Path | Who | Does |
+|---|---|---|---|
+| GET | `/api/camps/active` | public | `{ id, label, year }` |
+| GET | `/api/camps` | admin / active-camp organizer | every camp with `{ counts: { campers, staff, photos }, canEnter: true }`; `403 CAMP_FORBIDDEN` otherwise |
+| POST | `/api/camps` `{ label, year }` | admin | creates the camp, makes it active (archives the previous one), writes its `settings` defaults (`wizardMode: false`), re-arms the runtime timers → `{ camp }` (201) |
+| PUT | `/api/camps/:id` `{ label?, year?, active?: true, archived?: boolean }` | admin | renames / activates / archives; `409 CAMP_ACTIVE` when archiving the active camp |
+| POST | `/api/camps/:id/delete/request` | admin, target must not be active | sends a 6-digit code to the **caller's own phone** (5 min — see below) |
+| POST | `/api/camps/:id/delete/confirm` `{ code }` | same | wipes the camp → `{ success, removed }` (counts per collection) |
+| GET | `/api/camps/:id/summary` | manager | counts per importable block of `:id` |
+| GET | `/api/camps/:id/campers?q=` | manager | up to 50 rows (name / guardian name / CPF match), no health fields, each flagged `matched` (a soft match already exists in the active camp) |
+| GET | `/api/camps/:id/staff?q=` | manager | same, by name / phone |
+| POST | `/api/camps/:id/import` `{ blocks?, camperIds?, staffIds?, withRoles?, withAssignments?, onMatch? }` | manager, only from the **active** camp (`403 CAMP_ARCHIVED` otherwise) | runs the copy engine → `{ result: { <block>: { created, updated, skipped } } }` |
+
+| Method | Path | Who | Does |
+|---|---|---|---|
+| GET | `/api/super/import-cache` | super admin | `{ count, staff, campers }` — remembered spreadsheet-column mappings |
+| POST | `/api/super/import-cache/staff` | super admin | wipes the staff-import column cache → `{ removed }` |
+| POST | `/api/super/import-cache` | super admin | wipes the whole staff + camper import dictionary → `{ removed }` |
+
+(`routes/cleanup.ts`'s former import-cache endpoints live here now.)
+
+### Cross-year import (`services/campImport.ts`)
+
+Every imported document gets a **brand-new id** — nothing links back to the
+source year. Links inside one run are kept consistent through an in-memory id
+map; links to something already in this year are resolved by **soft match**
+(accent/case-insensitive, `pt` collation). Run order: categories → teams →
+bedrooms → transports → staff → campers → schedule (roles, events) → docs
+(instructions, prep_sections) → settings.
+
+| Block | Soft-match key | Reset on import | Notes |
+|---|---|---|---|
+| categories | `key`; options by `label` | — | new options an imported record points at, with no label match, are created as **draft** options |
+| teams | `name` | — | plain copy (`color`, `order`) |
+| bedrooms | `name` | — | `group`, beds, notes copied |
+| transports | `kind + number` (bus) or `kind + name` (car) | — | |
+| staff | `phone`, else `name` | `checkin`, `vest`, `welcomeSentAt`, `photosSmsSentAt`, `prepDone`, `foreignLookup*`, `bedroom`, `team`, `transportation`, `allergies`, `drugAllergies`, `healthIssues`, `active` (always set `true`), `draft` | identity, health, `roomRole`, email copied; room/team/bus remapped or `null`; login ensured via `ensureLoginAccount` |
+| campers | `name + birthDate`, else `cpf`, else `externalId` | `checkin`, `busCheckin`, `busReturnCheckin`, `parentEditedAt`, `birthdayNoticeDay`, `caretakerId`, `bedroom`, `team`, `transportation`, `allergies`, `drugAllergies`, `healthIssues`, `importId`, `aiReview*` | identity, health, guardian, insurance copied; **`qrToken` / `externalId` kept** (so this year's spreadsheet import updates them through the existing duplicate flow); guardian login ensured |
+| schedule (roles + events) | roles by `name`; events by `date + startTime + title` | — | dates are **not** shifted — copied as-is, re-dated by hand in Programação. `withRoles` default on, `withAssignments` default off (needs the staff block) |
+| docs (instructions + prep_sections) | `title` | — | HTML kept verbatim — `/api/files/<id>` references stay valid since files are global |
+| settings | — | — | only `checkinLocations`, `notifications`, the staff lists (remapped, dropped when the person wasn't imported), `parentContacts`, `smsRedirect`. Never `checkinWindow`, `parentAccessWindow`, drafts, `checkinReminder`, `galleryPublished`, `wizardMode` |
+
+Not importable — collections that belong to one year and never travel:
+`gallery`, `occurrences`, `scores`, `medicationDoses`, `checkinLog`,
+`camperChangeLog`, `camperLookups`, `camperImports`, `ai_usage`,
+`sms_usage`.
+
+`onMatch` only applies to **staff** and **campers**: `"skip"` (default) leaves
+the matched record untouched — safe to re-run an import; `"update"`
+overwrites the matched person's identity/health fields but never their
+placement (bedroom/team/bus/caretaker) in *this* year, since those fields are
+always in the reset list. A guardian's login is ensured on a camper match
+too, even when the match itself is skipped. Import ends with `publish()` of
+every collection touched, so connected clients update live.
+
+### Camp deletion
+
+`POST /api/camps/:id/delete/request` (admin, target must not be the active
+camp) sends a 6-digit code to the **caller's own phone** — real SMS through
+Comtele, or printed to the console in mock mode — valid **5 minutes**, **3
+attempts** (`services/campDelete.ts`). `POST /.../delete/confirm { code }`
+checks it (`evaluateCampDeleteCode`, pure and unit-testable): a stale /
+foreign / expired code is `410 CODE_EXPIRED`, a wrong one is `401
+INVALID_CODE` with `attemptsLeft`, and the third miss is `429
+TOO_MANY_ATTEMPTS` — either way the pending code is cleared and a new request
+is needed.
+
+On a correct code, `deleteCamp(campId)` removes, inside `withCamp(campId)`:
+the camp's gallery photos and their files on disk, then every other SCOPED
+collection's documents for that camp; then (unscoped) its `userCampState`
+rows, its `sessions`, and finally the `camps` registry entry itself. Returns
+a per-collection removed count, logged and returned to the caller. **Never
+the active camp** — enforced at both the request and confirm steps (`409
+CAMP_ACTIVE`).
+
+### Backup (`scripts/backup.ts`)
+
+`BACKUP_VERSION` is `2` (was `1`, pre-multi-year). `bun run backup [--camp
+<id>]` dumps the whole database as before; `--camp` filters SCOPED
+collections to that one camp's documents (global collections are always
+dumped in full) — a way to export a single year. Restoring a v1 backup (made
+before this feature) stamps every document with **one** camp id: the target
+database's active camp, created on the fly (same as the boot migration's
+step 1) if the database has none yet — a v1 file always restores as a
+single, fully-owned camp, never split.

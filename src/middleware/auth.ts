@@ -1,10 +1,12 @@
 import { createMiddleware } from "hono/factory";
 import { findById, toPublicUser } from "../models/users";
 import { listCampersOfGuardian } from "../models/campers";
-import { revokeUserSessions, verifySessionToken } from "../services/session";
+import { revokeSession, revokeUserSessions, verifySessionToken } from "../services/session";
 import { getSettings, staffAccessOpen } from "../models/settings";
 import { findStaffByPhone } from "../models/staff";
 import { staffHasAccess } from "../services/scope";
+import { activeCampId, withCamp } from "../services/campContext";
+import { canSwitchCamps } from "../services/campAccess";
 import type { Role, SessionUser, User } from "../types";
 
 /**
@@ -51,6 +53,7 @@ export const requireAuth = createMiddleware<{
     sessionId: string;
     activeRole: SessionUser["activeRole"];
     user: SessionUser;
+    campId: string;
   };
 }>(async (c, next) => {
   const header = c.req.header("authorization") ?? "";
@@ -71,33 +74,50 @@ export const requireAuth = createMiddleware<{
     );
   }
 
-  const user = await findById(payload.userId);
-  if (!user) {
-    return c.json(
-      { error: { code: "UNAUTHORIZED", message: "Usuário não encontrado." } },
-      401,
-    );
-  }
+  return withCamp(payload.campId, async () => {
+    const user = await findById(payload.userId);
+    if (!user) {
+      return c.json(
+        { error: { code: "UNAUTHORIZED", message: "Usuário não encontrado." } },
+        401,
+      );
+    }
 
-  if (await staffSessionExpired(payload.role, user.phone, user._id)) {
-    return c.json(
-      { error: { code: "UNAUTHORIZED", message: "O período de acesso da equipe terminou." } },
-      401,
-    );
-  }
+    const history = payload.campId !== activeCampId();
 
-  if (await roleNoLongerValid(payload.role, user)) {
-    return c.json(
-      { error: { code: "UNAUTHORIZED", message: "Este perfil não está mais disponível para você. Entre novamente." } },
-      401,
-    );
-  }
+    if (history) {
+      // the roster row / access window belong to another year — irrelevant here
+      if (!(await canSwitchCamps(toPublicUser(user), payload.role))) {
+        await revokeSession(payload.sessionId);
+        return c.json(
+          { error: { code: "UNAUTHORIZED", message: "Sessão inválida ou expirada." } },
+          401,
+        );
+      }
+    } else {
+      if (await staffSessionExpired(payload.role, user.phone, user._id)) {
+        return c.json(
+          { error: { code: "UNAUTHORIZED", message: "O período de acesso da equipe terminou." } },
+          401,
+        );
+      }
 
-  // the active role is the one chosen at login
-  c.set("userId", user._id);
-  c.set("sessionId", payload.sessionId);
-  c.set("activeRole", payload.role);
-  c.set("user", { ...toPublicUser(user), activeRole: payload.role });
+      if (await roleNoLongerValid(payload.role, user)) {
+        return c.json(
+          { error: { code: "UNAUTHORIZED", message: "Este perfil não está mais disponível para você. Entre novamente." } },
+          401,
+        );
+      }
+    }
 
-  await next();
+    // the active role is the one chosen at login — forced to admin for reads on a history session
+    const activeRole: Role = history ? "admin" : payload.role;
+    c.set("userId", user._id);
+    c.set("sessionId", payload.sessionId);
+    c.set("activeRole", activeRole);
+    c.set("user", { ...toPublicUser(user), activeRole });
+    c.set("campId", payload.campId);
+
+    await next();
+  });
 });

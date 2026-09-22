@@ -1,5 +1,6 @@
 import { config } from "./config";
 import { getDb } from "./db";
+import { activeCampId, refreshActiveCamp, withCamp } from "./services/campContext";
 import { claimCampersForAiReview, claimCampersForCleanup, finishCamperAiReview, finishCamperStructure, requeueStaleAiReviews, type CamperData } from "./models/campers";
 import { claimStaffForAiReview, claimStaffForCleanup, finishStaffAiReview, finishStaffStructure, requeueStaleStaffAiReviews, type StaffData } from "./models/staff";
 import { AI_REVIEW_MAX_ATTEMPTS, aiReviewExhaustedFilter, aiReviewRetryDelayMs, aiReviewRetryPendingFilter, formatRetryDelay } from "./models/aiReviewRetry";
@@ -143,7 +144,7 @@ async function cleanupOne(camper: Camper): Promise<void> {
       structured: { allergies: camper.allergies, drugAllergies: camper.drugAllergies, healthIssues: camper.healthIssues, neurodivergent: camper.neurodivergent, medications: camper.medications },
       currentFoodRestrictions: camper.foodRestrictions,
       currentHealthNotes: camper.healthNotes,
-      current: { email: camper.guardianEmail, bedroomPreference: camper.bedroomPreference, emergencyContact: camper.emergencyContact, guardianPhone: camper.guardianPhone ?? "", insurance: camper.insurance, insuranceCard: camper.insuranceCard },
+      current: { email: camper.guardianEmail, bedroomPreference: camper.bedroomPreference, emergencyContact: camper.emergencyContact, guardianPhone: camper.guardianPhone ?? "", insurance: camper.insurance, insuranceCard: camper.insuranceCard, weightKg: camper.weightKg },
     });
     void recordAiUsage({ at: new Date(), vendor: cleanup.vendor, model: cleanup.model, kind: "normalize_observations", userId: "worker", ...cleanup.usage, ok: cleanup.ok });
     if (!cleanup.ok) throw new Error(`Cleanup: ${cleanup.error ?? "falhou"}`);
@@ -155,6 +156,7 @@ async function cleanupOne(camper: Camper): Promise<void> {
     if (!camper.guardianPhone && cleanup.recovered.guardianPhone) recovered.guardianPhone = cleanup.recovered.guardianPhone;
     if (!camper.insurance && cleanup.recovered.insurance) recovered.insurance = cleanup.recovered.insurance;
     if (!camper.insuranceCard && cleanup.recovered.insuranceCard) recovered.insuranceCard = cleanup.recovered.insuranceCard;
+    if (camper.weightKg == null && cleanup.recovered.weightKg != null) recovered.weightKg = cleanup.recovered.weightKg;
     if (Object.keys(recovered).length) log("camper", `${who} — recovered ${Object.keys(recovered).join(", ")}`);
     const health = await applyHealthSelection(cleanup.health, camper.importId, who);
     log("camper", `${who} — final health: allergies=${health.allergies.length} drugAllergies=${health.drugAllergies.length} healthIssues=${health.healthIssues.length} neurodivergent=${cleanup.health.neurodivergent}${health.created ? ` (+${health.created} new option(s))` : ""}`);
@@ -292,14 +294,10 @@ async function notifyFinishedImports(importIds: string[]): Promise<void> {
   }
 }
 
-async function loop(): Promise<never> {
-  await getDb();
-  const [requeued, requeuedStaff] = await Promise.all([requeueStaleAiReviews(), requeueStaleStaffAiReviews()]);
-  if (requeued + requeuedStaff) log("startup", `requeued ${requeued} camper and ${requeuedStaff} staff review(s)`);
-  await notifyFinishedImports((await listImportsPendingNotification()).map((r) => r._id));
-  log("startup", `import worker ready; jev+cleanup batch=${BATCH}, poll=${POLL_MS / 1000}s, SMS=${comteleEnabled() ? "on" : "mock"}`);
-  let idlePolls = 0;
-  while (true) {
+/** One poll, scoped to the ACTIVE camp (imports only ever run there). Returns true when nothing was pending. */
+async function pollOnce(): Promise<boolean> {
+  await refreshActiveCamp(); // cheap — picks up a camp created by the API process within one poll
+  return withCamp(activeCampId(), async () => {
     // phase 1 — Jev only, near-instant: its own batch so the slow cleanup never holds it back
     const structure = await Promise.all([claimCampersForAiReview(BATCH), claimStaffForAiReview(BATCH)]);
     if (structure[0].length || structure[1].length) {
@@ -316,14 +314,31 @@ async function loop(): Promise<never> {
     }
     const touched = [...structure.flat(), ...cleanupBatch.flat()];
     if (!touched.length) {
+      await notifyFinishedImports((await listImportsPendingNotification()).map((r) => r._id));
+      return true;
+    }
+    await notifyFinishedImports(touched.map((x) => x.importId ?? ""));
+    return false;
+  });
+}
+
+async function loop(): Promise<never> {
+  await getDb();
+  await refreshActiveCamp();
+  const [requeued, requeuedStaff] = await withCamp(activeCampId(), () => Promise.all([requeueStaleAiReviews(), requeueStaleStaffAiReviews()]));
+  if (requeued + requeuedStaff) log("startup", `requeued ${requeued} camper and ${requeuedStaff} staff review(s)`);
+  await withCamp(activeCampId(), async () => notifyFinishedImports((await listImportsPendingNotification()).map((r) => r._id)));
+  log("startup", `import worker ready; jev+cleanup batch=${BATCH}, poll=${POLL_MS / 1000}s, SMS=${comteleEnabled() ? "on" : "mock"}`);
+  let idlePolls = 0;
+  while (true) {
+    const idle = await pollOnce();
+    if (idle) {
       idlePolls++;
       if (idlePolls % IDLE_HEARTBEAT_POLLS === 0) log("idle", `nothing pending (${idlePolls} empty polls) — worker alive`);
-      await notifyFinishedImports((await listImportsPendingNotification()).map((r) => r._id));
       await Bun.sleep(POLL_MS);
-      continue;
+    } else {
+      idlePolls = 0;
     }
-    idlePolls = 0;
-    await notifyFinishedImports(touched.map((x) => x.importId ?? ""));
   }
 }
 

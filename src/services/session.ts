@@ -2,6 +2,7 @@ import { ObjectId } from "mongodb";
 import { SignJWT, jwtVerify } from "jose";
 import { config } from "../config";
 import { getDb } from "../db";
+import { activeCampId } from "./campContext";
 import type { Role, Session } from "../types";
 
 const secret = new TextEncoder().encode(config.jwtSecret);
@@ -9,6 +10,7 @@ const secret = new TextEncoder().encode(config.jwtSecret);
 export async function createSession(
   userId: string,
   role: Session["role"],
+  campId: string = activeCampId(),
 ): Promise<{ token: string; session: Session }> {
   const db = await getDb();
   const now = new Date();
@@ -17,6 +19,7 @@ export async function createSession(
   const { insertedId } = await db.collection("sessions").insertOne({
     userId,
     role,
+    campId,
     createdAt: now,
     expiresAt,
   });
@@ -25,6 +28,7 @@ export async function createSession(
     _id: insertedId.toString(),
     userId,
     role,
+    campId,
     createdAt: now,
     expiresAt,
   };
@@ -32,6 +36,7 @@ export async function createSession(
   const token = await new SignJWT({
     sid: session._id,
     role,
+    camp: campId,
   })
     .setProtectedHeader({ alg: "HS256" })
     .setSubject(userId)
@@ -44,7 +49,7 @@ export async function createSession(
 
 export async function verifySessionToken(
   token: string,
-): Promise<{ userId: string; sessionId: string; role: Role } | null> {
+): Promise<{ userId: string; sessionId: string; role: Role; campId: string } | null> {
   try {
     const { payload } = await jwtVerify(token, secret);
     if (!payload.sub || typeof payload.sid !== "string") return null;
@@ -61,7 +66,9 @@ export async function verifySessionToken(
       return null;
     }
 
-    return { userId: payload.sub, sessionId: payload.sid, role: session.role as Role };
+    // sessions created before the multi-year camps feature carry no campId — the active camp
+    const campId = typeof session.campId === "string" ? session.campId : (typeof payload.camp === "string" ? payload.camp : activeCampId());
+    return { userId: payload.sub, sessionId: payload.sid, role: session.role as Role, campId };
   } catch {
     return null;
   }

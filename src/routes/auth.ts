@@ -13,6 +13,15 @@ import { createSession, revokeSession, verifySessionToken } from "../services/se
 import type { CheckinWindow, PublicUser, Role, SessionUser, User } from "../types";
 import { formatBrazilPhone, isRole, minutesBetween, normalizeBrazilPhone, pickActiveRole } from "../utils";
 import { requireAuth } from "../middleware/auth";
+import { activeCamp, withCamp } from "../services/campContext";
+import { findCamp } from "../models/camps";
+import { canSwitchCamps, switchableCamps } from "../services/campAccess";
+
+/** `{ id, label, year, active }` of the session's camp — falls back to the active camp for pre-migration sessions. */
+async function sessionCamp(campId: string): Promise<{ id: string; label: string; year: number; active: boolean }> {
+  const camp = (await findCamp(campId)) ?? activeCamp();
+  return { id: camp._id, label: camp.label, year: camp.year, active: camp.active };
+}
 
 interface AuthEnv {
   Variables: {
@@ -20,6 +29,7 @@ interface AuthEnv {
     sessionId: string;
     activeRole: Role;
     user: SessionUser;
+    campId: string;
   };
 }
 
@@ -358,6 +368,7 @@ auth.post("/otp/verify", async (c) => {
   user = { ...user, locale: deviceLocale };
 
   const { token, session } = await createSession(user._id, role);
+  const camps = await switchableCamps(user, role);
 
   return c.json({
     success: true,
@@ -365,13 +376,16 @@ auth.post("/otp/verify", async (c) => {
     tokenExpiresAt: session.expiresAt.toISOString(),
     // `roles` is what the switcher offers: the profiles the DATA gives this person
     user: { ...toPublicUser(user), roles: available, activeRole: role },
+    camp: await sessionCamp(session.campId),
+    ...(camps ? { camps } : {}),
   });
 });
 
 /** Who am I? (requires Bearer token) */
 auth.get("/me", requireAuth, async (c) => {
   const me = c.get("user");
-  return c.json({ user: { ...me, roles: await availableRolesOf(me) } });
+  const camps = await switchableCamps(me, me.activeRole);
+  return c.json({ user: { ...me, roles: await availableRolesOf(me) }, camp: await sessionCamp(c.get("campId")), ...(camps ? { camps } : {}) });
 });
 
 /**
@@ -393,12 +407,53 @@ auth.post("/role", requireAuth, async (c) => {
   if (windowErr) return c.json({ error: windowErr }, 403);
 
   await revokeSession(c.get("sessionId"));
-  const { token, session } = await createSession(user._id, role);
+  const { token, session } = await createSession(user._id, role, c.get("campId"));
+  const camps = await switchableCamps(user, role);
   return c.json({
     success: true,
     token,
     tokenExpiresAt: session.expiresAt.toISOString(),
     user: { ...toPublicUser(user), roles: available, activeRole: role },
+    camp: await sessionCamp(session.campId),
+    ...(camps ? { camps } : {}),
+  });
+});
+
+/**
+ * POST /api/auth/camp  { campId } — a global admin or an ORGANIZER of the
+ * active camp jumping to another year. Revokes the current session and issues
+ * a new one, same role, in the target camp — which becomes a HISTORY session
+ * the moment it isn't the active camp (read-only, forced admin reads).
+ */
+auth.post("/camp", requireAuth, async (c) => {
+  const body = await c.req.json<{ campId?: unknown }>().catch(() => null);
+  const campId = typeof body?.campId === "string" ? body.campId : "";
+  const sessionUser = c.get("user");
+  const activeRole = c.get("activeRole");
+
+  if (!(await canSwitchCamps(sessionUser, activeRole))) {
+    return c.json({ error: { code: "CAMP_FORBIDDEN", message: "Só a organização pode ver outros anos." } }, 403);
+  }
+  const target = campId ? await findCamp(campId) : null;
+  if (!target) return c.json({ error: { code: "CAMP_NOT_FOUND", message: "Acampamento não encontrado." } }, 404);
+
+  const user = await findByPhone(sessionUser.phone);
+  if (!user) return c.json({ error: { code: "USER_NOT_FOUND", message: "Cadastro não encontrado." } }, 404);
+
+  await revokeSession(c.get("sessionId"));
+  const { token, session } = await createSession(user._id, activeRole, target._id);
+  const { available, camps } = await withCamp(target._id, async () => ({
+    available: await availableRolesOf(user),
+    camps: await switchableCamps(user, activeRole),
+  }));
+
+  return c.json({
+    success: true,
+    token,
+    tokenExpiresAt: session.expiresAt.toISOString(),
+    user: { ...toPublicUser(user), roles: available, activeRole },
+    camp: await sessionCamp(session.campId),
+    ...(camps ? { camps } : {}),
   });
 });
 

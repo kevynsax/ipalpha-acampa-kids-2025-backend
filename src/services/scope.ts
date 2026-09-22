@@ -246,7 +246,7 @@ export function prepDoneOf(scope: Scope): string[] {
   return isParent(scope) ? asParent(scope).parentPrepDone : [];
 }
 
-/** May this PARENT session edit `k`'s "Pontos de atenção"? (their own kid) */
+/** May this PARENT session edit `k`'s "Informações de saúde"? (their own kid) */
 export function canParentEdit(scope: Scope, k: Pick<Camper, "_id">): boolean {
   return isParent(scope) && asParent(scope).parentKids.includes(k._id);
 }

@@ -426,7 +426,7 @@ export async function sendBirthdayNotices(now = new Date()): Promise<void> {
   }
 }
 
-// ── a parent edited their kid's "Pontos de atenção" ───────────────────────────────────
+// ── a parent edited their kid's "Informações de saúde" ────────────────────────────────
 
 /**
  * The parent-edit text — who edited what on which kid, then the app link.

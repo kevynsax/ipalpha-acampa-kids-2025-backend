@@ -299,7 +299,7 @@ ai.use("/camper-notes", async (c, next) => {
  * leftover box of a form; the model spreads them over the health / preference
  * / emergency fields and returns what's left. `subject` says whose form:
  *   "camper" (default) admin's kid form — every field
- *   "parent"           parent's "Pontos de atenção" dialog — the medical block only
+ *   "parent"           parent's "Informações de saúde" dialog — the medical block only
  *   "staff"            admin's team member form — health fields, leftovers → healthNotes
  * "live" mode: Opus 5 → Grok 4.5 → GPT 5.6, low reasoning (see
  * camperNotesAi.ts). Aborts when the client disconnects (user hit save).

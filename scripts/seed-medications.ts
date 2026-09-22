@@ -14,6 +14,7 @@
  * seeded medicines so a second run starts clean.
  */
 import { getDb } from "../src/db";
+import { migrateToCamps } from "../src/services/campMigration";
 
 interface SeedMed {
   name: string;
@@ -56,6 +57,7 @@ const SEED_FLAG = "seed";
 async function main() {
   const undo = process.argv.includes("--undo");
   const db = await getDb();
+  await migrateToCamps(); // one-off scripts run outside the server boot: load the active camp so SCOPED collections resolve
   const campers = db.collection("campers");
 
   if (undo) {

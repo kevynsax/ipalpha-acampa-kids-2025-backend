@@ -18,6 +18,7 @@
  *   bun run backend/scripts/fix-noturna-headers.ts --apply  # write it
  */
 import { getDb, closeDb } from "../src/db";
+import { migrateToCamps } from "../src/services/campMigration";
 
 /** the repeated preamble: title + date/time, both already in the dialog header */
 const ECHO_PARAGRAPH =
@@ -48,6 +49,7 @@ function fix(html: string): string {
 async function main() {
   const apply = process.argv.includes("--apply");
   const db = await getDb();
+  await migrateToCamps(); // one-off scripts run outside the server boot: load the active camp so SCOPED collections resolve
   // matches both the untouched documents and the already-fixed ones (so a re-run
   // can still tidy them), hence the story name rather than the dropped title
   const roles = await db

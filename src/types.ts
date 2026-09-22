@@ -403,7 +403,7 @@ export interface Camper {
   busCheckin: CamperCheckin | null;
   /** set when the kid boarded the bus returning to the church */
   busReturnCheckin: CamperCheckin | null;
-  /** when a PARENT last edited the "Pontos de atenção" (see CamperChangeLog) — null until they do */
+  /** when a PARENT last edited the "Informações de saúde" (see CamperChangeLog) — null until they do */
   parentEditedAt: Date | null;
   /** spreadsheet import process that created this camper; null for regular records */
   importId: string | null;
@@ -578,7 +578,7 @@ export interface MedicationDose {
 export const MEDICATION_SOS_SLOT = "sos";
 
 /**
- * Fields a PARENT may edit on their own kid (Início → Pontos de atenção).
+ * Fields a PARENT may edit on their own kid (Início → Informações de saúde).
  * Every one of them but `generalNotes` counts as MEDICAL: a change there is
  * texted to the medical team, the admins and the caretaker; a change to the
  * observations alone only to the caretaker (see services/notify.ts).
@@ -848,7 +848,7 @@ export interface NotificationSettings {
   occurrences: boolean;
   /** at `settings.checkinReminder.at` the WHOLE team is reminded to do their check-in (nothing goes out while the date is unset) */
   checkinReminder: boolean;
-  /** a parent edited their kid's "Pontos de atenção": medical data → medical team + admins + caretaker; observations only → caretaker */
+  /** a parent edited their kid's "Informações de saúde": medical data → medical team + admins + caretaker; observations only → caretaker */
   parentEdits: boolean;
   /** the kid boarded the bus → the guardian is texted ("a caminho de um fim de semana incrível…") */
   busCheckin: boolean;
@@ -1041,6 +1041,8 @@ export interface Session {
   userId: string;
   /** the role selected by the user at login */
   role: Role;
+  /** the camp this session is scoped to (see services/campContext.ts) */
+  campId: string;
   createdAt: Date;
   expiresAt: Date;
 }

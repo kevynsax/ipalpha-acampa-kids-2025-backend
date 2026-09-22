@@ -304,7 +304,7 @@ export function importPhone(raw: string): string | null {
   return normalizeBrazilPhone(d);
 }
 
-function parseWeight(raw: string): number | null {
+export function parseWeight(raw: string): number | null {
   const match = raw.replace(",", ".").match(/\d+(?:\.\d+)?/);
   const n = match ? Number(match[0]) : NaN;
   return Number.isFinite(n) && n >= 5 && n <= 200 ? Math.round(n * 10) / 10 : null;

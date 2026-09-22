@@ -1,5 +1,7 @@
 import { ObjectId } from "mongodb";
 import { getDb } from "../db";
+import { currentCampId } from "../services/campContext";
+import { countUserNotificationMarks, resetUserPhotosNotice, resetUserWelcome } from "./userCampState";
 
 /**
  * End-of-camp cleanup (Configurações → Limpeza, admin only): each group wipes
@@ -68,7 +70,7 @@ function emptyList(group: StaffKeepGroup): unknown {
  */
 export async function wipeStaff(keep: readonly StaffKeepGroup[] = []): Promise<number> {
   const db = await getDb();
-  const settings = (await db.collection("settings").findOne({ _id: "global" as never })) as Record<string, unknown> | null;
+  const settings = (await db.collection("settings").findOne({ _id: currentCampId() as never })) as Record<string, unknown> | null;
   const saved = new Set(keep.flatMap((g) => staffIdsOf(settings, g)).filter((id) => ObjectId.isValid(id)));
   const filter = { _id: { $nin: [...saved].map((id) => new ObjectId(id)) } };
   const doomed = (await db.collection("staff").find(filter, { projection: { _id: 1 } }).toArray()).map((d) => String(d._id));
@@ -82,7 +84,7 @@ export async function wipeStaff(keep: readonly StaffKeepGroup[] = []): Promise<n
       { "assignments.staffId": { $in: doomed } },
       { $pull: { assignments: { staffId: { $in: doomed } } } as never, $set: { updatedAt: now } },
     ),
-    db.collection("settings").updateOne({ _id: "global" as never }, { $set: lists }),
+    db.collection("settings").updateOne({ _id: currentCampId() as never }, { $set: lists }),
   ]);
   return deletedCount;
 }
@@ -107,7 +109,7 @@ export async function wipeTransports(): Promise<number> {
   await Promise.all([
     db.collection("campers").updateMany({ transportation: { $ne: null } }, { $set: { transportation: null, updatedAt: now } }),
     db.collection("staff").updateMany({ transportation: { $ne: null } }, { $set: { transportation: null, updatedAt: now } }),
-    db.collection("settings").updateOne({ _id: "global" as never }, { $set: { busHelpers: { helpers: [] }, updatedAt: now } }),
+    db.collection("settings").updateOne({ _id: currentCampId() as never }, { $set: { busHelpers: { helpers: [] }, updatedAt: now } }),
   ]);
   return deletedCount;
 }
@@ -150,11 +152,12 @@ export async function wipeSchedule(withRoles = false): Promise<number> {
 export async function wipeDocs(): Promise<number> {
   const db = await getDb();
   const now = new Date();
+  const campId = currentCampId();
   const [instructions, prep] = await Promise.all([
     db.collection("instructions").deleteMany({}),
     db.collection("prep_sections").deleteMany({}),
     db.collection("staff").updateMany({ prepDone: { $exists: true, $ne: [] } }, { $set: { prepDone: [], updatedAt: now } }),
-    db.collection("users").updateMany({ prepDone: { $exists: true, $ne: [] } }, { $set: { prepDone: [], updatedAt: now } }),
+    db.collection("userCampState").updateMany({ campId, prepDone: { $exists: true, $ne: [] } }, { $set: { prepDone: [] } }),
   ]);
   return instructions.deletedCount + prep.deletedCount;
 }
@@ -185,7 +188,7 @@ export async function wipeScores(): Promise<number> {
 export async function resetCampSettings(): Promise<void> {
   const db = await getDb();
   await db.collection("settings").updateOne(
-    { _id: "global" as never },
+    { _id: currentCampId() as never },
     {
       $set: {
         checkinWindow: { from: null, until: null },
@@ -233,9 +236,9 @@ export async function wipeWelcomes(): Promise<number> {
   const now = new Date();
   const [team, parents] = await Promise.all([
     db.collection("staff").updateMany({ welcomeSentAt: { $ne: null } }, { $set: { welcomeSentAt: null, updatedAt: now } }),
-    db.collection("users").updateMany({ roles: "parent", welcomeSentAt: { $ne: null } }, { $set: { welcomeSentAt: null, updatedAt: now } }),
+    resetUserWelcome(),
   ]);
-  return team.modifiedCount + parents.modifiedCount;
+  return team.modifiedCount + parents;
 }
 
 /**
@@ -248,11 +251,11 @@ export async function wipeNotices(): Promise<number> {
   const now = new Date();
   const [team, parents, kids, reminder] = await Promise.all([
     db.collection("staff").updateMany({ photosSmsSentAt: { $ne: null } }, { $set: { photosSmsSentAt: null, updatedAt: now } }),
-    db.collection("users").updateMany({ photosSmsSentAt: { $ne: null } }, { $set: { photosSmsSentAt: null, updatedAt: now } }),
+    resetUserPhotosNotice(),
     db.collection("campers").updateMany({ birthdayNoticeDay: { $ne: null } }, { $unset: { birthdayNoticeDay: "" }, $set: { updatedAt: now } }),
-    db.collection("settings").updateOne({ _id: "global" as never, "checkinReminder.sentAt": { $ne: null } }, { $set: { "checkinReminder.sentAt": null, updatedAt: now } }),
+    db.collection("settings").updateOne({ _id: currentCampId() as never, "checkinReminder.sentAt": { $ne: null } }, { $set: { "checkinReminder.sentAt": null, updatedAt: now } }),
   ]);
-  return team.modifiedCount + parents.modifiedCount + kids.modifiedCount + reminder.modifiedCount;
+  return team.modifiedCount + parents + kids.modifiedCount + reminder.modifiedCount;
 }
 
 /**
@@ -293,13 +296,12 @@ export async function countImportCache(): Promise<{ count: number; staff: number
 export async function countNotificationMarks(): Promise<{ welcomes: number; notices: number }> {
   const db = await getDb();
   const sent = { $ne: null };
-  const [staffWelcome, parentWelcome, staffPhotos, parentPhotos, birthdays, reminder] = await Promise.all([
+  const [staffWelcome, staffPhotos, birthdays, reminder, userMarks] = await Promise.all([
     db.collection("staff").countDocuments({ welcomeSentAt: sent }),
-    db.collection("users").countDocuments({ roles: "parent", welcomeSentAt: sent }),
     db.collection("staff").countDocuments({ photosSmsSentAt: sent }),
-    db.collection("users").countDocuments({ photosSmsSentAt: sent }),
     db.collection("campers").countDocuments({ birthdayNoticeDay: sent }),
-    db.collection("settings").countDocuments({ _id: "global" as never, "checkinReminder.sentAt": sent }),
+    db.collection("settings").countDocuments({ _id: currentCampId() as never, "checkinReminder.sentAt": sent }),
+    countUserNotificationMarks(),
   ]);
-  return { welcomes: staffWelcome + parentWelcome, notices: staffPhotos + parentPhotos + birthdays + reminder };
+  return { welcomes: staffWelcome + userMarks.welcomes, notices: staffPhotos + userMarks.photos + birthdays + reminder };
 }

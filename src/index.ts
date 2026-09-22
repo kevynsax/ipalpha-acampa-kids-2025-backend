@@ -48,14 +48,19 @@ import wizardRoutes from "./routes/wizard";
 import camperImportRoutes from "./routes/camperImports";
 import staffImportRoutes from "./routes/staffImports";
 import workerRoutes from "./routes/worker";
+import campRoutes from "./routes/camps";
+import superRoutes from "./routes/super";
 import { comteleEnabled } from "./services/comtele";
 import { mailEnabled } from "./services/mail";
-import { publish, rearmWindows, scheduleBirthdayNotices, scheduleCheckinReminder } from "./services/realtime";
+import { publish, rearmActiveCampTimers } from "./services/realtime";
 import { sendBirthdayNotices, sendCheckinReminder, syncParentWelcomes, syncWelcomes } from "./services/notify";
-import { getSettings } from "./models/settings";
 import { backfillGalleryFaces } from "./services/galleryFaces";
 import { ensureProbableGenderOnCampers, ensureProbablyGenreOnStaff } from "./services/camperSex";
 import { normalizeBrazilPhone } from "./utils";
+import { migrateToCamps } from "./services/campMigration";
+import { ensureCampsCollection } from "./models/camps";
+import { activeCamp, activeCampId, withCamp } from "./services/campContext";
+import { campWriteGuard } from "./middleware/camp";
 
 const app = new Hono();
 
@@ -71,6 +76,9 @@ app.use(
 app.get("/health", (c) =>
   c.json({ status: "ok", smsProvider: comteleEnabled() ? "comtele" : "mock", mailProvider: mailEnabled() ? "sendgrid" : "mock" }),
 );
+
+// a history session (an archived year) may only read — every write, except /api/auth/* and the super admin, is refused here
+app.use("/api/*", campWriteGuard);
 
 app.route("/api/auth", authRoutes);
 app.route("/api/admins", adminsRoutes);
@@ -106,11 +114,17 @@ app.route("/api/ai", aiRoutes);
 app.route("/api/assistant", assistantRoutes);
 // WebSocket: full snapshot on connect + live updates after every write (see services/realtime.ts)
 app.route("/api/realtime", realtimeRoutes);
+// the camps registry (multi-year): GET /active is public, the rest admin / organizer
+app.route("/api/camps", campRoutes);
+app.route("/api/super", superRoutes);
 
 const { port } = config;
 
 console.log("Connecting to MongoDB…");
 const db = await getDb();
+await ensureCampsCollection();
+await migrateToCamps();
+console.log(`🏕️  active camp: "${activeCamp().label}" (${activeCampId()})`);
 await ensureIndexes();
 await ensureCamperLookupIndexes();
 await ensureCamperImportIndexes();
@@ -160,17 +174,14 @@ void ensureProbableGenderOnCampers()
   })
   .catch((err) => console.error("camper gender backfill failed", err));
 console.log(`MongoDB connected → ${config.dbName}`);
-// re-arm the check-in window timers (they live in memory)
-{
-  const s = await getSettings();
-  await rearmWindows(); // check-in, team access and parents' windows
-  scheduleCheckinReminder(s.checkinReminder.at);
-  void syncWelcomes(); // the team window may have opened while the server was down
-  void syncParentWelcomes();
-  void sendCheckinReminder(); // the reminder instant may have passed while the server was down
-  scheduleBirthdayNotices(); // daily 07:45 timer
-  void sendBirthdayNotices(); // 07:45 may have passed while the server was down
-}
+// re-arm the check-in window timers (they live in memory) — the ACTIVE camp only
+await rearmActiveCampTimers(); // check-in, team access and parents' windows + the check-in reminder + the daily birthday timer
+void withCamp(activeCampId(), async () => {
+  await syncWelcomes(); // the team window may have opened while the server was down
+  await syncParentWelcomes();
+  await sendCheckinReminder(); // the reminder instant may have passed while the server was down
+  await sendBirthdayNotices(); // 07:45 may have passed while the server was down
+});
 
 console.log(
   comteleEnabled()

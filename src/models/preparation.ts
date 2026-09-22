@@ -2,6 +2,7 @@ import { ObjectId } from "mongodb";
 import { getDb } from "../db";
 import type { PrepSection, PrepAudience } from "../types";
 import { PREP_AUDIENCES, PREP_TEAM_AUDIENCES } from "../types";
+import { clearUserPrepDoneKey } from "./userCampState";
 
 const COLLECTION = "prep_sections";
 
@@ -80,7 +81,7 @@ export async function clearPrepDoneKey(key: string): Promise<void> {
   const now = new Date();
   await Promise.all([
     db.collection("staff").updateMany({ prepDone: key }, { $pull: { prepDone: key }, $set: { updatedAt: now } } as never),
-    db.collection("users").updateMany({ prepDone: key }, { $pull: { prepDone: key }, $set: { updatedAt: now } } as never),
+    clearUserPrepDoneKey(key),
   ]);
 }
 

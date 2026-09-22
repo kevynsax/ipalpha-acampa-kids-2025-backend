@@ -1,9 +1,10 @@
 import { getDb } from "../db";
+import { currentCampId } from "../services/campContext";
 import type { BusHelperList, CheckinLocation, CheckinReminder, CheckinWindow, ParentContact, Settings, SmsRedirect, StaffList } from "../types";
 
 const COLLECTION = "settings";
-/** the settings live in ONE document (there is a single camp) */
-const DOC_ID = "global";
+/** the settings live in ONE document per camp — its `_id` IS the camp id (see services/campContext.ts) */
+const DOC_ID = (): string => currentCampId();
 
 /** Igreja Presbiteriana em Alphaville — where the team meets on departure day. */
 export const DEFAULT_CHECKIN_LOCATION: CheckinLocation = {
@@ -187,14 +188,14 @@ function toSettings(doc: Record<string, unknown> | null): Settings {
 /** Always returns something: the defaults until an admin saves for the first time. */
 export async function getSettings(): Promise<Settings> {
   const db = await getDb();
-  return toSettings((await db.collection(COLLECTION).findOne({ _id: DOC_ID as never })) as Record<string, unknown> | null);
+  return toSettings((await db.collection(COLLECTION).findOne({ _id: DOC_ID() as never })) as Record<string, unknown> | null);
 }
 
 export async function updateSettings(patch: Partial<Omit<Settings, "updatedAt">>): Promise<Settings> {
   const db = await getDb();
   const res = await db
     .collection(COLLECTION)
-    .findOneAndUpdate({ _id: DOC_ID as never }, { $set: { ...patch, updatedAt: new Date() } }, { upsert: true, returnDocument: "after" });
+    .findOneAndUpdate({ _id: DOC_ID() as never }, { $set: { ...patch, updatedAt: new Date() } }, { upsert: true, returnDocument: "after" });
   return toSettings(res as Record<string, unknown> | null);
 }
 
@@ -207,6 +208,6 @@ export async function claimCheckinReminder(at: Date): Promise<boolean> {
   const db = await getDb();
   const res = await db
     .collection(COLLECTION)
-    .updateOne({ _id: DOC_ID as never, "checkinReminder.at": at, "checkinReminder.sentAt": null }, { $set: { "checkinReminder.sentAt": new Date() } });
+    .updateOne({ _id: DOC_ID() as never, "checkinReminder.at": at, "checkinReminder.sentAt": null }, { $set: { "checkinReminder.sentAt": new Date() } });
   return res.modifiedCount === 1;
 }

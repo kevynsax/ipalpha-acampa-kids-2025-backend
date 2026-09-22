@@ -492,7 +492,7 @@ campers.get("/:id/checkin/log", requireManager, async (c) => {
   return c.json({ log: (await listCheckinLog(k._id)).map(serializeLog) });
 });
 
-// ── parent edits: the kid's own guardian may change the "Pontos de atenção" block ──
+// ── parent edits: the kid's own guardian may change the "Informações de saúde" block ──
 
 function serializeChange(l: CamperChangeLog) {
   return { id: l._id, camperId: l.camperId, camperName: l.camperName, at: l.at, byUserId: l.byUserId, byName: l.byName, byRole: l.byRole, medical: l.medical, changes: l.changes };

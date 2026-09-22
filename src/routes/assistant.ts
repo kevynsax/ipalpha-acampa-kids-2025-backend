@@ -2,7 +2,9 @@ import { Hono, type Context } from "hono";
 import { config } from "../config";
 import { requireAuth } from "../middleware/auth";
 import { recordAiUsage } from "../models/aiUsage";
+import { findCamp } from "../models/camps";
 import { assistantResponsesToolSpecs, runAssistantTool, type AssistantAudience } from "../services/assistantTools";
+import { currentCampId, inHistoryCamp } from "../services/campContext";
 import { resolveScope } from "../services/scope";
 import type { Role, SessionUser } from "../types";
 
@@ -37,6 +39,15 @@ Regras obrigatórias:
 - Formato: texto simples, sem HTML e sem Markdown. Quando necessário, use listas curtas iniciadas por "- ".
 
 Exemplos de perguntas: “quantas crianças estão em cada quarto?”, “quem ainda não fez check-in?”, “quais crianças têm alergia?”, “resuma todas as coleções”, “quem está escalado amanhã?”, “há quartos acima da capacidade?”.`;
+
+/** One sentence telling the model which camp/year it is answering for — and, in a history session, that the data is frozen. */
+async function campContextLine(): Promise<string> {
+  const camp = await findCamp(currentCampId());
+  if (!camp) return "";
+  return inHistoryCamp()
+    ? `\n\nContexto: você está consultando o acampamento "${camp.label}" (${camp.year}), um ano ARQUIVADO — os dados são somente leitura e não são os do acampamento ativo.`
+    : `\n\nContexto: você está consultando o acampamento ativo "${camp.label}" (${camp.year}).`;
+}
 
 /**
  * GPT-Live only runs the conversation — it listens, speaks and decides *when* to
@@ -110,7 +121,7 @@ assistant.post("/live", async (c) => {
         type: "responses",
         responses: {
           model: LIVE.backendModel,
-          instructions: SYSTEM_PROMPT,
+          instructions: SYSTEM_PROMPT + (await campContextLine()),
           tools: assistantResponsesToolSpecs(c.get("audience")),
           tool_choice: "auto",
           parallel_tool_calls: true,

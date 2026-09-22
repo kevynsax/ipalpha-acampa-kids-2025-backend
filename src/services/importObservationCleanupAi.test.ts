@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { EMPTY_RECOVERED_FIELDS, IMPORT_OBSERVATION_CLEANUP_MODEL, IMPORT_OBSERVATION_CLEANUP_MODELS, parseHealthSelection, parseImportObservationCleanup, type HealthOptions, type ImportObservationCleanupResult } from "./importObservationCleanupAi";
+import { dropWeightRestatements, EMPTY_RECOVERED_FIELDS, IMPORT_OBSERVATION_CLEANUP_MODEL, IMPORT_OBSERVATION_CLEANUP_MODELS, parseHealthSelection, parseImportObservationCleanup, type HealthOptions, type ImportObservationCleanupResult } from "./importObservationCleanupAi";
 
 const fallback: ImportObservationCleanupResult = {
   health: { allergies: [], drugAllergies: [], healthIssues: ["asma"], neurodivergent: false, newOptions: { allergies: [], drugAllergies: [], healthIssues: [] } },
@@ -48,6 +48,7 @@ describe("import observation cleanup", () => {
         emergencyContact: "Tia Rosa — 11 91234-0000",
         insurance: "Unimed",
         insuranceCard: "123456789",
+        weightKg: 28.5,
       },
     }, "camper", fallback).recovered).toEqual({
       email: "mae@exemplo.com",
@@ -56,6 +57,7 @@ describe("import observation cleanup", () => {
       emergencyContact: "Tia Rosa — 11 91234-0000",
       insurance: "Unimed",
       insuranceCard: "123456789",
+      weightKg: 28.5,
     });
   });
 
@@ -64,16 +66,35 @@ describe("import observation cleanup", () => {
     expect(out.email).toBe("");
     expect(out.guardianPhone).toBe("");
     expect(out.insurance).toBe("Unimed");
+    expect(out.weightKg).toBeNull();
   });
 
   test("staff recovers only the e-mail", () => {
     const out = parseImportObservationCleanup({ recovered: { email: "tio@exemplo.com", bedroomPreference: "quer ficar com a Ana" } }, "staff", fallback).recovered;
     expect(out.email).toBe("tio@exemplo.com");
     expect(out.bedroomPreference).toBe("");
+    expect(out.weightKg).toBeNull();
   });
 
   test("no recovery block keeps everything empty", () => {
     expect(parseImportObservationCleanup({ generalNotes: "Medo do escuro." }, "camper", fallback).recovered).toEqual(EMPTY_RECOVERED_FIELDS);
+  });
+
+  test("drops weight restatements from leftover text", () => {
+    expect(dropWeightRestatements("Peso: 15kgkg | Prefere dividir quarto com: Ema", 15)).toBe("Prefere dividir quarto com: Ema");
+    expect(dropWeightRestatements("Peso: 28.5kg | Convênio médico: Amil", 28.5)).toBe("Convênio médico: Amil");
+    expect(dropWeightRestatements("Peso: 27kg", 27)).toBe("");
+    expect(dropWeightRestatements("Usa espaçador em crise", 28)).toBe("Usa espaçador em crise");
+    expect(dropWeightRestatements("Medo do escuro.")).toBe("Medo do escuro.");
+  });
+
+  test("strips Peso lines the model left in healthNotes when weightKg is already filled", () => {
+    const out = parseImportObservationCleanup({
+      healthNotes: "Peso: 15kgkg | Prefere dividir quarto com: Ema",
+      generalNotes: "Peso: 15kg",
+    }, "camper", fallback, undefined, 15);
+    expect(out.healthNotes).toBe("Prefere dividir quarto com: Ema");
+    expect(out.generalNotes).toBe("");
   });
 });
 
